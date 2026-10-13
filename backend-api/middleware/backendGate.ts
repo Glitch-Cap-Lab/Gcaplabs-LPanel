@@ -25,3 +25,31 @@ function requireBackendEnabled(backendId) {
 }
 
 module.exports = { isBackendEnabled, requireBackendEnabled };
+
+// Optional admin surfaces this install does not use. Each stays off (nav
+// hidden, routes 404) unless named in ADMIN_OPTIONAL_SURFACES, e.g.
+// ADMIN_OPTIONAL_SURFACES=agent-hub,user-groups,members,queue,backups.
+const OPTIONAL_ADMIN_SURFACES = ["agent-hub", "user-groups", "members", "queue", "backups"];
+
+function enabledAdminSurfaces(env = process.env) {
+  const requested = String(env.ADMIN_OPTIONAL_SURFACES || "")
+    .split(",")
+    .map((value) => value.trim().toLowerCase());
+  return OPTIONAL_ADMIN_SURFACES.filter((surface) => requested.includes(surface));
+}
+
+function isAdminSurfaceEnabled(surface, env = process.env) {
+  return enabledAdminSurfaces(env).includes(surface);
+}
+
+function requireAdminSurfaceEnabled(surface) {
+  return function adminSurfaceGate(_req, res, next) {
+    if (isAdminSurfaceEnabled(surface)) return next();
+    return res.status(404).json({ error: "Not found" });
+  };
+}
+
+module.exports.OPTIONAL_ADMIN_SURFACES = OPTIONAL_ADMIN_SURFACES;
+module.exports.enabledAdminSurfaces = enabledAdminSurfaces;
+module.exports.isAdminSurfaceEnabled = isAdminSurfaceEnabled;
+module.exports.requireAdminSurfaceEnabled = requireAdminSurfaceEnabled;

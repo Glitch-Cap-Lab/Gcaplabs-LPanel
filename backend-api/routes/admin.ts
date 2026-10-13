@@ -82,12 +82,19 @@ const {
 } = require("../agentProvisionLock");
 
 const router = express.Router();
-const { requireBackendEnabled } = require("../middleware/backendGate");
+const { requireBackendEnabled, requireAdminSurfaceEnabled } = require("../middleware/backendGate");
 
 router.use(requireAdmin);
 // Surfaces for deploy targets this install does not run are not mounted.
 router.use("/kubernetes-clusters", requireBackendEnabled("k8s"));
 router.use("/remote-hosts", requireBackendEnabled("remote-docker"));
+// Optional admin surfaces stay unmounted unless ADMIN_OPTIONAL_SURFACES opts in.
+// /admin/backups is deliberately NOT gated here: installation backup download
+// and restore are the recovery path for the managed backups, so only the nav
+// entry is hidden. /admin/stats also stays open (the overview page uses it).
+router.use("/agent-hub", requireAdminSurfaceEnabled("agent-hub"));
+router.use("/user-groups", requireAdminSurfaceEnabled("user-groups"));
+router.use("/dlq", requireAdminSurfaceEnabled("queue"));
 
 // Control-plane self-check (DB, queue, Kubernetes targets, secret posture,
 // fleet health, gateway exposure). Backs `nora doctor` and the admin Health

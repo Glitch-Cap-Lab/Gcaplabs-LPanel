@@ -531,7 +531,7 @@ export async function verifyWecomForOpenClawAgent(
     }
     if (expectedMode !== runtimeMode) {
       throw new Error(
-        `WeCom runtime config is active in ${runtimeMode} mode, but Nora saved ${expectedMode} mode.`,
+        `WeCom runtime config is active in ${runtimeMode} mode, but Headmaster saved ${expectedMode} mode.`,
       );
     }
     if (
@@ -539,7 +539,7 @@ export async function verifyWecomForOpenClawAgent(
       JSON.stringify(canonicalizeWecomConfig(expectedRuntimeConfig))
     ) {
       throw new Error(
-        "WeCom runtime config does not fully match Nora's saved configuration. Save again to re-apply the latest settings.",
+        "WeCom runtime config does not fully match Headmaster's saved configuration. Save again to re-apply the latest settings.",
       );
     }
 

@@ -1,4 +1,6 @@
 // @ts-nocheck
+// Optional admin surfaces are off by default; these suites exercise them.
+process.env.ADMIN_OPTIONAL_SURFACES = "agent-hub,user-groups,members,queue,backups";
 /**
  * __tests__/adminMembers.test.ts — platform-admin god view of workspaces +
  * memberships. Mocks db so we can pin the SQL shape (filters, ordering, the

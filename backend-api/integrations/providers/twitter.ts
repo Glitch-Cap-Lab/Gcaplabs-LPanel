@@ -16,7 +16,7 @@ import type { IntegrationRow } from "../types/integration";
 const TWITTER_OAUTH_TOKEN_URL = "https://api.x.com/2/oauth2/token";
 const OAUTH_TOKEN_REFRESH_SKEW_MS = 5 * 60 * 1000;
 const TWITTER_OAUTH_AUTH_HINT =
-  "Use an OAuth 2.0 user access token with tweet.read, users.read, and tweet.write scopes. The app-only Bearer Token and read-only OAuth 1.0 Access Token from Keys and Tokens are not valid for Nora's user-context Twitter/X integration.";
+  "Use an OAuth 2.0 user access token with tweet.read, users.read, and tweet.write scopes. The app-only Bearer Token and read-only OAuth 1.0 Access Token from Keys and Tokens are not valid for Headmaster's user-context Twitter/X integration.";
 
 const APP_SECRET_KEYS = new Set(["client_id", "client_secret", "refresh_token"]);
 

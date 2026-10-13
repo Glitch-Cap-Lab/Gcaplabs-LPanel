@@ -104,7 +104,7 @@
     },
     "mcp": {
       "available": false,
-      "notes": "No first-class Nora MCP bridge is wired for GitHub yet."
+      "notes": "No first-class Headmaster MCP bridge is wired for GitHub yet."
     },
     "usageHints": [
       "Use GitHub for repository inspection, code review context, pull request workflows, and issue tracking.",
@@ -141,8 +141,8 @@
     "setupGuide": {
       "steps": [
         "Sign in to GitLab and open User Settings → Access Tokens.",
-        "Click Add new token, name it (e.g. 'Nora'), pick an expiry, and select scopes.",
-        "Copy the generated token (you won't see it again) and paste it into Nora.",
+        "Click Add new token, name it (e.g. 'Headmaster'), pick an expiry, and select scopes.",
+        "Copy the generated token (you won't see it again) and paste it into Headmaster.",
         "For self-hosted GitLab, also fill in your instance URL (e.g. https://gitlab.example.com)."
       ],
       "scopes": ["api", "read_user", "read_repository", "write_repository"]
@@ -172,8 +172,8 @@
     "setupGuide": {
       "steps": [
         "Sign in to Bitbucket and open Personal settings → App passwords.",
-        "Click Create app password, name it, and select the permissions Nora needs.",
-        "Copy the generated app password (you won't see it again) and paste it into Nora.",
+        "Click Create app password, name it, and select the permissions Headmaster needs.",
+        "Copy the generated app password (you won't see it again) and paste it into Headmaster.",
         "Enter your Bitbucket username (not your email) so the basic-auth header can be built."
       ],
       "scopes": ["account:read", "repository:read", "repository:write", "pullrequest:write"]
@@ -291,7 +291,7 @@
         "In Teams, go to the channel where messages should appear.",
         "Click ⋯ next to the channel name → Manage channel → Connectors.",
         "Find Incoming Webhook, click Add, give it a name, and click Create.",
-        "Copy the generated webhook URL and paste it into Nora."
+        "Copy the generated webhook URL and paste it into Headmaster."
       ]
     },
     "mcp": { "available": false }
@@ -301,7 +301,7 @@
     "name": "WeCom",
     "icon": "message-square-share",
     "category": "communication",
-    "description": "Configure the official WeCom OpenClaw plugin for bot mode, agent mode, or both from Nora's integrations panel.",
+    "description": "Configure the official WeCom OpenClaw plugin for bot mode, agent mode, or both from Headmaster's integrations panel.",
     "authType": "custom",
     "configFields": [
       {
@@ -343,7 +343,7 @@
         "label": "Bot Display Name",
         "type": "text",
         "required": false,
-        "placeholder": "Nora Bot",
+        "placeholder": "Headmaster Bot",
         "visibleWhen": { "mode": ["bot", "both"] }
       },
       {
@@ -501,10 +501,10 @@
     "credentialsUrl": "https://github.com/WecomTeam/wecom-openclaw-plugin",
     "setupGuide": {
       "steps": [
-        "Create or identify the WeCom bot or self-built app you want Nora to configure.",
+        "Create or identify the WeCom bot or self-built app you want Headmaster to configure.",
         "For Bot mode, collect the Bot ID and Secret from the WeCom bot setup flow.",
         "For Agent mode, collect Corp ID, Corp Secret, Agent ID, Token, and Encoding AES Key from the WeCom admin console.",
-        "On running OpenClaw agents, Nora will install and configure the official WeCom plugin automatically after you connect."
+        "On running OpenClaw agents, Headmaster will install and configure the official WeCom plugin automatically after you connect."
       ]
     },
     "mcp": { "available": false }
@@ -580,9 +580,9 @@
     "capabilities": ["connect", "verify", "schedule"],
     "toolSpecs": [],
     "usageHints": [
-      "Use Email when an agent needs seamless IMAP and SMTP credentials without Nora shipping opinionated inbox-processing behavior.",
+      "Use Email when an agent needs seamless IMAP and SMTP credentials without Headmaster shipping opinionated inbox-processing behavior.",
       "Gmail and Outlook presets prefill server settings; Custom exposes the raw host and port fields.",
-      "Enable the optional cron if you want Nora to seed a scheduled agent reminder based on this mailbox connection."
+      "Enable the optional cron if you want Headmaster to seed a scheduled agent reminder based on this mailbox connection."
     ],
     "mcp": { "available": false }
   },
@@ -779,7 +779,7 @@
       "steps": [
         "Provision a Postgres user with the privileges your agent needs (avoid using the superuser).",
         "Get the host, port, database name, username, and password from your provider (RDS / Cloud SQL / Supabase / self-hosted).",
-        "The Postgres host must be reachable from the agent's network — Nora doesn't tunnel."
+        "The Postgres host must be reachable from the agent's network — Headmaster doesn't tunnel."
       ]
     },
     "mcp": {
@@ -858,7 +858,7 @@
     "setupGuide": {
       "steps": [
         "Sign in to Datadog and open Organization Settings → API Keys.",
-        "Click New Key, name it (e.g. 'Nora'), copy the value.",
+        "Click New Key, name it (e.g. 'Headmaster'), copy the value.",
         "(Optional) Generate an Application Key under Application Keys for query-time access.",
         "Set Datadog Site if you're not on us1 (e.g. 'datadoghq.eu', 'us3.datadoghq.com')."
       ]
@@ -1098,8 +1098,8 @@
       "steps": [
         "In Salesforce, open Setup → App Manager → New Connected App. Set OAuth scopes (api, refresh_token, full).",
         "Run the OAuth 2.0 Web Server flow against your org and capture the access_token + instance_url from the response.",
-        "Paste the access_token and instance_url into Nora.",
-        "Tokens expire — for production, store the refresh_token outside Nora and rotate."
+        "Paste the access_token and instance_url into Headmaster.",
+        "Tokens expire — for production, store the refresh_token outside Headmaster and rotate."
       ]
     },
     "mcp": { "available": false }
@@ -1413,10 +1413,10 @@
     },
     "mcp": {
       "available": false,
-      "notes": "No first-class Nora MCP bridge is wired for Twitter/X yet."
+      "notes": "No first-class Headmaster MCP bridge is wired for Twitter/X yet."
     },
     "usageHints": [
-      "Use an X app configured with the Nora callback URL, then authorize an X user with tweet.read, tweet.write, users.read, and offline.access scopes; do not paste the app-only Bearer Token from Keys and Tokens.",
+      "Use an X app configured with the Headmaster callback URL, then authorize an X user with tweet.read, tweet.write, users.read, and offline.access scopes; do not paste the app-only Bearer Token from Keys and Tokens.",
       "Prefer the configured default username when the operator does not specify a user.",
       "Inside a running OpenClaw agent, use the generated nora-integrations skill and nora-integration-tool command to execute connected Twitter/X tools."
     ]
@@ -1482,10 +1482,10 @@
     },
     "mcp": {
       "available": false,
-      "notes": "No first-class Nora MCP bridge is wired for LinkedIn yet."
+      "notes": "No first-class Headmaster MCP bridge is wired for LinkedIn yet."
     },
     "usageHints": [
-      "Create a LinkedIn app at https://www.linkedin.com/developers/, add the Nora callback URL as an authorized redirect, then enter the Client ID and Client Secret here. Authorize a LinkedIn user with openid, profile, email, and w_member_social scopes; do not paste a manually-issued access token.",
+      "Create a LinkedIn app at https://www.linkedin.com/developers/, add the Headmaster callback URL as an authorized redirect, then enter the Client ID and Client Secret here. Authorize a LinkedIn user with openid, profile, email, and w_member_social scopes; do not paste a manually-issued access token.",
       "Inside a running OpenClaw agent, use the generated nora-integrations skill and nora-integration-tool command to execute connected LinkedIn tools."
     ]
   },
@@ -1806,8 +1806,8 @@
     "setupGuide": {
       "steps": [
         "Sign in to Terraform Cloud and open User settings → Tokens.",
-        "Click Create an API token, name it (e.g. 'Nora'), and copy the value.",
-        "Paste the token into Nora and (optionally) enter your organization slug."
+        "Click Create an API token, name it (e.g. 'Headmaster'), and copy the value.",
+        "Paste the token into Headmaster and (optionally) enter your organization slug."
       ]
     },
     "mcp": { "available": false }
@@ -1830,8 +1830,8 @@
       "steps": [
         "Sign in to your Jenkins instance and click your username in the top-right.",
         "Open Configure → API Token → Add new Token.",
-        "Copy the generated token and paste it into Nora alongside your Jenkins URL and username.",
-        "The Jenkins URL must be reachable from the Nora deployment (RFC1918 / loopback URLs are rejected)."
+        "Copy the generated token and paste it into Headmaster alongside your Jenkins URL and username.",
+        "The Jenkins URL must be reachable from the Headmaster deployment (RFC1918 / loopback URLs are rejected)."
       ]
     },
     "mcp": { "available": false }
@@ -1853,7 +1853,7 @@
         "Sign in to CircleCI at app.circleci.com.",
         "Open User settings → Personal API Tokens.",
         "Click Create New Token, give it a name, and copy the value.",
-        "Paste the token into Nora."
+        "Paste the token into Headmaster."
       ]
     },
     "mcp": { "available": false }
@@ -1876,7 +1876,7 @@
         "Sign in to Vercel and open Account Settings → Tokens.",
         "Click Create, name the token, set an expiration, and pick the scope.",
         "If you're managing a team's projects, copy the team ID from Team Settings → General.",
-        "Paste the token (and optional team ID) into Nora."
+        "Paste the token (and optional team ID) into Headmaster."
       ]
     },
     "mcp": { "available": false }
@@ -1924,7 +1924,7 @@
         "Open your Grafana instance → Administration → Service accounts → Add service account.",
         "Pick a role (Viewer, Editor, Admin) and click Add service account token.",
         "Copy the token.",
-        "Set the Grafana URL to your instance origin (must be reachable from Nora; loopback rejected)."
+        "Set the Grafana URL to your instance origin (must be reachable from Headmaster; loopback rejected)."
       ]
     },
     "mcp": { "available": false }
@@ -1945,7 +1945,7 @@
       "steps": [
         "In Zapier, create a new Zap and pick Webhooks by Zapier as the Trigger.",
         "Choose Catch Hook as the trigger event. Zapier generates a unique webhook URL.",
-        "Copy the URL into Nora and finish the Zap."
+        "Copy the URL into Headmaster and finish the Zap."
       ]
     },
     "mcp": { "available": false }
@@ -1966,7 +1966,7 @@
       "steps": [
         "In Make, create a new Scenario and add a Webhooks → Custom webhook trigger.",
         "Click Add to generate the webhook URL.",
-        "Copy the URL into Nora and finish your scenario."
+        "Copy the URL into Headmaster and finish your scenario."
       ]
     },
     "mcp": { "available": false }
@@ -2092,7 +2092,7 @@
     "setupGuide": {
       "steps": [
         "Open id.atlassian.com/manage-profile/security/api-tokens.",
-        "Click Create API token, name it (e.g. 'Nora'), copy the value.",
+        "Click Create API token, name it (e.g. 'Headmaster'), copy the value.",
         "Enter your Confluence Cloud URL (e.g. https://acme.atlassian.net) — the same site you sign in to.",
         "Enter the email tied to your Atlassian account."
       ]
@@ -2117,7 +2117,7 @@
         "Sign in to Docker Hub at hub.docker.com.",
         "Open Account Settings → Security → Personal access tokens.",
         "Click Generate new token, set the access (Read & Write or Read only), and copy the token.",
-        "Paste the token into Nora alongside your Docker Hub username."
+        "Paste the token into Headmaster alongside your Docker Hub username."
       ]
     },
     "mcp": { "available": false }
@@ -2138,7 +2138,7 @@
     "setupGuide": {
       "steps": [
         "Generate a kubeconfig for your cluster (cloud-provider console, kubeadm, k3s, etc.).",
-        "Make sure the context inside the kubeconfig points to the user/SA Nora should authenticate as.",
+        "Make sure the context inside the kubeconfig points to the user/SA Headmaster should authenticate as.",
         "Paste the full kubeconfig YAML into the textarea (it's encrypted at rest).",
         "Optionally pin the active context by name — leave blank to use current-context from the file."
       ]

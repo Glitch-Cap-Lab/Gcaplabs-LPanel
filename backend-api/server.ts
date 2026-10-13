@@ -59,7 +59,7 @@ const {
   resolveSafeHermesDashboardTarget,
 } = require("./gatewayProxy");
 const { isGatewayAvailableStatus } = require("./agentStatus");
-const { isBackendEnabled } = require("./middleware/backendGate");
+const { isBackendEnabled, enabledAdminSurfaces } = require("./middleware/backendGate");
 const { assertRemoteHostAgentUse, toPublicRemoteHostAuthorizationError } = require("./remoteHosts");
 const { repairHermesAgentConfig } = require("./hermesUi");
 const { HERMES_EMBED_AGENT_COLUMNS, GATEWAY_EMBED_AGENT_COLUMNS } = require("./embedAgentColumns");
@@ -795,6 +795,7 @@ app.get("/config/platform", async (_req, res) => {
       enabledBackends: getEnabledBackends(),
       defaultBackend: getDefaultBackend(),
       remoteHostsEnabled: isBackendEnabled("remote-docker"),
+      adminSurfaces: enabledAdminSurfaces(),
       enabledDeployTargets: enabledDeployTargetsFromExecutionTargets(executionTargets),
       defaultDeployTarget: getDefaultDeployTarget(),
       defaultExecutionTarget: defaultExecutionTargetFromCatalog(executionTargets),

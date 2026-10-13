@@ -1,4 +1,6 @@
 // @ts-nocheck
+// Optional admin surfaces are off by default; these suites exercise them.
+process.env.ADMIN_OPTIONAL_SURFACES = "agent-hub,user-groups,members,queue,backups";
 /**
  * __tests__/remoteHostsRoutes.test.ts — operator + admin remote-host routes.
  * Mocks the remoteHosts registry so we assert routing, per-owner scoping, and
