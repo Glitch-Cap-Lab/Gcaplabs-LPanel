@@ -368,7 +368,9 @@ class HermesBackend extends DockerBackend {
       const info = await container.inspect();
       let host = "localhost";
       if (composeNetwork && info.NetworkSettings?.Networks?.[composeNetwork]) {
-        host = info.NetworkSettings.Networks[composeNetwork].IPAddress || "localhost";
+        // Store the container name, not its IP: Docker DNS resolves it on the
+        // compose network, and a reboot can hand the container a new address.
+        host = containerName;
       } else {
         host = info.NetworkSettings?.IPAddress || "localhost";
       }
