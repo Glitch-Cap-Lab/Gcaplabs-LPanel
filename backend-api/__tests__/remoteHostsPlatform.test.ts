@@ -432,7 +432,7 @@ describe("platform Remote Host schema", () => {
 
   it("appends the backfill and creator-survival migration at the migration tail", () => {
     const server = fs.readFileSync(path.join(__dirname, "..", "server.ts"), "utf8");
-    const smtpTail = server.lastIndexOf("smtp_from_name");
+    const smtpTail = server.indexOf("ADD COLUMN smtp_from_name");
     const platformMigration = server.lastIndexOf("Platform-managed Remote Hosts");
     expect(platformMigration).toBeGreaterThan(smtpTail);
     expect(server.slice(platformMigration)).toMatch(

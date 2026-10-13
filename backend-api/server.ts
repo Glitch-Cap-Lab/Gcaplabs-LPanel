@@ -2316,9 +2316,7 @@ async function migrateDB(database = db, env = process.env) {
     `DO $$ BEGIN ALTER TABLE platform_settings ADD COLUMN smtp_username TEXT NOT NULL DEFAULT ''; EXCEPTION WHEN duplicate_column THEN NULL; END $$`,
     `DO $$ BEGIN ALTER TABLE platform_settings ADD COLUMN smtp_password_encrypted TEXT; EXCEPTION WHEN duplicate_column THEN NULL; END $$`,
     `DO $$ BEGIN ALTER TABLE platform_settings ADD COLUMN smtp_from_address TEXT NOT NULL DEFAULT ''; EXCEPTION WHEN duplicate_column THEN NULL; END $$`,
-    `DO $$ BEGIN ALTER TABLE platform_settings ADD COLUMN smtp_from_name TEXT NOT NULL DEFAULT 'Headmaster'; EXCEPTION WHEN duplicate_column THEN NULL; END $$`,
-    `UPDATE platform_settings SET smtp_from_name = 'Headmaster' WHERE smtp_from_name = 'Nora'`,
-    `ALTER TABLE platform_settings ALTER COLUMN smtp_from_name SET DEFAULT 'Headmaster'`,
+    `DO $$ BEGIN ALTER TABLE platform_settings ADD COLUMN smtp_from_name TEXT NOT NULL DEFAULT 'Nora'; EXCEPTION WHEN duplicate_column THEN NULL; END $$`,
     // ─── Platform-managed Remote Hosts + direct/group grants ───────────
     // Append-only: existing remote hosts are explicitly retained as personal
     // owner-scoped rows while platform rows may outlive their creating admin.
@@ -2490,6 +2488,9 @@ async function migrateDB(database = db, env = process.env) {
     `ALTER TABLE agents ADD COLUMN IF NOT EXISTS headmaster_integration_desired_revision INTEGER NOT NULL DEFAULT 0`,
     `ALTER TABLE agents ADD COLUMN IF NOT EXISTS headmaster_integration_applied_revision INTEGER NOT NULL DEFAULT 0`,
     `ALTER TABLE agents ADD COLUMN IF NOT EXISTS headmaster_integration_deployment_status TEXT`,
+    // New installs send mail as "Headmaster". Existing rows keep their stored
+    // sender name; renaming it is a manual, owner-approved data change.
+    `ALTER TABLE platform_settings ALTER COLUMN smtp_from_name SET DEFAULT 'Headmaster'`,
   ];
 
   return runVersionedMigrations(database, migrations, {
