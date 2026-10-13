@@ -223,7 +223,7 @@ async function resolveHeadmasterLink(gcapUserId) {
     throw httpError(
       403,
       "no_admin_link",
-      "No approved Nora administrator is linked to this account.",
+      "No approved LPanel administrator is linked to this account.",
     );
   return link;
 }
@@ -240,9 +240,9 @@ async function createHeadmasterLink({ gcapUserId, noraUserId, actor }) {
   await ensureSchema();
   const { rows } = await db.query("SELECT id, email, role FROM users WHERE id = $1", [noraUserId]);
   const target = rows[0];
-  if (!target) throw httpError(404, "nora_user_missing", "The Nora user to link does not exist.");
+  if (!target) throw httpError(404, "nora_user_missing", "The LPanel user to link does not exist.");
   if (target.role !== "admin") {
-    throw httpError(400, "nora_user_not_admin", "Only existing Nora administrators can be linked.");
+    throw httpError(400, "nora_user_not_admin", "Only existing LPanel administrators can be linked.");
   }
   await db.query(
     `INSERT INTO headmaster_admin_links (gcap_user_id, nora_user_id, created_by)
@@ -393,7 +393,7 @@ async function consumeLaunchCode({ code, browserNonceCookie }) {
     throw httpError(
       403,
       "nora_user_not_admin",
-      "The linked Nora account is no longer an administrator.",
+      "The linked LPanel account is no longer an administrator.",
     );
   }
   await audit("code_consumed", "allowed", {
@@ -749,7 +749,7 @@ async function issueHeadmasterSession(res, req, identity) {
   ]);
   const user = rows[0];
   if (!user || user.role !== "admin") {
-    throw httpError(403, "nora_user_not_admin", "The linked Nora account is not an administrator.");
+    throw httpError(403, "nora_user_not_admin", "The linked LPanel account is not an administrator.");
   }
   const jti = await createHeadmasterSession({
     gcapUserId: identity.gcapUserId,

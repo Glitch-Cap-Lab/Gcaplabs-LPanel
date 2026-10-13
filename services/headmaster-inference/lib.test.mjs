@@ -66,6 +66,14 @@ function provider() {
   };
 }
 
+// Every model the fixtures route to has a (tiny) known price: the relay fails
+// closed on a model with no price.
+const TEST_PRICES = Object.freeze({
+  ...priceTableFromEnv({}),
+  "gpt-5.5": { prompt: 0.001, completion: 0.001 },
+  "gpt-5.5-pro": { prompt: 0.001, completion: 0.001 },
+});
+
 async function startService(t, overrides = {}) {
   const quota = overrides.quotaStore || createMemoryQuotaStore({ now: () => NOW });
   const service = createInferenceService({
@@ -75,6 +83,7 @@ async function startService(t, overrides = {}) {
     quotaStore: quota,
     now: () => NOW,
     logger: { info() {}, warn() {}, error() {} },
+    priceTable: TEST_PRICES,
     ...overrides,
   });
   service.server.listen(0, "127.0.0.1");
@@ -1136,11 +1145,72 @@ test("Redis quota store passes the month key, cap and request cost to its script
   const quota = createRedisQuotaStore(redis, { maxMicroUsdPerMonth: 777, now: () => Date.UTC(2026, 9, 6) });
   const reservation = await quota.acquire({ ownerId: OWNER_A, requestId: "r1", reserveOutputTokens: 5 });
   await quota.finish({ ownerId: OWNER_A, requestId: "r1", quotaDay: reservation.day, costMicroUsd: 42 });
-  assert.equal(calls[0][1], 7);
+  assert.equal(calls[0][1], 9);
   assert.equal(calls[0][8], `headmaster-inference:${OWNER_A}:month:2026-10`);
-  assert.equal(calls[0].at(-1), 777);
-  assert.equal(calls[1][1], 7);
+  assert.equal(calls[0][9], `headmaster-inference:${OWNER_A}:month-reserved:2026-10`);
+  assert.equal(calls[0][10], `headmaster-inference:${OWNER_A}:month-reservations:2026-10`);
+  assert.equal(calls[0].at(-3), 777);
+  assert.equal(calls[1][1], 9);
   assert.equal(calls[1][8], `headmaster-inference:${OWNER_A}:month:2026-10`);
   assert.equal(calls[1].at(-1), 42);
+  assert.match(calls[1][0], /HGET', KEYS\[9\]/);
   assert.match(calls[0][0], /monthly_budget/);
+});
+
+test("two concurrent requests at $1.99 -> one 429", async (t) => {
+  // $1.99 of the $2.00 allowance is already settled this month.
+  const quota = createMemoryQuotaStore({ now: () => NOW });
+  const seed = await quota.acquire({ ownerId: OWNER_A, requestId: "seed", reserveOutputTokens: 0 });
+  await quota.finish({ ownerId: OWNER_A, requestId: "seed", quotaDay: seed.day, costMicroUsd: 1_990_000 });
+  let release;
+  const gate = new Promise((resolve) => (release = resolve));
+  const f = await startService(t, {
+    quotaStore: quota,
+    // 1024 reserved output tokens x $8/1M = ~$0.008 per request: one fits, two do not.
+    priceTable: { "gpt-5.5": { prompt: 0.001, completion: 8 } },
+    fetchImpl: async () => {
+      await gate;
+      return new Response(
+        JSON.stringify({ id: "c", choices: [], usage: { prompt_tokens: 5, completion_tokens: 5, cost: 0.001 } }),
+        { status: 200, headers: { "content-type": "application/json" } },
+      );
+    },
+  });
+  const body = Buffer.from(JSON.stringify({ model: "gpt-5.5", messages: [{ role: "user", content: "hi" }] }));
+  const send = () =>
+    postCompletion(f.origin, body, makeToken({ method: "POST", path: "/v1/chat/completions", body }));
+  const first = send();
+  // Let the first request take its reservation before the second arrives.
+  await new Promise((resolve) => setTimeout(resolve, 50));
+  const second = await send();
+  assert.equal(second.status, 429);
+  assert.equal((await second.json()).error.code, "monthly_budget_exceeded");
+  release();
+  assert.equal((await first).status, 200);
+  // Settlement releases the reservation and adds only the actual cost.
+  const next = await quota.acquire({ ownerId: OWNER_A, requestId: "after", reserveOutputTokens: 0, reserveMicroUsd: 9_000 });
+  assert.equal(next.allowed, true);
+});
+
+test("a model with no known price is refused, not charged $0", async (t) => {
+  let called = false;
+  const f = await startService(t, {
+    priceTable: {},
+    fetchImpl: async () => {
+      called = true;
+      return new Response("{}", { status: 200 });
+    },
+  });
+  const body = Buffer.from(JSON.stringify({ model: "gpt-5.5", messages: [{ role: "user", content: "hi" }] }));
+  const response = await postCompletion(
+    f.origin,
+    body,
+    makeToken({ method: "POST", path: "/v1/chat/completions", body }),
+  );
+  assert.equal(response.status, 503);
+  const error = (await response.json()).error;
+  assert.equal(error.code, "model_price_unknown");
+  assert.doesNotMatch(error.message, /Hermes|Nous|Nora/i);
+  assert.equal(called, false);
+  assert.equal(f.quota.inspect(OWNER_A).active, 0);
 });

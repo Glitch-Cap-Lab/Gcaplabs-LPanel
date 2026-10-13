@@ -314,7 +314,7 @@ async function deliverEmail(channel, payload) {
   // Lazy-require so test suites that don't mock mailer don't pull it in.
   const mailer = require("./mailer");
   const subjectPrefix = channel.subjectPrefix ? `[${channel.subjectPrefix}] ` : "";
-  const subject = `${subjectPrefix}Nora alert: ${payload.eventType}`;
+  const subject = `${subjectPrefix}LPanel alert: ${payload.eventType}`;
   const lines = [
     `Event: ${payload.eventType}`,
     payload.message ? `Message: ${payload.message}` : null,
@@ -355,7 +355,7 @@ async function deliverWebhook(channel, payload) {
       method: "POST",
       headers: {
         "Content-Type": "application/json",
-        "User-Agent": "Nora-Alerts/1.0",
+        "User-Agent": "LPanel-Alerts/1.0",
         ...(channel.headers || {}),
       },
       body: JSON.stringify(payload),

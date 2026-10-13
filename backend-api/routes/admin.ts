@@ -82,8 +82,12 @@ const {
 } = require("../agentProvisionLock");
 
 const router = express.Router();
+const { requireBackendEnabled } = require("../middleware/backendGate");
 
 router.use(requireAdmin);
+// Surfaces for deploy targets this install does not run are not mounted.
+router.use("/kubernetes-clusters", requireBackendEnabled("k8s"));
+router.use("/remote-hosts", requireBackendEnabled("remote-docker"));
 
 // Control-plane self-check (DB, queue, Kubernetes targets, secret posture,
 // fleet health, gateway exposure). Backs `nora doctor` and the admin Health
@@ -134,12 +138,12 @@ function assertRuntimeSelectionAvailable(runtimeFields) {
       throw createHttpError(status.issue);
     }
     throw createHttpError(
-      `Runtime selection is not enabled. Enable runtime_family=${status.runtimeFamily}, deploy_target=${status.deployTarget}, and sandbox_profile=${status.sandboxProfile} for this Nora control plane.`,
+      `Runtime selection is not enabled. Enable runtime_family=${status.runtimeFamily}, deploy_target=${status.deployTarget}, and sandbox_profile=${status.sandboxProfile} for this LPanel control plane.`,
     );
   }
   if (!status.configured) {
     throw createHttpError(
-      status.issue || "Runtime selection is not configured for this Nora control plane.",
+      status.issue || "Runtime selection is not configured for this LPanel control plane.",
     );
   }
   return status;
@@ -1360,9 +1364,9 @@ router.post(
     }
     const result = await mailer.sendMail({
       to: recipient,
-      subject: "Nora SMTP test",
+      subject: "LPanel SMTP test",
       text:
-        "This is a test message from your Nora installation. " +
+        "This is a test message from your LPanel installation. " +
         "If you received it, platform email is wired up correctly.",
     });
     await monitoring.logEvent(
@@ -1454,7 +1458,7 @@ router.post(
 
     await monitoring.logEvent(
       "admin_release_upgrade_started",
-      `Admin started Nora upgrade to ${targetVersion}`,
+      `Admin started LPanel upgrade to ${targetVersion}`,
       adminAuditMetadata(req, {
         settings: {
           kind: "release_upgrade",

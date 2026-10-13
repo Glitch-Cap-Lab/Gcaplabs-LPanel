@@ -23,6 +23,7 @@ import { clsx } from "clsx";
 import { formatDateTime } from "../lib/format";
 import LanguageSwitcher from "./LanguageSwitcher";
 import { useI18n } from "../lib/i18n";
+import { isNavItemVisible } from "../lib/adminNav";
 
 const NAV_ITEMS = [
   { name: "Overview", icon: LayoutDashboard, href: "/" },
@@ -66,6 +67,7 @@ export default function AdminLayout({ children }) {
   const { loginPath, t } = useI18n();
   const [release, setRelease] = useState(null);
   const [systemBanner, setSystemBanner] = useState(null);
+  const [platformBackends, setPlatformBackends] = useState(null);
 
   useEffect(() => {
     let active = true;
@@ -79,6 +81,10 @@ export default function AdminLayout({ children }) {
         if (active) {
           setRelease(payload?.release || null);
           setSystemBanner(payload?.systemBanner || null);
+          setPlatformBackends({
+            enabledBackends: Array.isArray(payload?.enabledBackends) ? payload.enabledBackends : [],
+            remoteHostsEnabled: payload?.remoteHostsEnabled === true,
+          });
         }
       } catch {
         // Keep the admin shell usable if release metadata is unavailable.
@@ -134,7 +140,7 @@ export default function AdminLayout({ children }) {
           </div>
 
           <nav className="flex gap-2 overflow-x-auto px-3 py-3 md:flex-col md:px-4 md:py-5">
-            {NAV_ITEMS.map((item) => {
+            {NAV_ITEMS.filter((item) => isNavItemVisible(item.href, platformBackends)).map((item) => {
               const active = isActivePath(router.pathname, item.href);
               return (
                 <Link

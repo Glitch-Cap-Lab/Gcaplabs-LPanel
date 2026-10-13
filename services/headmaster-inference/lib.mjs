@@ -229,13 +229,23 @@ export function createInferenceService({
   const hasResolveAssignment = resolveAssignment !== undefined && resolveAssignment !== null;
   if (hasAccountProviderMap === hasResolveAssignment)
     throw new Error("inference_service_dependencies_invalid");
-  function chargedCost(usage, model, requestId) {
+  // Settled cost: the reported or table cost; if neither is known, the reserved
+  // estimate (never $0 for a request that produced tokens).
+  function chargedCost(usage, model, requestId, fallback = 0) {
     const cost = costMicroUsd(usage, model, priceTable);
     if (cost === null && (usage?.promptTokens || usage?.completionTokens)) {
       logger.warn?.("headmaster-inference cost unknown", { requestId, model });
-      return 0;
+      return fallback;
     }
     return cost ?? 0;
+  }
+  // Upper-bound estimate held against the monthly cap: prompt tokens approximated
+  // as request bytes / 4, plus the full output reservation. null = unknown price.
+  function estimatedCostMicroUsd(prepared) {
+    const price = priceTable[prepared.body?.model];
+    if (!price) return null;
+    const promptTokens = Math.ceil(Buffer.byteLength(JSON.stringify(prepared.body)) / 4);
+    return Math.ceil(promptTokens * price.prompt + prepared.reserveOutputTokens * price.completion);
   }
   if (hasAccountProviderMap && !(accountProviderMap instanceof Map))
     throw new Error("inference_service_dependencies_invalid");
@@ -473,11 +483,27 @@ export function createInferenceService({
         claims.request_id,
       );
     }
+    // Fail closed: a model with no known price cannot be held to the monthly cap.
+    const estimatedCost = estimatedCostMicroUsd(prepared);
+    if (estimatedCost === null) {
+      logger.warn?.("headmaster-inference model price unknown", {
+        requestId: claims.request_id,
+        model: prepared.body?.model,
+      });
+      return safeError(
+        res,
+        503,
+        "model_price_unknown",
+        "This model is not available on the Headmaster allowance right now.",
+        claims.request_id,
+      );
+    }
     const reservation = await quotaStore
       .acquire({
         ownerId: claims.sub,
         requestId: claims.request_id,
         reserveOutputTokens: prepared.reserveOutputTokens,
+        reserveMicroUsd: estimatedCost,
       })
       .catch((error) => {
         logger.error?.("headmaster-inference quota lookup failed", {
@@ -652,7 +678,7 @@ export function createInferenceService({
           promptTokens: usage.promptTokens,
           completionTokens: usage.completionTokens,
           totalTokens: usage.totalTokens,
-          costMicroUsd: chargedCost(usage, prepared.body?.model, claims.request_id),
+          costMicroUsd: chargedCost(usage, prepared.body?.model, claims.request_id, estimatedCost),
         })
         .catch((error) =>
           logger.error?.("headmaster-inference usage accounting failed", {

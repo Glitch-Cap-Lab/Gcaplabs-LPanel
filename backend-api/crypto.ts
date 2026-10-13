@@ -8,6 +8,13 @@ const ALGORITHM = "aes-256-gcm";
 const RAW_KEY = (process.env.ENCRYPTION_KEY || "").split("#")[0].trim();
 const ENCRYPTION_KEY = /^[0-9a-fA-F]{64}$/.test(RAW_KEY) ? RAW_KEY : null;
 
+if (!ENCRYPTION_KEY && process.env.NODE_ENV === "production") {
+  // Fail closed at startup: production must never run without encryption at rest.
+  throw new Error(
+    "ENCRYPTION_KEY is not set or invalid. Set a 64-char hex key before starting in production.",
+  );
+}
+
 if (!ENCRYPTION_KEY) {
   console.error(
     "SECURITY WARNING: ENCRYPTION_KEY is not set or invalid. " +

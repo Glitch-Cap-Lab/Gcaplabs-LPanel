@@ -517,7 +517,7 @@ router.post("/oauth-login", authLimiter, async (req, res, next) => {
       const linkedUser = linkedResult.rows[0];
       if (linkedUser && normalizeEmail(linkedUser.email) !== normalizedVerifiedEmail) {
         const error = new Error(
-          `This ${normalizedProvider} account is already linked to another Nora user email.`,
+          `This ${normalizedProvider} account is already linked to another account email.`,
         );
         error.statusCode = 409;
         throw error;
@@ -548,7 +548,7 @@ router.post("/oauth-login", authLimiter, async (req, res, next) => {
         String(existingUser.provider_id) !== String(verified.providerId)
       ) {
         const error = new Error(
-          `This ${normalizedProvider} account is linked to a different Nora user.`,
+          `This ${normalizedProvider} account is linked to a different account.`,
         );
         error.statusCode = 409;
         throw error;

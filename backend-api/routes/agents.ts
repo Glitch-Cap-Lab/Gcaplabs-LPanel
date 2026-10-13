@@ -510,7 +510,7 @@ function normalizeRequestedRuntimeFamily(value) {
 
 /**
  * Validate that the requested runtime selection is enabled and fully
- * configured on this Nora control plane.
+ * configured on this LPanel control plane.
  *
  * @param {Object} runtimeFields - Requested runtime/backend selection fields.
  * @returns {Object} Runtime-selection status when the request is allowed.
@@ -524,14 +524,14 @@ function assertRuntimeSelectionAvailable(runtimeFields) {
       throw error;
     }
     const error = new Error(
-      `Runtime selection is not enabled. Enable runtime_family=${status.runtimeFamily}, deploy_target=${status.deployTarget}, and sandbox_profile=${status.sandboxProfile} for this Nora control plane.`,
+      `Runtime selection is not enabled. Enable runtime_family=${status.runtimeFamily}, deploy_target=${status.deployTarget}, and sandbox_profile=${status.sandboxProfile} for this LPanel control plane.`,
     );
     error.statusCode = 400;
     throw error;
   }
   if (!status.configured) {
     const error = new Error(
-      status.issue || "Runtime selection is not configured for this Nora control plane.",
+      status.issue || "Runtime selection is not configured for this LPanel control plane.",
     );
     error.statusCode = 400;
     throw error;

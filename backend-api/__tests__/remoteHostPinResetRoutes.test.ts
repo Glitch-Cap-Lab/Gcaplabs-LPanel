@@ -30,6 +30,8 @@ function buildApp() {
 }
 
 beforeEach(() => {
+  // Remote-host routes are mounted only when the remote-docker target is enabled.
+  process.env.ENABLED_BACKENDS = "docker,remote-docker";
   jest.clearAllMocks();
   mockMonitoring.logEvent.mockResolvedValue(undefined);
 });

@@ -81,6 +81,8 @@ const adminToken = jwt.sign({ id: "admin-1", role: "admin" }, JWT_SECRET, { expi
 const auth = (req, token) => req.set("Authorization", `Bearer ${token}`);
 
 beforeEach(() => {
+  // Remote-host routes are mounted only when the remote-docker target is enabled.
+  process.env.ENABLED_BACKENDS = "docker,remote-docker";
   for (const fn of Object.values(mockRemoteHosts)) {
     if (typeof fn?.mockReset === "function") fn.mockReset();
   }
