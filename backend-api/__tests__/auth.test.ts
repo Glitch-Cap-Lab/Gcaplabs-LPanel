@@ -1444,7 +1444,7 @@ describe("OAuth hardening", () => {
     expect(res.body.error).toMatch(/password login/i);
   });
 
-  it("rejects OAuth login if the provider account is already linked to a different Nora email", async () => {
+  it("rejects OAuth login if the provider account is already linked to a different account email", async () => {
     process.env.OAUTH_LOGIN_ENABLED = "true";
     global.fetch.mockResolvedValueOnce(
       jsonResponse({
@@ -1479,7 +1479,7 @@ describe("OAuth hardening", () => {
     });
 
     expect(res.status).toBe(409);
-    expect(res.body.error).toMatch(/already linked to another Nora user email/i);
+    expect(res.body.error).toMatch(/already linked to another account email/i);
   });
 
   it("rejects query-string JWTs on protected routes", async () => {

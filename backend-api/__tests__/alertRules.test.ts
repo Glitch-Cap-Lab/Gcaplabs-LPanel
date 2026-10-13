@@ -323,7 +323,7 @@ describe("evaluateAndDeliver", () => {
     expect(mockMailerSendMail).toHaveBeenCalledTimes(1);
     const args = mockMailerSendMail.mock.calls[0][0];
     expect(args.to).toEqual(["ops@x.com", "sec@x.com"]);
-    expect(args.subject).toMatch(/^\[PROD\] Nora alert: agent\.error$/);
+    expect(args.subject).toMatch(/^\[PROD\] LPanel alert: agent\.error$/);
     expect(args.text).toContain("Event: agent.error");
   });
 

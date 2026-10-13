@@ -201,9 +201,13 @@ spend per account per UTC calendar month on the operator-funded path. Each
 response is charged OpenRouter's reported `usage.cost`; when a response has no
 cost, tokens x the price in `HEADMASTER_INFERENCE_PRICES_JSON`
 (`{"<model>":{"prompt":<USD per 1M>,"completion":<USD per 1M>}}`, defaulting to
-OpenRouter's published prices for the Lite and Pro models); with neither,
-the request is charged 0 and logged as `cost unknown`. Once the month's spend
-reaches the cap, the next request is refused. Past it the relay answers 429 `monthly_budget_exceeded`
+OpenRouter's published prices for the Lite and Pro models). A model with no
+entry in that table is refused before any provider call (503
+`model_price_unknown`), so nothing is charged $0. At admission the relay
+reserves an estimated cost (request bytes / 4 as prompt tokens plus the full
+output reservation, at the table price) against the month; settlement releases
+the reservation and adds the actual cost. Concurrent requests therefore cannot
+together pass the cap. Past it the relay answers 429 `monthly_budget_exceeded`
 ("You have used this month's Headmaster allowance. It resets on the 1st of next
 month (UTC)."). Personal-key traffic is not counted.
 

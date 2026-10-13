@@ -231,14 +231,14 @@ function assertRuntimeSelectionAvailable(runtimeFields) {
       throw error;
     }
     const error = new Error(
-      `Runtime selection is not enabled. Enable runtime_family=${status.runtimeFamily}, deploy_target=${status.deployTarget}, and sandbox_profile=${status.sandboxProfile} for this Nora control plane.`,
+      `Runtime selection is not enabled. Enable runtime_family=${status.runtimeFamily}, deploy_target=${status.deployTarget}, and sandbox_profile=${status.sandboxProfile} for this LPanel control plane.`,
     );
     error.statusCode = 400;
     throw error;
   }
   if (!status.configured) {
     const error = new Error(
-      status.issue || "Runtime selection is not configured for this Nora control plane.",
+      status.issue || "Runtime selection is not configured for this LPanel control plane.",
     );
     error.statusCode = 400;
     throw error;
@@ -631,7 +631,7 @@ router.post(
     }
     if (!getEnabledRuntimeFamilies(process.env).includes(runtimeFamily)) {
       return res.status(400).json({
-        error: `Runtime family "${runtimeFamily}" is not enabled on this Nora control plane. Enable it via ENABLED_RUNTIME_FAMILIES before publishing this agent.`,
+        error: `Runtime family "${runtimeFamily}" is not enabled on this LPanel control plane. Enable it via ENABLED_RUNTIME_FAMILIES before publishing this agent.`,
       });
     }
 
@@ -831,7 +831,7 @@ router.post(
     }
     if (!getEnabledRuntimeFamilies(process.env).includes(listingFamily)) {
       return res.status(400).json({
-        error: `Runtime family "${listingFamily}" is not enabled on this Nora control plane. Enable it via ENABLED_RUNTIME_FAMILIES before installing this template.`,
+        error: `Runtime family "${listingFamily}" is not enabled on this LPanel control plane. Enable it via ENABLED_RUNTIME_FAMILIES before installing this template.`,
       });
     }
 

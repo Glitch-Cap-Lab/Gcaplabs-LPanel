@@ -460,7 +460,19 @@ describe("admin routes", () => {
     expect(res.status).toBe(403);
   });
 
+  it("does not mount Kubernetes or Remote Hosts admin routes when those targets are disabled", async () => {
+    process.env.ENABLED_BACKENDS = "docker";
+    const k8s = await withToken(
+      request(app).get("/admin/kubernetes-clusters/cluster-1/policy-settings"),
+      adminToken,
+    );
+    expect(k8s.status).toBe(404);
+    const hosts = await withToken(request(app).get("/admin/remote-hosts"), adminToken);
+    expect(hosts.status).toBe(404);
+  });
+
   it("returns Kubernetes policy settings for admins", async () => {
+    process.env.ENABLED_BACKENDS = "docker,k8s";
     const kubernetesClustersModule = require("../kubernetesClusters");
     kubernetesClustersModule.getKubernetesClusterPolicySettings.mockResolvedValueOnce({
       id: "aks-eastus2",
@@ -508,6 +520,7 @@ describe("admin routes", () => {
   });
 
   it("updates Kubernetes policy settings, seeds queued status, and enqueues reconcile", async () => {
+    process.env.ENABLED_BACKENDS = "docker,k8s";
     const kubernetesClustersModule = require("../kubernetesClusters");
     const monitoringModule = require("../monitoring");
     kubernetesClustersModule.updateKubernetesClusterPolicySettings.mockResolvedValueOnce({
@@ -582,6 +595,7 @@ describe("admin routes", () => {
   });
 
   it("surfaces Kubernetes policy-settings validation errors", async () => {
+    process.env.ENABLED_BACKENDS = "docker,k8s";
     const kubernetesClustersModule = require("../kubernetesClusters");
     const error = new Error("openclaw ingress rules may only target ports 18789 and 9090.");
     error.statusCode = 400;

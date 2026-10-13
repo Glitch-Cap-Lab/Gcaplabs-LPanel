@@ -110,7 +110,7 @@ describe("OpenAPI document", () => {
 
   it("is a structurally sane 3.1 document", () => {
     expect(doc.openapi).toBe("3.1.0");
-    expect(doc.info.title).toMatch(/Nora/);
+    expect(doc.info.title).toMatch(/LPanel/);
     expect(doc.servers[0].url).toBe("/api");
     expect(Object.keys(doc.paths).length).toBeGreaterThan(100);
     expect(doc.components.securitySchemes.bearerAuth.scheme).toBe("bearer");

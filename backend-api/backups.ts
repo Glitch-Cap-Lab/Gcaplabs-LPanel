@@ -237,7 +237,7 @@ function encryptBackupBuffer(buffer) {
 function decryptBackupBuffer(buffer) {
   const text = buffer.toString("utf8", 0, Math.min(buffer.length, 256));
   if (!text.startsWith(`${BACKUP_ENCRYPTION_MAGIC}\n`)) {
-    throw createHttpError("Backup archive is not encrypted with the expected Nora format", 500);
+    throw createHttpError("Backup archive is not encrypted with the expected LPanel format", 500);
   }
   const firstNewline = buffer.indexOf(0x0a);
   const secondNewline = buffer.indexOf(0x0a, firstNewline + 1);
@@ -1798,7 +1798,7 @@ function assertRuntimeSelectionAvailable(runtimeFields) {
   const status = getRuntimeSelectionStatus(runtimeFields);
   if (!status.enabled || !status.configured) {
     throw createHttpError(
-      status.issue || "Runtime selection is not enabled for this Nora control plane.",
+      status.issue || "Runtime selection is not enabled for this LPanel control plane.",
       400,
     );
   }

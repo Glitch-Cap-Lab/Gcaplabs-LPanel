@@ -20,6 +20,7 @@ import { randomBytes, randomUUID } from "node:crypto";
 import { ASSERTION_AUDIENCE, sha256, signAssertion } from "./assertion.mjs";
 import { createInferenceService } from "./lib.mjs";
 import { createMemoryQuotaStore } from "./quota.mjs";
+import { priceTableFromEnv } from "./policy.mjs";
 import {
   allowedModelsForProvider,
   parseAccountProviderMap,
@@ -98,6 +99,11 @@ async function startService(
       return provider;
     },
     quotaStore: quota,
+    // The relay refuses unpriced models; price every model this suite routes to.
+    priceTable: {
+      ...Object.fromEntries(LIVE_MODELS.map((m) => [m, { prompt: 1, completion: 1 }])),
+      ...priceTableFromEnv(process.env),
+    },
     ...(fetchImpl ? { fetchImpl } : {}),
     requestTimeoutMs: 60_000,
     logger: { info() {}, warn() {}, error() {} },

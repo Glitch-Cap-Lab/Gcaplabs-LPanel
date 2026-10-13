@@ -63,10 +63,10 @@ function buildOpenApiDocument() {
   return {
     openapi: "3.1.0",
     info: {
-      title: "Nora Control Plane API",
+      title: "LPanel Control Plane API",
       version: process.env.NORA_VERSION || "1.10",
       description:
-        "Operator API for the Nora self-hosted agent ops platform: deploy and manage agent runtimes, budgets, monitoring, and LLM provider keys. Authenticate with a session JWT or a scoped workspace API key (`nora_…`).",
+        "Operator API for the LPanel control plane: deploy and manage agent runtimes, budgets, monitoring, and LLM provider keys. Authenticate with a session JWT or a scoped workspace API key (`nora_…`).",
       license: { name: "Apache-2.0", url: "https://www.apache.org/licenses/LICENSE-2.0" },
     },
     servers: [

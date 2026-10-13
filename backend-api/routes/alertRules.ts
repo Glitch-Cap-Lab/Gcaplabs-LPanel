@@ -93,7 +93,7 @@ router.post("/:ruleId/test", requireWorkspaceRole("admin", "id"), async (req, re
       type: rule.eventPattern.endsWith(".*")
         ? `${rule.eventPattern.slice(0, -2)}.test`
         : rule.eventPattern,
-      message: `Nora test alert from rule "${rule.name}"`,
+      message: `LPanel test alert from rule "${rule.name}"`,
       metadata: { workspace: { id: req.params.id }, test: true },
     };
     await alertRules.evaluateAndDeliver(fakeEvent.type, fakeEvent.message, fakeEvent.metadata);

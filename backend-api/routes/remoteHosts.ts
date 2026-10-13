@@ -12,8 +12,11 @@ const monitoring = require("../monitoring");
 const { asyncHandler } = require("../middleware/errorHandler");
 const { requireSession } = require("../middleware/auth");
 
+const { requireBackendEnabled } = require("../middleware/backendGate");
+
 const router = express.Router();
 router.use(requireSession);
+router.use(requireBackendEnabled("remote-docker"));
 
 /**
  * Load a caller-owned host, returning not-found semantics for foreign hosts.

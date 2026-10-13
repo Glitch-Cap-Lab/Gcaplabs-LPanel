@@ -59,6 +59,7 @@ const {
   resolveSafeHermesDashboardTarget,
 } = require("./gatewayProxy");
 const { isGatewayAvailableStatus } = require("./agentStatus");
+const { isBackendEnabled } = require("./middleware/backendGate");
 const { assertRemoteHostAgentUse, toPublicRemoteHostAuthorizationError } = require("./remoteHosts");
 const { repairHermesAgentConfig } = require("./hermesUi");
 const { HERMES_EMBED_AGENT_COLUMNS, GATEWAY_EMBED_AGENT_COLUMNS } = require("./embedAgentColumns");
@@ -793,6 +794,7 @@ app.get("/config/platform", async (_req, res) => {
       billingEnabled: billing.BILLING_ENABLED,
       enabledBackends: getEnabledBackends(),
       defaultBackend: getDefaultBackend(),
+      remoteHostsEnabled: isBackendEnabled("remote-docker"),
       enabledDeployTargets: enabledDeployTargetsFromExecutionTargets(executionTargets),
       defaultDeployTarget: getDefaultDeployTarget(),
       defaultExecutionTarget: defaultExecutionTargetFromCatalog(executionTargets),
@@ -897,7 +899,7 @@ app.get("/api-docs", (req, res) => {
     .send(
       [
         "<!doctype html>",
-        "<html><head><title>Nora API Reference</title>",
+        "<html><head><title>LPanel API Reference</title>",
         '<meta charset="utf-8"/><meta name="viewport" content="width=device-width, initial-scale=1"/>',
         "</head><body>",
         '<script id="api-reference" data-url="api.json"></script>',
@@ -2313,7 +2315,9 @@ async function migrateDB(database = db, env = process.env) {
     `DO $$ BEGIN ALTER TABLE platform_settings ADD COLUMN smtp_username TEXT NOT NULL DEFAULT ''; EXCEPTION WHEN duplicate_column THEN NULL; END $$`,
     `DO $$ BEGIN ALTER TABLE platform_settings ADD COLUMN smtp_password_encrypted TEXT; EXCEPTION WHEN duplicate_column THEN NULL; END $$`,
     `DO $$ BEGIN ALTER TABLE platform_settings ADD COLUMN smtp_from_address TEXT NOT NULL DEFAULT ''; EXCEPTION WHEN duplicate_column THEN NULL; END $$`,
-    `DO $$ BEGIN ALTER TABLE platform_settings ADD COLUMN smtp_from_name TEXT NOT NULL DEFAULT 'Nora'; EXCEPTION WHEN duplicate_column THEN NULL; END $$`,
+    `DO $$ BEGIN ALTER TABLE platform_settings ADD COLUMN smtp_from_name TEXT NOT NULL DEFAULT 'Headmaster'; EXCEPTION WHEN duplicate_column THEN NULL; END $$`,
+    `UPDATE platform_settings SET smtp_from_name = 'Headmaster' WHERE smtp_from_name = 'Nora'`,
+    `ALTER TABLE platform_settings ALTER COLUMN smtp_from_name SET DEFAULT 'Headmaster'`,
     // ─── Platform-managed Remote Hosts + direct/group grants ───────────
     // Append-only: existing remote hosts are explicitly retained as personal
     // owner-scoped rows while platform rows may outlive their creating admin.

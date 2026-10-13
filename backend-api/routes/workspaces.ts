@@ -310,9 +310,9 @@ async function maybeSendInvitationEmail(req, invitation) {
   const inviterEmail = req.user?.email || "the workspace admin";
   const result = await mailer.sendMail({
     to: invitation.email,
-    subject: `You're invited to ${workspaceName} on Nora`,
+    subject: `You're invited to ${workspaceName} on Headmaster`,
     text:
-      `${inviterEmail} invited you to join "${workspaceName}" on Nora as ${invitation.role}.\n\n` +
+      `${inviterEmail} invited you to join "${workspaceName}" on Headmaster as ${invitation.role}.\n\n` +
       `Open this link to accept the invitation:\n${acceptUrl}\n\n` +
       `This invitation expires on ${new Date(invitation.expiresAt).toUTCString()}.`,
     replyTo: req.user?.email || undefined,
