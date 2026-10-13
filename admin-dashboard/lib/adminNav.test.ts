@@ -15,3 +15,11 @@ test("Kubernetes and Remote Hosts follow the backend catalog", () => {
   assert.equal(isNavItemVisible("/kubernetes", all), true);
   assert.equal(isNavItemVisible("/remote-hosts", all), true);
 });
+
+test("optional admin surfaces are hidden unless opted in", () => {
+  const off = { enabledBackends: ["docker"], adminSurfaces: [] };
+  for (const href of ["/agent-hub", "/user-groups", "/members", "/queue", "/backups"]) {
+    assert.equal(isNavItemVisible(href, off), false);
+    assert.equal(isNavItemVisible(href, { adminSurfaces: [href.slice(1)] }), true);
+  }
+});

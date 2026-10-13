@@ -1,4 +1,6 @@
 // @ts-nocheck
+// Optional admin surfaces are off by default; these suites exercise them.
+process.env.ADMIN_OPTIONAL_SURFACES = "agent-hub,user-groups,members,queue,backups";
 const fs = require("fs");
 const os = require("os");
 const path = require("path");
@@ -469,6 +471,21 @@ describe("admin routes", () => {
     expect(k8s.status).toBe(404);
     const hosts = await withToken(request(app).get("/admin/remote-hosts"), adminToken);
     expect(hosts.status).toBe(404);
+  });
+
+  it("does not mount optional admin surfaces without an opt-in, but keeps backups", async () => {
+    const saved = process.env.ADMIN_OPTIONAL_SURFACES;
+    process.env.ADMIN_OPTIONAL_SURFACES = "";
+    try {
+      for (const path of ["/admin/agent-hub", "/admin/user-groups", "/admin/dlq"]) {
+        const res = await withToken(request(app).get(path), adminToken);
+        expect(res.status).toBe(404);
+      }
+      const backups = await withToken(request(app).get("/admin/backups"), adminToken);
+      expect(backups.status).not.toBe(404);
+    } finally {
+      process.env.ADMIN_OPTIONAL_SURFACES = saved;
+    }
   });
 
   it("returns Kubernetes policy settings for admins", async () => {

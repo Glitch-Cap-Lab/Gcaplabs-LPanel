@@ -84,6 +84,7 @@ export default function AdminLayout({ children }) {
           setPlatformBackends({
             enabledBackends: Array.isArray(payload?.enabledBackends) ? payload.enabledBackends : [],
             remoteHostsEnabled: payload?.remoteHostsEnabled === true,
+            adminSurfaces: Array.isArray(payload?.adminSurfaces) ? payload.adminSurfaces : [],
           });
         }
       } catch {

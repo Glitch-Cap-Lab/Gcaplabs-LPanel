@@ -15,6 +15,7 @@
 const express = require("express");
 const db = require("../db");
 const { requireAdmin, requireSession } = require("../middleware/auth");
+const { requireAdminSurfaceEnabled } = require("../middleware/backendGate");
 
 const router = express.Router();
 
@@ -22,7 +23,7 @@ const router = express.Router();
 // such as /admin/doctor can continue to the main admin router. Mount-wide
 // guards here previously intercepted every /admin request before route match.
 router.use("/workspaces", requireSession, requireAdmin);
-router.use("/members", requireSession, requireAdmin);
+router.use("/members", requireSession, requireAdmin, requireAdminSurfaceEnabled("members"));
 
 router.get("/workspaces", async (_req, res, next) => {
   try {
