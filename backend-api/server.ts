@@ -1344,6 +1344,7 @@ app.use("/billing", require("./routes/billing"));
 // god view.
 app.use("/admin/fleet/migrations", require("./routes/fleetMigrations"));
 app.use("/admin/account-deletions", require("./routes/adminAccountDeletions"));
+app.use("/admin/headmaster-accounts", require("./routes/adminHeadmasterAccounts"));
 app.use("/admin", require("./routes/adminMembers"));
 app.use("/admin", require("./routes/admin"));
 
