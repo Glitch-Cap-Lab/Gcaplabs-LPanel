@@ -128,6 +128,20 @@ async function authenticateToken(req, res, next) {
             .json({ error: "Session has been revoked", code: "session_revoked" });
         }
       }
+      // Password/OAuth sessions carry a session version: logout, password
+      // change, role change and admin sign-out bump it server-side.
+      if (!decoded.hm) {
+        const { checkSession } = require("../sessionVersion");
+        const verdict = await checkSession(require("../db"), decoded);
+        if (!verdict.ok) {
+          if (verdict.code === "session_check_unavailable") {
+            return res.status(503).json({ error: "Session check unavailable", code: verdict.code });
+          }
+          return res
+            .status(401)
+            .json({ error: "Session has been revoked", code: "session_revoked" });
+        }
+      }
       req.user = decoded;
       return next();
     }

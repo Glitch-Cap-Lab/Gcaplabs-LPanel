@@ -1,6 +1,7 @@
 // @ts-nocheck
 const express = require("express");
 const db = require("../db");
+const { revokeUserSessions } = require("../sessionVersion");
 const billing = require("../billing");
 const monitoring = require("../monitoring");
 const agentHubStore = require("../agentHubStore");
@@ -1542,6 +1543,30 @@ router.get(
   }),
 );
 
+// POST /admin/users/:id/sessions/revoke — sign the user out everywhere.
+router.post(
+  "/users/:id/sessions/revoke",
+  asyncHandler(async (req, res) => {
+    const existing = await db.query("SELECT id, email, role FROM users WHERE id = $1", [
+      req.params.id,
+    ]);
+    const user = existing.rows[0];
+    if (!user) return res.status(404).json({ error: "User not found" });
+    res.locals.auditContext = buildUserContext(user);
+    await revokeUserSessions(db, req.params.id);
+    await headmasterLaunch.revokeHeadmasterSessionsBestEffort({
+      noraUserId: req.params.id,
+      reason: "nora_admin_sign_out",
+    });
+    await monitoring.logEvent(
+      "admin_user_sessions_revoked",
+      `Admin signed out ${user.email} everywhere`,
+      adminUserAuditMetadata(req, user, { result: { revoked: true } }),
+    );
+    res.json({ success: true });
+  }),
+);
+
 router.put(
   "/users/:id/role",
   asyncHandler(async (req, res) => {
@@ -1565,6 +1590,11 @@ router.put(
       "UPDATE users SET role = $1 WHERE id = $2 RETURNING id, email, role",
       [role, req.params.id],
     );
+    // Any role change ends the user's password/OAuth sessions so the old
+    // role claim cannot outlive the change.
+    if (role !== user.role) {
+      await revokeUserSessions(db, req.params.id);
+    }
     // A demotion must immediately end any Headmaster-launched privileged
     // session for this user, including live WebSockets.
     if (role !== "admin") {

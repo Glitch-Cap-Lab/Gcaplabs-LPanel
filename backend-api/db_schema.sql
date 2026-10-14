@@ -15,6 +15,7 @@ CREATE TABLE IF NOT EXISTS users (
   provider TEXT,
   provider_id TEXT,
   stripe_customer_id TEXT,
+  session_version INTEGER NOT NULL DEFAULT 0,
   created_at TIMESTAMP DEFAULT NOW()
 );
 
