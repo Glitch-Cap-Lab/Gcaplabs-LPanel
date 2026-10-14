@@ -623,7 +623,7 @@ describe("POST /auth/login", () => {
   it("returns token on valid login", async () => {
     const hash = await bcrypt.hash("correctpassword", 10);
     mockDb.query.mockResolvedValueOnce({
-      rows: [{ id: "uuid-1", email: "user@example.com", password_hash: hash, role: "user" }],
+      rows: [{ id: "uuid-1", email: "user@example.com", password_hash: hash, role: "user", session_version: 0 }],
     });
 
     const res = await request(app)
@@ -639,7 +639,7 @@ describe("POST /auth/login", () => {
   it("sets an HttpOnly SameSite=Lax auth cookie on successful login", async () => {
     const hash = await bcrypt.hash("correctpassword", 10);
     mockDb.query.mockResolvedValueOnce({
-      rows: [{ id: "uuid-1", email: "user@example.com", password_hash: hash, role: "user" }],
+      rows: [{ id: "uuid-1", email: "user@example.com", password_hash: hash, role: "user", session_version: 0 }],
     });
 
     const res = await request(app)
@@ -1172,7 +1172,7 @@ describe("OAuth hardening", () => {
       .mockResolvedValueOnce({ rows: [] })
       .mockResolvedValueOnce({ rows: [{ has_users: true }] })
       .mockResolvedValueOnce({
-        rows: [{ id: "user-1", email: "user@example.com", role: "user", name: "Google User" }],
+        rows: [{ id: "user-1", email: "user@example.com", role: "user", name: "Google User", session_version: 0 }],
       })
       .mockResolvedValueOnce({ rows: [] });
 
@@ -1271,6 +1271,8 @@ describe("OAuth hardening", () => {
       provider: "google",
       provider_id: "google-sub-existing",
       password_hash: null,
+      // Already signed out once: a token carrying version 0 would be rejected.
+      session_version: 4,
     };
     mockDb.query
       .mockResolvedValueOnce({ rows: [] })
@@ -1284,6 +1286,7 @@ describe("OAuth hardening", () => {
             email: existingUser.email,
             role: existingUser.role,
             name: existingUser.name,
+            session_version: existingUser.session_version,
           },
         ],
       })
@@ -1302,6 +1305,7 @@ describe("OAuth hardening", () => {
       id: existingUser.id,
       email: existingUser.email,
       role: existingUser.role,
+      sv: existingUser.session_version,
     });
   });
 
@@ -1323,7 +1327,7 @@ describe("OAuth hardening", () => {
       .mockResolvedValueOnce({ rows: [] })
       .mockResolvedValueOnce({ rows: [{ has_users: false }] })
       .mockResolvedValueOnce({
-        rows: [{ id: "user-1", email: "first@example.com", role: "admin", name: "First Admin" }],
+        rows: [{ id: "user-1", email: "first@example.com", role: "admin", name: "First Admin", session_version: 0 }],
       })
       .mockResolvedValueOnce({ rows: [] });
 
@@ -1378,7 +1382,7 @@ describe("OAuth hardening", () => {
       .mockResolvedValueOnce({ rows: [] })
       .mockResolvedValueOnce({ rows: [{ has_users: true }] })
       .mockResolvedValueOnce({
-        rows: [{ id: "user-2", email: "octo@example.com", role: "user", name: "Octo Cat" }],
+        rows: [{ id: "user-2", email: "octo@example.com", role: "user", name: "Octo Cat", session_version: 0 }],
       });
 
     const res = await request(app).post("/auth/oauth-login").send({

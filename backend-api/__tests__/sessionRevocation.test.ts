@@ -27,9 +27,11 @@ const mockDb = {
   }),
 };
 jest.mock("../db", () => mockDb);
+jest.unmock("../sessionVersion");
 
 const { authenticateToken } = require("../middleware/auth");
 const { buildSessionPayload, revokeUserSessions } = require("../sessionVersion");
+const authRoutes = require("../routes/auth");
 
 function app() {
   const a = express();
@@ -94,5 +96,65 @@ describe("server-side session revocation", () => {
     expect(users.get("u1").session_version).toBe(2);
     const res = await request(app()).get("/me").set("Authorization", `Bearer ${token}`);
     expect(res.status).toBe(401);
+  });
+
+  it("refuses to mint a session from a row read without session_version", () => {
+    expect(() => buildSessionPayload({ id: "u1", email: "a@x.test", role: "admin" })).toThrow(
+      /session_version/,
+    );
+  });
+
+  it("ends a legacy token without a version claim once the user is revoked", async () => {
+    const legacy = jwt.sign({ id: "u1", email: "a@x.test", role: "admin" }, process.env.JWT_SECRET, {
+      expiresIn: "7d",
+      algorithm: "HS256",
+    });
+    const ok = await request(app()).get("/me").set("Authorization", `Bearer ${legacy}`);
+    expect(ok.status).toBe(200);
+
+    await revokeUserSessions(mockDb, "u1");
+    const res = await request(app()).get("/me").set("Authorization", `Bearer ${legacy}`);
+    expect(res.status).toBe(401);
+  });
+
+  it("ends a legacy admin token after demotion", async () => {
+    const legacy = jwt.sign({ id: "u1", email: "a@x.test", role: "admin" }, process.env.JWT_SECRET, {
+      expiresIn: "7d",
+      algorithm: "HS256",
+    });
+    users.get("u1").role = "user";
+    const res = await request(app()).get("/me").set("Authorization", `Bearer ${legacy}`);
+    expect(res.status).toBe(401);
+  });
+});
+
+describe("POST /auth/logout", () => {
+  function logoutApp() {
+    const a = express();
+    a.use(express.json());
+    a.use("/auth", authRoutes);
+    return a;
+  }
+
+  it("revokes the session so a copied token stops working", async () => {
+    const token = login("u1");
+    const res = await request(logoutApp()).post("/auth/logout").set("Authorization", `Bearer ${token}`);
+    expect(res.status).toBe(200);
+    const after = await request(app()).get("/me").set("Authorization", `Bearer ${token}`);
+    expect(after.status).toBe(401);
+  });
+
+  it("does not report success when the revocation cannot be written", async () => {
+    const token = login("u1");
+    mockDb.failNext = true;
+    const res = await request(logoutApp()).post("/auth/logout").set("Authorization", `Bearer ${token}`);
+    expect(res.status).toBe(503);
+    const after = await request(app()).get("/me").set("Authorization", `Bearer ${token}`);
+    expect(after.status).toBe(200);
+  });
+
+  it("still succeeds for an invalid token", async () => {
+    const res = await request(logoutApp()).post("/auth/logout").set("Authorization", "Bearer nope");
+    expect(res.status).toBe(200);
   });
 });
