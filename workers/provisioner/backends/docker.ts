@@ -1,5 +1,6 @@
 // @ts-nocheck
 const ProvisionerBackend = require("./interface");
+const { AGENT_MEMORY_CHOICES_MB } = require("../../../agent-runtime/lib/memoryLimits");
 const { demuxDockerExecStream } = require("./dockerExecStream");
 const crypto = require("crypto");
 const path = require("path");
@@ -1335,7 +1336,7 @@ class DockerBackend extends ProvisionerBackend {
    */
   async setMemory(containerId, ramMb) {
     const mb = Number(ramMb);
-    if (!Number.isInteger(mb) || mb < 512) {
+    if (!AGENT_MEMORY_CHOICES_MB.includes(mb)) {
       throw new Error(`Invalid memory limit: ${ramMb}`);
     }
     const bytes = mb * 1024 * 1024;
@@ -1382,7 +1383,9 @@ class DockerBackend extends ProvisionerBackend {
     if (info && info.ExitCode !== 0) {
       throw new Error(`Bot screen gate update failed (exit ${info.ExitCode})`);
     }
-    console.log(`[docker] Container ${containerId} bot screen gate ${enabled ? "enabled" : "disabled"}`);
+    console.log(
+      `[docker] Container ${containerId} bot screen gate ${enabled ? "enabled" : "disabled"}`,
+    );
     return { bot_screen: enabled };
   }
 
