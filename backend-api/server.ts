@@ -1870,7 +1870,6 @@ async function migrateDB(database = db, env = process.env) {
     `CREATE INDEX IF NOT EXISTS idx_usage_metrics_token_model ON usage_metrics(metric_type, (metadata->>'model'), recorded_at)`,
     `CREATE INDEX IF NOT EXISTS idx_usage_metrics_token_source ON usage_metrics(metric_type, (metadata->>'source'), recorded_at)`,
     `DO $$ BEGIN ALTER TABLE users ADD COLUMN avatar TEXT; EXCEPTION WHEN duplicate_column THEN NULL; END $$`,
-    `DO $$ BEGIN ALTER TABLE users ADD COLUMN session_version INTEGER NOT NULL DEFAULT 0; EXCEPTION WHEN duplicate_column THEN NULL; END $$`,
     `DO $$ BEGIN ALTER TABLE users ADD COLUMN preferred_locale TEXT; EXCEPTION WHEN duplicate_column THEN NULL; END $$`,
     `DO $$ BEGIN ALTER TABLE users ADD COLUMN agent_limit_override INTEGER; EXCEPTION WHEN duplicate_column THEN NULL; END $$`,
     `DO $$ BEGIN ALTER TABLE users ADD COLUMN managed_backups_enabled_override BOOLEAN; EXCEPTION WHEN duplicate_column THEN NULL; END $$`,
@@ -2492,6 +2491,8 @@ async function migrateDB(database = db, env = process.env) {
     // New installs send mail as "Headmaster". Existing rows keep their stored
     // sender name; renaming it is a manual, owner-approved data change.
     `ALTER TABLE platform_settings ALTER COLUMN smtp_from_name SET DEFAULT 'Headmaster'`,
+    // Session revocation (PR 63): bumped on sign-out, password change and demotion.
+    `DO $$ BEGIN ALTER TABLE users ADD COLUMN session_version INTEGER NOT NULL DEFAULT 0; EXCEPTION WHEN duplicate_column THEN NULL; END $$`,
   ];
 
   return runVersionedMigrations(database, migrations, {
