@@ -23,6 +23,7 @@ const config: Config = {
     ],
   },
   transformIgnorePatterns: [`/node_modules/(?!(${esmOnlyDeps.join("|")})/)`],
+  setupFiles: ["<rootDir>/__tests__/support/sessionCheckStub.js"],
   testTimeout: 10000,
 };
 

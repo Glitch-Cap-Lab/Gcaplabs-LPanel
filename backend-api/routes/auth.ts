@@ -570,7 +570,7 @@ router.post("/oauth-login", authLimiter, async (req, res, next) => {
            name = COALESCE(EXCLUDED.name, users.name),
            provider = COALESCE(EXCLUDED.provider, users.provider),
            provider_id = COALESCE(EXCLUDED.provider_id, users.provider_id)
-         RETURNING id, email, role, name`,
+         RETURNING id, email, role, name, session_version`,
         [
           normalizedVerifiedEmail,
           verified.name || name || null,
@@ -780,18 +780,26 @@ router.post("/session-upgrade", (req, res) => {
 router.post("/logout", async (req, res) => {
   clearAuthCookie(res, req);
   // Revoke server-side too, so a copied token stops working after logout.
-  // Only a valid, versioned session for this user can trigger the bump.
+  // Only a valid session for this user can trigger the bump.
   const { extractExplicitAuth, isSessionTokenPayload } = require("../middleware/auth");
   const explicit = extractExplicitAuth(req);
   const token = (explicit && explicit.source === "authorization" && explicit.token) || readAuthCookie(req);
-  if (token && !token.startsWith("nora_")) {
+  if (!token || token.startsWith("nora_")) return res.json({ success: true });
+  let decoded;
+  try {
+    decoded = jwt.verify(token, process.env.JWT_SECRET, { algorithms: ["HS256"] });
+  } catch {
+    // Invalid or expired tokens have nothing to revoke.
+    return res.json({ success: true });
+  }
+  if (isSessionTokenPayload(decoded) && !decoded.hm) {
     try {
-      const decoded = jwt.verify(token, process.env.JWT_SECRET, { algorithms: ["HS256"] });
-      if (isSessionTokenPayload(decoded) && decoded.sv !== undefined && !decoded.hm) {
-        await revokeUserSessions(db, decoded.id);
-      }
+      await revokeUserSessions(db, decoded.id);
     } catch {
-      // Invalid or expired tokens have nothing to revoke.
+      // The cookie is gone, but a copied token would still work: say so.
+      return res
+        .status(503)
+        .json({ error: "Signed out here, but other copies of this session could not be ended. Try again." });
     }
   }
   res.json({ success: true });
