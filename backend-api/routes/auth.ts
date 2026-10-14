@@ -6,7 +6,8 @@ const rateLimit = require("express-rate-limit");
 const db = require("../db");
 const { allowsFirstAdminSignupClaim, isSignupEnabled } = require("../bootstrapAdmin");
 const { authenticateToken, requireSession } = require("../middleware/auth");
-const { setAuthCookie, clearAuthCookie } = require("../authCookie");
+const { setAuthCookie, clearAuthCookie, readAuthCookie } = require("../authCookie");
+const { buildSessionPayload, revokeUserSessions } = require("../sessionVersion");
 const { normalizeEmail, normalizeProvider, verifyOAuthIdentity } = require("../oauthProviders");
 const {
   getLanguageSettings,
@@ -473,7 +474,7 @@ router.post("/login", authLimiter, async (req, res) => {
     }
     if (!passwordOk) return res.status(401).json({ error: "Invalid email or password" });
     const token = jwt.sign(
-      { id: user.id, email: user.email, role: user.role },
+      buildSessionPayload(user),
       process.env.JWT_SECRET,
       { expiresIn: "7d", algorithm: "HS256" },
     );
@@ -511,7 +512,7 @@ router.post("/oauth-login", authLimiter, async (req, res, next) => {
 
     const user = await withUserCreationLock(async (client) => {
       const linkedResult = await client.query(
-        "SELECT id, email, role, name, provider, provider_id, password_hash FROM users WHERE provider = $1 AND provider_id = $2",
+        "SELECT id, email, role, name, provider, provider_id, password_hash, session_version FROM users WHERE provider = $1 AND provider_id = $2",
         [normalizedProvider, verified.providerId],
       );
       const linkedUser = linkedResult.rows[0];
@@ -524,7 +525,7 @@ router.post("/oauth-login", authLimiter, async (req, res, next) => {
       }
 
       const existingResult = await client.query(
-        "SELECT id, email, role, name, provider, provider_id, password_hash FROM users WHERE email = $1",
+        "SELECT id, email, role, name, provider, provider_id, password_hash, session_version FROM users WHERE email = $1",
         [normalizedVerifiedEmail],
       );
       const existingUser = existingResult.rows[0];
@@ -582,7 +583,7 @@ router.post("/oauth-login", authLimiter, async (req, res, next) => {
     });
 
     const token = jwt.sign(
-      { id: user.id, email: user.email, role: user.role },
+      buildSessionPayload(user),
       process.env.JWT_SECRET,
       { expiresIn: "7d", algorithm: "HS256" },
     );
@@ -626,6 +627,19 @@ router.patch("/password", authenticateToken, requireSession, async (req, res, ne
     if (!ok) return res.status(401).json({ error: "Current password is incorrect" });
     const hash = await bcrypt.hash(newPassword, 10);
     await db.query("UPDATE users SET password_hash = $1 WHERE id = $2", [hash, req.user.id]);
+    // A password change ends every other session, then re-issues this one.
+    await revokeUserSessions(db, req.user.id);
+    const refreshed = (
+      await db.query("SELECT id, email, role, session_version FROM users WHERE id = $1", [req.user.id])
+    ).rows[0];
+    if (refreshed && !req.user.hm) {
+      const token = jwt.sign(buildSessionPayload(refreshed), process.env.JWT_SECRET, {
+        expiresIn: "7d",
+        algorithm: "HS256",
+      });
+      setAuthCookie(res, token, req);
+      return res.json({ success: true, token });
+    }
     res.json({ success: true });
   } catch (e) {
     next(e);
@@ -763,8 +777,23 @@ router.post("/session-upgrade", (req, res) => {
 
 // POST /auth/logout — clear the session cookie. No auth required so that a
 // page holding a stale/invalid cookie can still clean itself up.
-router.post("/logout", (req, res) => {
+router.post("/logout", async (req, res) => {
   clearAuthCookie(res, req);
+  // Revoke server-side too, so a copied token stops working after logout.
+  // Only a valid, versioned session for this user can trigger the bump.
+  const { extractExplicitAuth, isSessionTokenPayload } = require("../middleware/auth");
+  const explicit = extractExplicitAuth(req);
+  const token = (explicit && explicit.source === "authorization" && explicit.token) || readAuthCookie(req);
+  if (token && !token.startsWith("nora_")) {
+    try {
+      const decoded = jwt.verify(token, process.env.JWT_SECRET, { algorithms: ["HS256"] });
+      if (isSessionTokenPayload(decoded) && decoded.sv !== undefined && !decoded.hm) {
+        await revokeUserSessions(db, decoded.id);
+      }
+    } catch {
+      // Invalid or expired tokens have nothing to revoke.
+    }
+  }
   res.json({ success: true });
 });
 

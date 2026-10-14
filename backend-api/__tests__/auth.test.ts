@@ -1191,12 +1191,12 @@ describe("OAuth hardening", () => {
     );
     expect(mockDb.query).toHaveBeenNthCalledWith(
       3,
-      "SELECT id, email, role, name, provider, provider_id, password_hash FROM users WHERE provider = $1 AND provider_id = $2",
+      "SELECT id, email, role, name, provider, provider_id, password_hash, session_version FROM users WHERE provider = $1 AND provider_id = $2",
       ["google", "google-sub-123"],
     );
     expect(mockDb.query).toHaveBeenNthCalledWith(
       4,
-      "SELECT id, email, role, name, provider, provider_id, password_hash FROM users WHERE email = $1",
+      "SELECT id, email, role, name, provider, provider_id, password_hash, session_version FROM users WHERE email = $1",
       ["user@example.com"],
     );
 

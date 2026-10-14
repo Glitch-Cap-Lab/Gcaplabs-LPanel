@@ -5205,10 +5205,7 @@ describe("POST /agents/:id/integrations/headmaster/adopt", () => {
     });
     expect(mockDb.query).toHaveBeenNthCalledWith(
       2,
-      `UPDATE agents
-          SET external_namespace = $1, external_id = $2, external_owner_uuid = $3
-        WHERE id = $4
-        RETURNING *`,
+      expect.stringContaining("WHERE id = $4 AND external_namespace IS NULL"),
       ["headmaster", EXTERNAL_ID, OWNER_UUID, "a-adopt"],
     );
     expect(monitoringModule.logEvent).toHaveBeenCalledWith(
@@ -5234,6 +5231,8 @@ describe("POST /agents/:id/integrations/headmaster/adopt", () => {
           },
         ],
       })
+      // The guarded bind UPDATE matches nothing: the agent is already bound.
+      .mockResolvedValueOnce({ rows: [] })
       .mockResolvedValueOnce({
         rows: [
           {

@@ -2540,28 +2540,26 @@ router.post(
       return res.status(400).json({ error: 'memory.provider must be "hindsight"' });
     }
 
-    const alreadyAdopted = agent.external_namespace != null;
+    const { bindExternalIdentity, identityConflict } = require("../headmasterIdentityBinding");
     if (
-      alreadyAdopted &&
+      agent.external_namespace != null &&
       (agent.external_namespace !== namespace ||
         agent.external_id !== externalId ||
         agent.external_owner_uuid !== ownerUuid)
     ) {
-      const error = new Error("Agent is already bound to a different external identity");
-      error.statusCode = 409;
-      error.code = "external_identity_immutable";
-      throw error;
+      throw identityConflict();
     }
 
-    const updated = await db.query(
-      `UPDATE agents
-          SET external_namespace = $1, external_id = $2, external_owner_uuid = $3
-        WHERE id = $4
-        RETURNING *`,
-      [namespace, externalId, ownerUuid, agent.id],
-    );
+    // Atomic: concurrent binds (account provisioner vs the runtime's own bind
+    // script) cannot overwrite each other; the loser matches or gets a 409.
+    const { agent: boundAgent, newlyAdopted } = await bindExternalIdentity(db, agent.id, {
+      namespace,
+      externalId,
+      ownerUuid,
+    });
+    const updated = { rows: [boundAgent] };
 
-    if (!alreadyAdopted) {
+    if (newlyAdopted) {
       await monitoring.logEvent(
         "agent_headmaster_identity_adopted",
         `Agent "${agent.name}" adopted Headmaster identity ${namespace}:${externalId}`,
