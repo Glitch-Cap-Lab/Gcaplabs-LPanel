@@ -131,7 +131,7 @@ function buildReplacementDeploymentJob(
     sandbox: desiredRuntimeFields.sandbox_profile,
     specs: {
       vcpu: agent.vcpu || 2,
-      ram_mb: agent.ram_mb || 2048,
+      ram_mb: agent.ram_mb || 3072,
       disk_gb: agent.disk_gb || 20,
     },
     container_name: containerName ?? agent.container_name ?? null,

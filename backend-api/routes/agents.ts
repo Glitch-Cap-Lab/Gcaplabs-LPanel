@@ -2691,7 +2691,7 @@ router.post(
     });
     const specs = {
       vcpu: sourceAgent.vcpu || 2,
-      ram_mb: sourceAgent.ram_mb || 2048,
+      ram_mb: sourceAgent.ram_mb || 3072,
       disk_gb: sourceAgent.disk_gb || 20,
     };
     const image = resolveRequestedImage({
