@@ -96,7 +96,7 @@ const {
   findAccessibleAgentForRequest,
   requireApiKeyAgentScope,
 } = require("../middleware/ownership");
-const { requireSession, scopeByMethod } = require("../middleware/auth");
+const { requireAdmin, requireSession, scopeByMethod } = require("../middleware/auth");
 const agentVersions = require("../agentVersions");
 const { assertKubernetesExecutionTargetAvailable } = require("../kubernetesClusters");
 const {
@@ -2510,8 +2510,12 @@ router.post(
 // already-bound identity is a no-op, so retries are safe. A request that
 // would rebind the agent to a *different* identity is rejected, since the
 // identity is meant to stay immutable for the agent's lifetime.
+// Only the provisioner's operator session (a platform admin) may bind: the
+// owner_uuid comes from the body, and runtime-identity later vouches for it.
 router.post(
   "/:id/integrations/headmaster/adopt",
+  requireSession,
+  requireAdmin,
   asyncHandler(async (req, res) => {
     const agent = await findAccessibleAgentForRequest(req, req.params.id, "editor");
     if (!agent) return res.status(404).json({ error: "Agent not found" });

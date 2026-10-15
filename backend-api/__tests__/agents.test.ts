@@ -378,6 +378,10 @@ const userToken = jwt.sign({ id: "user-1", email: "user@nora.test", role: "user"
   expiresIn: "1h",
 });
 const auth = (req) => req.set("Authorization", `Bearer ${userToken}`);
+const adminToken = jwt.sign({ id: "user-1", email: "user@nora.test", role: "admin" }, JWT_SECRET, {
+  expiresIn: "1h",
+});
+const adminAuth = (req) => req.set("Authorization", `Bearer ${adminToken}`);
 const editorToken = jwt.sign(
   { id: "workspace-editor-1", email: "editor@nora.test", role: "user" },
   JWT_SECRET,
@@ -5162,6 +5166,33 @@ describe("POST /agents/:id/integrations/headmaster/adopt", () => {
   const EXTERNAL_ID = "47a0b178-0497-4b83-91f9-92af078310d0";
   const OWNER_UUID = "f125bb2c-1ce1-4b01-9da5-9b736caf503f";
 
+  it("refuses a non-admin session, so a user cannot claim another owner's identity", async () => {
+    const res = await auth(
+      request(app)
+        .post("/agents/a-adopt/integrations/headmaster/adopt")
+        .send({
+          external_identity: { namespace: "headmaster", external_id: EXTERNAL_ID, owner_uuid: OWNER_UUID },
+        }),
+    );
+    expect(res.status).toBe(403);
+    expect(mockDb.query).not.toHaveBeenCalled();
+  });
+
+  it("refuses API-key callers", async () => {
+    authorizeWorkspaceApiKey();
+    mockDb.query.mockResolvedValue({
+      rows: [{ id: "a-adopt", user_id: "user-1", workspace_id: "workspace-a", external_namespace: null }],
+    });
+    const res = await workspaceApiKeyAuth(
+      request(app)
+        .post("/agents/a-adopt/integrations/headmaster/adopt")
+        .send({
+          external_identity: { namespace: "headmaster", external_id: EXTERNAL_ID, owner_uuid: OWNER_UUID },
+        }),
+    );
+    expect(res.status).toBe(403);
+  });
+
   it("binds an unadopted agent to its external identity", async () => {
     const monitoringModule = require("../monitoring");
     mockDb.query
@@ -5183,7 +5214,7 @@ describe("POST /agents/:id/integrations/headmaster/adopt", () => {
         ],
       });
 
-    const res = await auth(
+    const res = await adminAuth(
       request(app)
         .post("/agents/a-adopt/integrations/headmaster/adopt")
         .send({
@@ -5246,7 +5277,7 @@ describe("POST /agents/:id/integrations/headmaster/adopt", () => {
         ],
       });
 
-    const res = await auth(
+    const res = await adminAuth(
       request(app)
         .post("/agents/a-adopt-2/integrations/headmaster/adopt")
         .send({
@@ -5277,7 +5308,7 @@ describe("POST /agents/:id/integrations/headmaster/adopt", () => {
       ],
     });
 
-    const res = await auth(
+    const res = await adminAuth(
       request(app)
         .post("/agents/a-adopt-3/integrations/headmaster/adopt")
         .send({
@@ -5300,7 +5331,7 @@ describe("POST /agents/:id/integrations/headmaster/adopt", () => {
       ],
     });
 
-    const res = await auth(
+    const res = await adminAuth(
       request(app)
         .post("/agents/a-adopt-4/integrations/headmaster/adopt")
         .send({
@@ -5318,7 +5349,7 @@ describe("POST /agents/:id/integrations/headmaster/adopt", () => {
   it("404s for an agent the caller cannot access", async () => {
     mockDb.query.mockResolvedValueOnce({ rows: [] });
 
-    const res = await auth(
+    const res = await adminAuth(
       request(app)
         .post("/agents/not-mine/integrations/headmaster/adopt")
         .send({
@@ -5356,7 +5387,7 @@ describe("POST /agents/:id/integrations/headmaster/adopt", () => {
         ],
       });
 
-    const res = await auth(
+    const res = await adminAuth(
       request(app)
         .post("/agents/a-adopt-5/integrations/headmaster/adopt")
         .send({
@@ -5389,7 +5420,7 @@ describe("POST /agents/:id/integrations/headmaster/adopt", () => {
       ],
     });
 
-    const res = await auth(
+    const res = await adminAuth(
       request(app)
         .post("/agents/a-adopt-6/integrations/headmaster/adopt")
         .send({
@@ -5428,7 +5459,7 @@ describe("POST /agents/:id/integrations/headmaster/adopt", () => {
         ],
       });
 
-    const res = await auth(
+    const res = await adminAuth(
       request(app)
         .post("/agents/a-adopt-7/integrations/headmaster/adopt")
         .send({
@@ -5474,7 +5505,7 @@ describe("POST /agents/:id/integrations/headmaster/adopt model stamp", () => {
   }
 
   function adopt(id) {
-    return auth(
+    return adminAuth(
       request(app)
         .post(`/agents/${id}/integrations/headmaster/adopt`)
         .send({
