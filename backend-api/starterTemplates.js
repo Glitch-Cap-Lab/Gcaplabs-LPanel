@@ -79,7 +79,7 @@ function buildSnapshotConfig(templateKey, payload, defaults = {}) {
       backend,
       sandbox: "standard",
       vcpu: 2,
-      ram_mb: 2048,
+      ram_mb: 3072,
       disk_gb: 20,
       image:
         defaults.image ||

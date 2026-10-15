@@ -266,14 +266,14 @@ function resolveTemplateSpecs(defaults = {}, subscription = {}) {
     const lim = billing.SELFHOSTED_LIMITS;
     return {
       vcpu: Math.max(1, Math.min(parseInt(defaults.vcpu, 10) || 2, lim.max_vcpu)),
-      ram_mb: Math.max(512, Math.min(parseInt(defaults.ram_mb, 10) || 2048, lim.max_ram_mb)),
+      ram_mb: Math.max(512, Math.min(parseInt(defaults.ram_mb, 10) || 3072, lim.max_ram_mb)),
       disk_gb: Math.max(1, Math.min(parseInt(defaults.disk_gb, 10) || 20, lim.max_disk_gb)),
     };
   }
 
   return {
     vcpu: subscription.vcpu || parseInt(defaults.vcpu, 10) || 2,
-    ram_mb: subscription.ram_mb || parseInt(defaults.ram_mb, 10) || 2048,
+    ram_mb: subscription.ram_mb || parseInt(defaults.ram_mb, 10) || 3072,
     disk_gb: subscription.disk_gb || parseInt(defaults.disk_gb, 10) || 20,
   };
 }
@@ -320,7 +320,7 @@ function buildSnapshotConfigFromAgent(agent, templatePayload) {
       backend,
       sandbox: runtimeFields.sandbox_profile,
       vcpu: agent.vcpu || 2,
-      ram_mb: agent.ram_mb || 2048,
+      ram_mb: agent.ram_mb || 3072,
       disk_gb: agent.disk_gb || 20,
       image: agent.image || null,
     },

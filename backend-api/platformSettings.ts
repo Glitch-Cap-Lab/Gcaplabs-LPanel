@@ -4,7 +4,7 @@ const { decrypt, encrypt, ensureEncryptionConfigured } = require("./crypto");
 
 const DEFAULT_DEPLOYMENT_DEFAULTS = Object.freeze({
   vcpu: 1,
-  ram_mb: 1024,
+  ram_mb: 3072,
   disk_gb: 10,
 });
 const DEFAULT_SYSTEM_BANNER = Object.freeze({
