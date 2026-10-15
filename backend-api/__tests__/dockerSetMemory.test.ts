@@ -8,17 +8,31 @@ describe("DockerBackend.setMemory", () => {
     return { backend, update };
   }
 
-  it("updates the live cgroup limit with swap pinned to it", async () => {
+  it.each([2048, 3072])("grows or shrinks to %p MB with swap pinned to the limit", async (mb) => {
     const { backend, update } = make();
-    const out = await backend.setMemory("cid", 3072);
-    expect(update).toHaveBeenCalledWith({ Memory: 3072 * 1048576, MemorySwap: 3072 * 1048576 });
-    expect(out).toEqual({ ram_mb: 3072 });
+    const out = await backend.setMemory("cid", mb);
+    expect(update).toHaveBeenCalledWith({ Memory: mb * 1048576, MemorySwap: mb * 1048576 });
+    expect(out).toEqual({ ram_mb: mb });
   });
 
-  it.each([0, 100, "abc", 1.5, null])("rejects %p", async (v) => {
+  it.each([
+    0,
+    100,
+    512,
+    2047,
+    2500,
+    3073,
+    65536,
+    Number.MAX_SAFE_INTEGER,
+    Infinity,
+    "abc",
+    1.5,
+    null,
+  ])("rejects %p before accessing Docker", async (v) => {
     const { backend, update } = make();
     await expect(backend.setMemory("cid", v)).rejects.toThrow(/Invalid memory limit/);
     expect(update).not.toHaveBeenCalled();
+    expect(backend.docker.getContainer).not.toHaveBeenCalled();
   });
 });
 

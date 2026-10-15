@@ -2595,6 +2595,8 @@ function attachGatewayWS(server) {
       );
       if (!relayClientIsOpen()) return;
       const gwWs = new WebSocket(`ws://${relayHost}:${addr.port}`);
+      let relayEnded = false;
+      let relayHandshakeTimer = null;
       const requiresRelayAuthorization = remoteHosts.isRemoteDockerAgent(agent);
       let relayAuthorizationTimer = null;
       let relayAuthorizationPromise = null;
@@ -2622,7 +2624,47 @@ function attachGatewayWS(server) {
         }
       }
 
+      function clearRelayHandshakeTimer() {
+        if (relayHandshakeTimer) {
+          clearTimeout(relayHandshakeTimer);
+          relayHandshakeTimer = null;
+        }
+      }
+
+      function finishRelay(message = null) {
+        if (relayEnded) return;
+        relayEnded = true;
+        relayClientClosed = true;
+        clearRelayConnectTimer();
+        clearRelayAuthorizationTimer();
+        clearRelayHandshakeTimer();
+        clientQueue.length = 0;
+        pendingClientConnect = null;
+        try {
+          if (message && ws.readyState === WebSocket.OPEN) ws.send(JSON.stringify(message));
+        } catch (error) {
+          console.error(`[gatewayProxy] WS relay close notice failed:`, error.message);
+        } finally {
+          // A failed handshake must not wait on either peer's close frame. In
+          // CONNECTING, terminate also aborts the pending HTTP upgrade.
+          try {
+            if (gwWs.readyState === WebSocket.OPEN || gwWs.readyState === WebSocket.CONNECTING) {
+              if (typeof gwWs.terminate === "function") gwWs.terminate();
+              else gwWs.close();
+            }
+          } finally {
+            if (ws.readyState === WebSocket.OPEN) ws.close();
+          }
+        }
+      }
+
+      relayHandshakeTimer = setTimeout(() => {
+        finishRelay({ type: "error", message: "Gateway handshake timed out" });
+      }, CONNECT_TIMEOUT);
+      relayHandshakeTimer.unref?.();
+
       async function ensureRelayAuthorized({ force = false } = {}) {
+        if (relayEnded) return false;
         if (!requiresRelayAuthorization) return true;
         if (!force && Date.now() - relayAuthorizationCheckedAt < REMOTE_HOST_AUTH_RECHECK_MS) {
           return true;
@@ -2634,19 +2676,11 @@ function attachGatewayWS(server) {
             relayAuthorizationCheckedAt = Date.now();
             return true;
           } catch (error) {
-            if (ws.readyState === WebSocket.OPEN) {
-              ws.send(
-                JSON.stringify({
-                  type: "error",
-                  message: error.message,
-                  code: error.code || "REMOTE_HOST_ACCESS_REVOKED",
-                }),
-              );
-              ws.close();
-            }
-            if (gwWs.readyState === WebSocket.OPEN || gwWs.readyState === WebSocket.CONNECTING) {
-              gwWs.close();
-            }
+            finishRelay({
+              type: "error",
+              message: error.message,
+              code: error.code || "REMOTE_HOST_ACCESS_REVOKED",
+            });
             return false;
           } finally {
             relayAuthorizationPromise = null;
@@ -2663,7 +2697,7 @@ function attachGatewayWS(server) {
       }
 
       async function sendRelayConnect() {
-        if (relayConnectSent || gwWs.readyState !== WebSocket.OPEN) return;
+        if (relayEnded || relayConnectSent || gwWs.readyState !== WebSocket.OPEN) return;
         if (relayConnectPromise) return relayConnectPromise;
 
         relayConnectPromise = (async () => {
@@ -2717,15 +2751,12 @@ function attachGatewayWS(server) {
           await sendRelayConnect();
         } catch (error) {
           console.error(`[gatewayProxy] WS relay connect failed for ${agentId}:`, error.message);
-          if (ws.readyState === WebSocket.OPEN) ws.close();
-          if (gwWs.readyState === WebSocket.OPEN || gwWs.readyState === WebSocket.CONNECTING) {
-            gwWs.close();
-          }
+          finishRelay();
         }
       }
 
       function queueRelayConnect() {
-        if (relayConnectSent) return;
+        if (relayEnded || relayConnectSent) return;
         clearRelayConnectTimer();
         relayConnectTimer = setTimeout(() => {
           void sendRelayConnectSafely();
@@ -2749,114 +2780,116 @@ function attachGatewayWS(server) {
       });
 
       gwWs.on("message", async (raw) => {
-        if (!(await ensureRelayAuthorized())) return;
-        const str = raw.toString();
-        if (!handshakeComplete) {
-          let msg;
-          try {
-            msg = JSON.parse(str);
-          } catch {
-            return;
-          }
-
-          if (msg.type === "event" && msg.event === "connect.challenge") {
-            // Forward challenge to client so its UI can go through the normal auth flow
-            if (ws.readyState === WebSocket.OPEN) ws.send(str);
-            if (!relayConnectSent && typeof msg.payload?.nonce === "string" && msg.payload.nonce) {
-              relayConnectNonce = msg.payload.nonce;
-              await sendRelayConnectSafely();
+        try {
+          if (!(await ensureRelayAuthorized())) return;
+          const str = raw.toString();
+          if (!handshakeComplete) {
+            let msg;
+            try {
+              msg = JSON.parse(str);
+            } catch {
+              return;
             }
-            return;
-          }
 
-          if (msg.id === "__relay_connect__") {
-            if (msg.ok) {
-              handshakeComplete = true;
-              connectPayload = msg.payload !== undefined ? msg.payload : msg.result || {};
-              // If client already sent connect while we were handshaking, respond now
-              if (pendingClientConnect) {
-                respondToClientConnect(pendingClientConnect.id);
-                pendingClientConnect = null;
+            if (msg.type === "event" && msg.event === "connect.challenge") {
+              // Forward challenge to client so its UI can go through the normal auth flow
+              if (ws.readyState === WebSocket.OPEN) ws.send(str);
+              if (
+                !relayConnectSent &&
+                typeof msg.payload?.nonce === "string" &&
+                msg.payload.nonce
+              ) {
+                relayConnectNonce = msg.payload.nonce;
+                await sendRelayConnectSafely();
               }
-              // Flush any buffered non-connect client messages
-              for (const queued of clientQueue) {
-                if (gwWs.readyState === WebSocket.OPEN) gwWs.send(queued);
-              }
-              clientQueue.length = 0;
-            } else {
-              console.error(`[gatewayProxy] WS relay handshake failed for ${agentId}:`, msg.error);
-              ws.send(
-                JSON.stringify({
+              return;
+            }
+
+            if (msg.id === "__relay_connect__") {
+              if (msg.ok) {
+                clearRelayHandshakeTimer();
+                clearRelayConnectTimer();
+                handshakeComplete = true;
+                connectPayload = msg.payload !== undefined ? msg.payload : msg.result || {};
+                // If client already sent connect while we were handshaking, respond now
+                if (pendingClientConnect) {
+                  respondToClientConnect(pendingClientConnect.id);
+                  pendingClientConnect = null;
+                }
+                // Flush any buffered non-connect client messages
+                for (const queued of clientQueue) {
+                  if (gwWs.readyState === WebSocket.OPEN) gwWs.send(queued);
+                }
+                clientQueue.length = 0;
+              } else {
+                console.error(
+                  `[gatewayProxy] WS relay handshake failed for ${agentId}:`,
+                  msg.error,
+                );
+                finishRelay({
                   type: "error",
                   message: `Gateway handshake failed: ${msg.error?.message || "unknown"}`,
-                }),
-              );
-              ws.close();
-              gwWs.close();
+                });
+              }
+              return;
             }
-            return;
           }
+          // Post-handshake: relay gateway → client
+          if (ws.readyState === WebSocket.OPEN) ws.send(str);
+        } catch (error) {
+          console.error(`[gatewayProxy] WS relay handshake or forwarding failed:`, error.message);
+          finishRelay();
         }
-        // Post-handshake: relay gateway → client
-        if (ws.readyState === WebSocket.OPEN) ws.send(str);
       });
 
       ws.on("message", async (data) => {
-        if (!(await ensureRelayAuthorized())) return;
-        const str = data.toString();
         try {
-          const msg = JSON.parse(str);
-          if (msg.method === "connect") {
-            // Relay already authenticated (or is authenticating) — don't forward to gateway.
-            // Respond with the relay's stored result so the client UI completes its auth flow.
-            if (handshakeComplete) {
-              respondToClientConnect(msg.id);
-            } else {
-              // Relay still handshaking — respond when ready
-              pendingClientConnect = msg;
+          if (!(await ensureRelayAuthorized())) return;
+          const str = data.toString();
+          try {
+            const msg = JSON.parse(str);
+            if (msg.method === "connect") {
+              // Relay already authenticated (or is authenticating) — don't forward to gateway.
+              // Respond with the relay's stored result so the client UI completes its auth flow.
+              if (handshakeComplete) {
+                respondToClientConnect(msg.id);
+              } else {
+                // Relay still handshaking — respond when ready
+                pendingClientConnect = msg;
+              }
+              return;
             }
+          } catch {
+            /* not JSON */
+          }
+          if (!handshakeComplete) {
+            clientQueue.push(str);
             return;
           }
-        } catch {
-          /* not JSON */
+          if (gwWs.readyState === WebSocket.OPEN) gwWs.send(str);
+        } catch (error) {
+          console.error(`[gatewayProxy] WS relay client forwarding failed:`, error.message);
+          finishRelay();
         }
-        if (!handshakeComplete) {
-          clientQueue.push(str);
-          return;
-        }
-        if (gwWs.readyState === WebSocket.OPEN) gwWs.send(str);
       });
 
       gwWs.on("close", (code, reason) => {
-        clearRelayConnectTimer();
-        clearRelayAuthorizationTimer();
         const reasonStr = reason ? reason.toString() : "";
         const phase = handshakeComplete ? "after auth" : "before auth";
         console.error(
           `[gatewayProxy] WS relay gateway closed for ${agentId} ${phase}: code=${code} reason=${reasonStr}`,
         );
-        if (ws.readyState === WebSocket.OPEN) {
-          ws.send(
-            JSON.stringify({
-              type: "system",
-              message: `Gateway closed (${code}${reasonStr ? ": " + reasonStr : ""})`,
-            }),
-          );
-          ws.close();
-        }
+        finishRelay({
+          type: "system",
+          message: `Gateway closed (${code}${reasonStr ? ": " + reasonStr : ""})`,
+        });
       });
       gwWs.on("error", (err) => {
-        clearRelayConnectTimer();
-        clearRelayAuthorizationTimer();
         console.error(`[gatewayProxy] WS relay error for agent ${agentId}:`, err.message);
-        if (ws.readyState === WebSocket.OPEN) ws.close();
+        finishRelay();
       });
       const closeGatewayForClient = () => {
-        relayClientClosed = true;
-        clearRelayConnectTimer();
-        clearRelayAuthorizationTimer();
-        if (gwWs.readyState === WebSocket.OPEN || gwWs.readyState === WebSocket.CONNECTING)
-          gwWs.close();
+        finishRelay();
       };
       ws.on("close", closeGatewayForClient);
       ws.on("error", closeGatewayForClient);

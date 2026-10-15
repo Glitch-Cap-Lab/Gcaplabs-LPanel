@@ -2593,7 +2593,10 @@ router.post(
     // provider sync. Idempotent: a tier the user already chose is kept.
     // Best-effort for the same reason as the memory stamp above.
     let inferenceStamp;
-    if (namespace === "headmaster" && buildAgentRuntimeFields(updated.rows[0]).runtime_family === "hermes") {
+    if (
+      namespace === "headmaster" &&
+      buildAgentRuntimeFields(updated.rows[0]).runtime_family === "hermes"
+    ) {
       try {
         inferenceStamp = await persistHermesModelConfig(
           updated.rows[0],
@@ -2862,7 +2865,7 @@ router.post("/:id/stop", async (req, res, next) => {
   }
 });
 
-const AGENT_MEMORY_CHOICES_MB = [2048, 3072];
+const { AGENT_MEMORY_CHOICES_MB } = require("../../agent-runtime/lib/memoryLimits");
 
 // Live memory limit for an agent's container. Only the two tiers Bot Screen
 // uses are accepted (2 GB default, 3 GB while Bot Screen is on).
@@ -2915,7 +2918,12 @@ router.post("/:id/memory", async (req, res, next) => {
         await monitoring.logEvent(
           "agent_memory_changed",
           `Agent "${agent.name}" memory limit set to ${ramMb} MB`,
-          agentAuditMetadata(req, updated.rows[0], { result: { ram_mb: ramMb, ...(typeof botScreen === "boolean" ? { bot_screen: botScreen } : {}) } }),
+          agentAuditMetadata(req, updated.rows[0], {
+            result: {
+              ram_mb: ramMb,
+              ...(typeof botScreen === "boolean" ? { bot_screen: botScreen } : {}),
+            },
+          }),
         );
         return serializeAgent(updated.rows[0]);
       },
