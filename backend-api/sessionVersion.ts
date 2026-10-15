@@ -8,8 +8,9 @@
 // middleware also rejects a token whose role no longer matches the stored
 // role, so a demoted admin's old token cannot keep admin powers.
 //
-// Tokens minted before this claim existed carry no `sv`; they are still
-// accepted until their 7-day expiry so a deploy does not log everyone out.
+// Tokens minted before this claim existed carry no `sv`. They are read as
+// version 0 and still checked against the row, so the first revocation, a
+// role change or deleting the user ends them too.
 
 const SESSION_VERSION_CLAIM = "sv";
 
@@ -22,6 +23,11 @@ function normalizeVersion(value) {
  * Build the JWT payload for a full login session.
  */
 function buildSessionPayload(user) {
+  // A row read without session_version would mint version 0 and be rejected
+  // as soon as the user has ever been revoked; fail loudly instead.
+  if (!user || user.session_version === undefined) {
+    throw new Error("buildSessionPayload needs the user's session_version");
+  }
   return {
     id: user.id,
     email: user.email,
@@ -37,9 +43,7 @@ function buildSessionPayload(user) {
  * @returns {{ok: true} | {ok: false, code: string}}
  */
 function evaluateSessionAgainstUser(payload, userRow) {
-  if (!payload || !Object.prototype.hasOwnProperty.call(payload, SESSION_VERSION_CLAIM)) {
-    return { ok: true };
-  }
+  if (!payload) return { ok: false, code: "session_revoked" };
   if (!userRow) return { ok: false, code: "session_revoked" };
   if (normalizeVersion(payload[SESSION_VERSION_CLAIM]) !== normalizeVersion(userRow.session_version)) {
     return { ok: false, code: "session_revoked" };
@@ -53,9 +57,7 @@ function evaluateSessionAgainstUser(payload, userRow) {
  * when the lookup errors.
  */
 async function checkSession(db, payload) {
-  if (!payload || !Object.prototype.hasOwnProperty.call(payload, SESSION_VERSION_CLAIM)) {
-    return { ok: true };
-  }
+  if (!payload) return { ok: false, code: "session_revoked" };
   let row;
   try {
     const result = await db.query("SELECT role, session_version FROM users WHERE id = $1", [
