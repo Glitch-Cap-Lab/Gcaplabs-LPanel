@@ -1,10 +1,11 @@
 name: Admin dashboard
 
 # Helper tests and typecheck for admin-dashboard. Linux only, pull requests only,
-# about 1 minute.
+# about 30 seconds, one job (billed as 1 minute). Skipped for draft PRs.
 
 on:
   pull_request:
+    types: [opened, synchronize, reopened, ready_for_review]
     paths:
       - 'admin-dashboard/**'
       - '.github/workflows/admin-dashboard.yml'
@@ -20,6 +21,7 @@ concurrency:
 jobs:
   admin:
     name: helpers and typecheck
+    if: github.event_name != 'pull_request' || github.event.pull_request.draft == false
     runs-on: ubuntu-latest
     timeout-minutes: 8
     defaults:
