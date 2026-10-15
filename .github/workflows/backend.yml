@@ -1,18 +1,18 @@
 name: Backend
 
-# Typecheck and unit tests for backend-api and the shared provisioner adapters,
-# the inference relay's node:test suite, and the dashboard/marketing frontend
-# unit tests. Linux only, pull requests only. No Docker, E2E, or deploys.
+# Typecheck and unit tests for backend-api and the shared provisioner adapters.
+# One Linux job, about 45 seconds (billed as 1 minute). Skipped for draft PRs; runs
+# when a draft is marked ready. The inference relay and the dashboard/marketing
+# unit tests live in full-ci.yml (label a PR "full-ci" or run it by hand).
+# No Docker, E2E, or deploys.
 
 on:
   pull_request:
+    types: [opened, synchronize, reopened, ready_for_review]
     paths:
       - 'backend-api/**'
       - 'workers/provisioner/**'
       - 'agent-runtime/**'
-      - 'services/headmaster-inference/**'
-      - 'frontend-dashboard/**'
-      - 'frontend-marketing/**'
       - '.github/workflows/backend.yml'
   workflow_dispatch:
 
@@ -26,6 +26,7 @@ concurrency:
 jobs:
   backend:
     name: typecheck and jest
+    if: github.event_name != 'pull_request' || github.event.pull_request.draft == false
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
@@ -47,44 +48,3 @@ jobs:
         working-directory: backend-api
       - run: npx jest --forceExit
         working-directory: backend-api
-
-  relay:
-    name: inference relay node:test
-    runs-on: ubuntu-latest
-    timeout-minutes: 10
-    steps:
-      - uses: actions/checkout@v4
-        with:
-          persist-credentials: false
-      - uses: actions/setup-node@v4
-        with:
-          node-version-file: .nvmrc
-          cache: npm
-          cache-dependency-path: services/headmaster-inference/package-lock.json
-      - run: npm ci --ignore-scripts --no-audit --no-fund
-        working-directory: services/headmaster-inference
-      # Live provider tests skip without OPENROUTER_API_KEY; none is set here.
-      - run: npm test
-        working-directory: services/headmaster-inference
-
-  frontends:
-    name: ${{ matrix.app }} unit tests
-    runs-on: ubuntu-latest
-    timeout-minutes: 10
-    strategy:
-      fail-fast: false
-      matrix:
-        app: [frontend-dashboard, frontend-marketing]
-    steps:
-      - uses: actions/checkout@v4
-        with:
-          persist-credentials: false
-      - uses: actions/setup-node@v4
-        with:
-          node-version-file: .nvmrc
-          cache: npm
-          cache-dependency-path: ${{ matrix.app }}/package-lock.json
-      - run: npm ci --ignore-scripts --no-audit --no-fund
-        working-directory: ${{ matrix.app }}
-      - run: npm test
-        working-directory: ${{ matrix.app }}

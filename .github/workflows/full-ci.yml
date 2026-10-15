@@ -1,0 +1,61 @@
+name: Full CI
+
+# The checks that do not run on every push: inference relay tests and the
+# dashboard/marketing unit tests (3 jobs, about 3 cents). Add the "full-ci" label
+# to a PR, or use Run workflow on the branch.
+
+on:
+  pull_request:
+    types: [labeled]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: full-ci-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  relay:
+    if: github.event_name == 'workflow_dispatch' || github.event.label.name == 'full-ci'
+    name: inference relay node:test
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@v4
+        with:
+          node-version-file: .nvmrc
+          cache: npm
+          cache-dependency-path: services/headmaster-inference/package-lock.json
+      - run: npm ci --ignore-scripts --no-audit --no-fund
+        working-directory: services/headmaster-inference
+      # Live provider tests skip without OPENROUTER_API_KEY; none is set here.
+      - run: npm test
+        working-directory: services/headmaster-inference
+
+  frontends:
+    if: github.event_name == 'workflow_dispatch' || github.event.label.name == 'full-ci'
+    name: ${{ matrix.app }} unit tests
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    strategy:
+      fail-fast: false
+      matrix:
+        app: [frontend-dashboard, frontend-marketing]
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@v4
+        with:
+          node-version-file: .nvmrc
+          cache: npm
+          cache-dependency-path: ${{ matrix.app }}/package-lock.json
+      - run: npm ci --ignore-scripts --no-audit --no-fund
+        working-directory: ${{ matrix.app }}
+      - run: npm test
+        working-directory: ${{ matrix.app }}
