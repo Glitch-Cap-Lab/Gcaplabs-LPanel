@@ -8,6 +8,25 @@ const ALGORITHM = "aes-256-gcm";
 const RAW_KEY = (process.env.ENCRYPTION_KEY || "").split("#")[0].trim();
 const ENCRYPTION_KEY = /^[0-9a-fA-F]{64}$/.test(RAW_KEY) ? RAW_KEY : null;
 
+function isEncryptionConfigured() {
+  return Boolean(ENCRYPTION_KEY);
+}
+
+// Same rule as backend-api/server.ts: in production a missing or invalid
+// ENCRYPTION_KEY is fatal, unless the operator explicitly opts out with
+// NORA_ALLOW_PLAINTEXT_SECRETS=true. Called once when the worker starts.
+function assertEncryptionConfiguredForStart({ env = process.env, exit = process.exit, log = console.error } = {}) {
+  if (isEncryptionConfigured() || env.NODE_ENV !== "production") return;
+  if (env.NORA_ALLOW_PLAINTEXT_SECRETS === "true") return;
+  log(
+    "FATAL: ENCRYPTION_KEY is not set (or is not a 64-char hex key) in production. " +
+      "The provisioner would store gateway tokens unencrypted. " +
+      "Generate one with: node -e \"console.log(require('crypto').randomBytes(32).toString('hex'))\" " +
+      "and set it in .env. To intentionally run without encryption at rest, set NORA_ALLOW_PLAINTEXT_SECRETS=true.",
+  );
+  exit(1);
+}
+
 if (!ENCRYPTION_KEY) {
   console.error(
     "SECURITY WARNING: ENCRYPTION_KEY is not set or invalid. " +
@@ -18,10 +37,17 @@ if (!ENCRYPTION_KEY) {
 
 /**
  * Encrypt plaintext. Returns "iv:authTag:ciphertext" hex string.
- * If ENCRYPTION_KEY is not set, returns plaintext unchanged (graceful degradation).
+ * Without ENCRYPTION_KEY, returns plaintext only outside production or when
+ * NORA_ALLOW_PLAINTEXT_SECRETS=true; in production it throws instead.
  */
 function encrypt(text) {
-  if (!ENCRYPTION_KEY || !text) return text;
+  if (!text) return text;
+  if (!ENCRYPTION_KEY) {
+    if (process.env.NODE_ENV === "production" && process.env.NORA_ALLOW_PLAINTEXT_SECRETS !== "true") {
+      throw new Error("ENCRYPTION_KEY is not configured; refusing to store a secret in plaintext");
+    }
+    return text;
+  }
   const key = Buffer.from(ENCRYPTION_KEY, "hex");
   const iv = crypto.randomBytes(16);
   const cipher = crypto.createCipheriv(ALGORITHM, key, iv);
@@ -67,4 +93,10 @@ function decrypt(data) {
   }
 }
 
-module.exports = { encrypt, decrypt, DecryptionError };
+module.exports = {
+  encrypt,
+  decrypt,
+  isEncryptionConfigured,
+  assertEncryptionConfiguredForStart,
+  DecryptionError,
+};

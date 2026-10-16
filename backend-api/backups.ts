@@ -51,7 +51,7 @@ const BACKUP_SCHEDULE_FREQUENCIES = new Set(["hourly", "daily", "weekly"]);
 const BACKUP_KINDS = new Set(["agent", "installation"]);
 const REMOTE_HOST_AUTH_RECHECK_MS = Math.max(
   250,
-  Number.parseInt(process.env.REMOTE_HOST_AUTH_RECHECK_MS || "1000", 10) || 1000,
+  Number.parseInt(process.env.REMOTE_HOST_AUTH_RECHECK_MS || "5000", 10) || 5000,
 );
 
 // Shared normalization and serialization

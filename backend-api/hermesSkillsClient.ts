@@ -10,8 +10,9 @@ const fs = require("fs");
 const os = require("os");
 const path = require("path");
 
-const DEFAULT_HERMES_SKILLS_INDEX_URL =
-  "https://hermes-agent.nousresearch.com/docs/api/skills-index.json";
+// Same hosted copy HeadmasterCore reads (hermes_cli/headmaster_nous.py HUB_BASE_URL),
+// overridable with the same HEADMASTER_SKILLS_INDEX_URL variable.
+const DEFAULT_HERMES_SKILLS_INDEX_URL = "https://downloads.gcaplabs.com/hub/skills-index.json";
 const INDEX_CACHE_FILENAME = "nora-hermes-skills-index.json";
 const DEFAULT_INDEX_TTL_MS = 3600000;
 const INDEX_FETCH_TIMEOUT_MS = 30000;
@@ -52,7 +53,9 @@ function normalizeStringArray(value) {
 }
 
 function resolveIndexUrl() {
-  const override = normalizeText(process.env.HERMES_SKILLS_REGISTRY_URL);
+  const override =
+    normalizeText(process.env.HEADMASTER_SKILLS_INDEX_URL) ||
+    normalizeText(process.env.HERMES_SKILLS_REGISTRY_URL);
   return override || DEFAULT_HERMES_SKILLS_INDEX_URL;
 }
 
@@ -193,8 +196,8 @@ async function loadIndex() {
     }
     throw createHermesSkillsError(
       502,
-      "hermes_registry_unavailable",
-      "Could not reach the Hermes skills registry.",
+      "skills_index_unavailable",
+      "Could not reach the skills index.",
     );
   }
 }

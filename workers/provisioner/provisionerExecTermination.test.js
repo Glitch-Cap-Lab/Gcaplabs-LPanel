@@ -6,6 +6,7 @@ const Module = require("node:module");
 const path = require("node:path");
 const { PassThrough } = require("node:stream");
 const test = require("node:test");
+const { before, after } = test;
 
 let assertRemoteHostAgentUseImpl = async () => ({});
 
@@ -161,16 +162,29 @@ function detectOrphanReaping() {
       [
         "orphan=$(/bin/sh -c 'sleep 30 >/dev/null 2>&1 & echo $!')",
         'kill -KILL "$orphan" 2>/dev/null',
-        "attempt=0",
-        'while [ "$attempt" -lt 20 ]; do state=$(awk \'{print $3}\' "/proc/$orphan/stat" 2>/dev/null) || break; [ -n "$state" ] || break; attempt=$((attempt + 1)); sleep 0.05; done',
+        // A real init reaps within milliseconds. A periodic reaper (some
+        // sandboxes) can land inside the one-second windows of the scripts
+        // under test or miss them, so only a prompt reaper counts as reaping.
+        "sleep 0.25",
         "state=$(awk '{print $3}' \"/proc/$orphan/stat\" 2>/dev/null)",
         '[ "$state" = "Z" ] && echo zombie || echo reaped',
       ].join("\n"),
     ],
-    { encoding: "utf8", timeout: 5000 },
+    { encoding: "utf8", timeout: 8000 },
   );
   return probe.stdout.trim() !== "zombie";
 }
+
+// Several tests below leave a fetch promise pending until an unref'd recheck
+// timer aborts it. With no ref'd handle the event loop empties and node:test
+// cancels the test, so hold one for the whole file.
+let keepEventLoopAlive;
+before(() => {
+  keepEventLoopAlive = setInterval(() => {}, 1000);
+});
+after(() => {
+  clearInterval(keepEventLoopAlive);
+});
 
 const ORPHAN_REAPING_SKIP = detectOrphanReaping()
   ? false
@@ -947,7 +961,7 @@ test(
   },
 );
 
-test("cleanup kills a TERM-ignoring tracked group while an unrelated group survives", async () => {
+test("cleanup kills a TERM-ignoring tracked group while an unrelated group survives", { skip: ORPHAN_REAPING_SKIP }, async () => {
   const commandId = randomBytes(16).toString("hex");
   const stateDir = provisionerExecStateDir(commandId);
   const trackedCommand = buildTrackedProvisionerCommand(

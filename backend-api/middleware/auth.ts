@@ -1,6 +1,6 @@
 // @ts-nocheck
 const jwt = require("jsonwebtoken");
-const { readAuthCookie } = require("../authCookie");
+const { readAuthCookie, extractSessionTokenFromUpgrade } = require("../authCookie");
 
 // Session and API-key authentication
 
@@ -83,6 +83,82 @@ function tryDecodeSession(token) {
   } catch {
     return null;
   }
+}
+
+/**
+ * Run the same per-request session checks as authenticateToken for a
+ * WebSocket session: Headmaster-launched sessions must still exist, and
+ * password/OAuth sessions must match the stored session version and role.
+ * Fails closed (503) when the check cannot reach its storage. Used at
+ * upgrade time and again on every periodic socket re-check.
+ *
+ * @param {Object} payload - Verified session JWT payload.
+ * @returns {Promise<{ok: true, actor: Object} | {ok: false, status: number, code: string}>}
+ *   `actor` carries the role read from the users row for password/OAuth sessions.
+ */
+async function checkSocketSession(payload) {
+  if (!isSessionTokenPayload(payload)) return { ok: false, status: 401, code: "session_invalid" };
+  // JWT verification covers expiry at upgrade time; established sockets retain
+  // the decoded payload, so every periodic check must enforce the same bound.
+  if (payload.exp !== undefined &&
+      (typeof payload.exp !== "number" || !Number.isFinite(payload.exp) ||
+       payload.exp <= Math.floor(Date.now() / 1000))) {
+    return { ok: false, status: 401, code: "session_revoked" };
+  }
+  if (payload.hm) {
+    try {
+      await require("../headmasterLaunch").assertPrivilegedSocketSession(payload);
+    } catch (error) {
+      const status = error?.statusCode === 503 ? 503 : 401;
+      return { ok: false, status, code: error?.code || "session_revoked" };
+    }
+    return { ok: true, actor: payload };
+  }
+  const { checkSession } = require("../sessionVersion");
+  const verdict = await checkSession(require("../db"), payload);
+  if (!verdict.ok) {
+    return {
+      ok: false,
+      status: verdict.code === "session_check_unavailable" ? 503 : 401,
+      code: verdict.code,
+    };
+  }
+  return { ok: true, actor: { ...payload, role: verdict.role ?? payload.role } };
+}
+
+/**
+ * Authenticate a WebSocket upgrade with the session cookie (or legacy
+ * `?token=`), applying checkSocketSession. On failure the upgrade is refused
+ * with 401 (or 503 when the check is unavailable) and the socket destroyed.
+ *
+ * The session check is async, and nothing else listens for socket errors
+ * until `ws` takes the socket over, so a client reset during the lookup would
+ * be an uncaught error. A guard destroys the socket on error until the caller
+ * calls `release()` right after `handleUpgrade`.
+ *
+ * @param {Object} request - HTTP upgrade request.
+ * @param {Object} socket - Raw upgrade socket.
+ * @param {URLSearchParams} searchParams - Parsed upgrade query string.
+ * @returns {Promise<{actor: Object, release: Function}|null>} The authorized
+ *   actor and the guard release, or null when refused.
+ */
+async function authenticateSocketUpgrade(request, socket, searchParams) {
+  const onError = () => socket.destroy();
+  socket.on?.("error", onError);
+  const payload = tryDecodeSession(extractSessionTokenFromUpgrade(request, searchParams));
+  const verdict = payload ? await checkSocketSession(payload) : { ok: false, status: 401 };
+  // The client may have gone away during the lookup; nothing to upgrade.
+  if (socket.destroyed) return null;
+  if (verdict.ok) {
+    return { actor: verdict.actor, release: () => socket.removeListener?.("error", onError) };
+  }
+  socket.write(
+    verdict.status === 503
+      ? "HTTP/1.1 503 Service Unavailable\r\n\r\n"
+      : "HTTP/1.1 401 Unauthorized\r\n\r\n",
+  );
+  socket.destroy();
+  return null;
 }
 
 /**
@@ -266,7 +342,9 @@ function requireSession(req, res, next) {
 }
 
 module.exports = {
+  authenticateSocketUpgrade,
   authenticateToken,
+  checkSocketSession,
   extractExplicitAuth,
   isSessionTokenPayload,
   requireAdmin,

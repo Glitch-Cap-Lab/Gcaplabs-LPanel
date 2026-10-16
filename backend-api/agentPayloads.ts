@@ -43,7 +43,7 @@ const OPENCLAW_WORKSPACE_ROOT = "/root/.openclaw/workspace";
 const OPENCLAW_LEGACY_AGENT_TEMPLATE_ROOT = "/root/.openclaw/agents/main/agent";
 const REMOTE_HOST_AUTH_RECHECK_MS = Math.max(
   250,
-  Number.parseInt(process.env.REMOTE_HOST_AUTH_RECHECK_MS || "1000", 10) || 1000,
+  Number.parseInt(process.env.REMOTE_HOST_AUTH_RECHECK_MS || "5000", 10) || 5000,
 );
 
 // Payload encoding and normalization

@@ -111,7 +111,7 @@ const PROVIDER_AUTH_QUARANTINE_REASON = "provider_auth_reconciliation_failed";
 const PROVIDER_AUTH_PENDING_REASON = "provider_auth_reconciliation_pending";
 const REMOTE_HOST_AUTH_RECHECK_MS = Math.max(
   250,
-  Number.parseInt(process.env.REMOTE_HOST_AUTH_RECHECK_MS || "1000", 10) || 1000,
+  Number.parseInt(process.env.REMOTE_HOST_AUTH_RECHECK_MS || "5000", 10) || 5000,
 );
 const CONTAINER_EXEC_TERMINATION_GRACE_MS = 5000;
 

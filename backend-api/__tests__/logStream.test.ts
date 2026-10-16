@@ -94,7 +94,7 @@ describe("log stream websocket auth", () => {
     }
   });
 
-  function openLogStream(agentId, userPayload) {
+  async function openLogStream(agentId, userPayload) {
     const token = jwt.sign(userPayload, process.env.JWT_SECRET, {
       expiresIn: "1h",
     });
@@ -113,6 +113,9 @@ describe("log stream websocket auth", () => {
       Buffer.alloc(0),
     );
 
+    // The upgrade runs the session check first, so the socket opens a few
+    // microtasks later. Wait on microtasks only, so fake timers stay put.
+    for (let i = 0; i < 20 && wsConnections.length === 0; i += 1) await Promise.resolve();
     return wsConnections[0];
   }
 
@@ -132,7 +135,7 @@ describe("log stream websocket auth", () => {
       })
       .mockResolvedValueOnce({ rows: [] });
 
-    const ws = openLogStream("agent-1", { id: "user-2", role: "user" });
+    const ws = await openLogStream("agent-1", { id: "user-2", role: "user" });
     await flushAsyncWork();
 
     expect(ws.sent).toContainEqual({
@@ -158,7 +161,7 @@ describe("log stream websocket auth", () => {
       })
       .mockResolvedValueOnce({ rows: [{ role: "viewer" }] });
 
-    const ws = openLogStream("agent-1", { id: "viewer-1", role: "user" });
+    const ws = await openLogStream("agent-1", { id: "viewer-1", role: "user" });
     await flushAsyncWork();
 
     expect(ws.sent[0]).toEqual(
@@ -185,7 +188,7 @@ describe("log stream websocket auth", () => {
       ],
     });
 
-    const ws = openLogStream("agent-1", { id: "admin-1", role: "admin" });
+    const ws = await openLogStream("agent-1", { id: "admin-1", role: "admin" });
     await flushAsyncWork();
 
     expect(ws.sent[0]).toEqual(
@@ -222,7 +225,7 @@ describe("log stream websocket auth", () => {
     mockContainerManager.status.mockResolvedValueOnce({ running: true });
     mockContainerManager.logs.mockResolvedValueOnce(logStream);
 
-    const ws = openLogStream("agent-k8s", { id: "admin-1", role: "admin" });
+    const ws = await openLogStream("agent-k8s", { id: "admin-1", role: "admin" });
     await flushAsyncWork();
 
     logStream.emit("error", new Error("pod log stream closed"));
@@ -254,7 +257,7 @@ describe("log stream websocket auth", () => {
     mockContainerManager.status.mockResolvedValueOnce({ running: true });
     mockContainerManager.logs.mockRejectedValueOnce(new Error("attach unavailable"));
 
-    const ws = openLogStream("agent-k8s", { id: "admin-1", role: "admin" });
+    const ws = await openLogStream("agent-k8s", { id: "admin-1", role: "admin" });
     await flushAsyncWork();
 
     expect(ws.sent).toContainEqual(
@@ -291,7 +294,7 @@ describe("log stream websocket auth", () => {
       .mockResolvedValueOnce({ id: "shared-host", access: "workspace", canDeploy: true })
       .mockReturnValue(slowRecheck);
 
-    const ws = openLogStream(agent.id, { id: agent.user_id, role: "user" });
+    const ws = await openLogStream(agent.id, { id: agent.user_id, role: "user" });
     await flushAsyncWork();
 
     await jest.advanceTimersByTimeAsync(250);
@@ -335,7 +338,7 @@ describe("log stream websocket auth", () => {
     mockContainerManager.logs.mockResolvedValue(logStream);
     mockAssertRemoteHostAgentUse.mockResolvedValue({ id: "shared-host" });
 
-    const ws = openLogStream(agent.id, { id: "viewer-1", role: "user" });
+    const ws = await openLogStream(agent.id, { id: "viewer-1", role: "user" });
     await flushAsyncWork();
     expect(ws.closed).toBe(false);
 
@@ -368,7 +371,7 @@ describe("log stream websocket auth", () => {
     mockContainerManager.logs.mockResolvedValue(logStream);
     mockAssertRemoteHostAgentUse.mockResolvedValue({ id: "shared-host" });
 
-    const ws = openLogStream(agent.id, { id: "owner-1", role: "user" });
+    const ws = await openLogStream(agent.id, { id: "owner-1", role: "user" });
     await flushAsyncWork();
     await jest.advanceTimersByTimeAsync(250);
 
@@ -397,7 +400,7 @@ describe("log stream websocket auth", () => {
       Object.assign(new Error("password authentication failed for database"), { code: "28P01" }),
     );
 
-    const ws = openLogStream(agent.id, { id: agent.user_id, role: "user" });
+    const ws = await openLogStream(agent.id, { id: agent.user_id, role: "user" });
     await flushAsyncWork();
 
     expect(ws.sent).toContainEqual({
@@ -432,7 +435,7 @@ describe("log stream websocket auth", () => {
       .mockResolvedValueOnce({ id: "shared-host", access: "workspace", canDeploy: true })
       .mockRejectedValue(revokedError);
 
-    const ws = openLogStream(agent.id, { id: agent.user_id, role: "user" });
+    const ws = await openLogStream(agent.id, { id: agent.user_id, role: "user" });
     await flushAsyncWork();
     expect(mockContainerManager.status).toHaveBeenCalledTimes(1);
 
@@ -477,7 +480,7 @@ describe("log stream websocket auth", () => {
       .mockResolvedValueOnce({ id: "shared-host", access: "workspace", canDeploy: true })
       .mockRejectedValue(revokedError);
 
-    const ws = openLogStream(agent.id, { id: agent.user_id, role: "user" });
+    const ws = await openLogStream(agent.id, { id: agent.user_id, role: "user" });
     await flushAsyncWork();
     expect(mockContainerManager.logs).toHaveBeenCalledTimes(1);
 
@@ -518,7 +521,7 @@ describe("log stream websocket auth", () => {
     );
     mockAssertRemoteHostAgentUse.mockResolvedValue({ id: "shared-host" });
 
-    const ws = openLogStream(agent.id, { id: agent.user_id, role: "user" });
+    const ws = await openLogStream(agent.id, { id: agent.user_id, role: "user" });
     await flushAsyncWork();
     expect(mockContainerManager.logs).toHaveBeenCalledTimes(1);
 
@@ -554,7 +557,7 @@ describe("log stream websocket auth", () => {
       .mockResolvedValueOnce({ id: "shared-host", access: "workspace", canDeploy: true })
       .mockRejectedValue(revokedError);
 
-    const activeWs = openLogStream(agent.id, { id: agent.user_id, role: "user" });
+    const activeWs = await openLogStream(agent.id, { id: agent.user_id, role: "user" });
     await flushAsyncWork();
 
     expect(activeWs.closed).toBe(false);
@@ -574,7 +577,7 @@ describe("log stream websocket auth", () => {
     await jest.advanceTimersByTimeAsync(500);
     expect(mockAssertRemoteHostAgentUse).toHaveBeenCalledTimes(2);
 
-    openLogStream(agent.id, { id: agent.user_id, role: "user" });
+    await openLogStream(agent.id, { id: agent.user_id, role: "user" });
     const deniedWs = wsConnections.at(-1);
     await flushAsyncWork();
 
@@ -634,7 +637,7 @@ describe("log stream websocket auth", () => {
       mockContainerManager.status.mockResolvedValue({ running: true });
       mockContainerManager.logs.mockResolvedValue(new PassThrough());
 
-      const ws = openLogStream(`agent-${lifecycleStatus}`, { id: "admin-1", role: "admin" });
+      const ws = await openLogStream(`agent-${lifecycleStatus}`, { id: "admin-1", role: "admin" });
       await flushAsyncWork();
 
       const promotions = promotionQueries();
@@ -665,7 +668,7 @@ describe("log stream websocket auth", () => {
       mockContainerManager.status.mockResolvedValue({ running: true });
       mockContainerManager.logs.mockResolvedValue(new PassThrough());
 
-      const ws = openLogStream(`agent-stale-${staleStatus}`, { id: "admin-1", role: "admin" });
+      const ws = await openLogStream(`agent-stale-${staleStatus}`, { id: "admin-1", role: "admin" });
       await flushAsyncWork();
 
       expect(promotionQueries()).toHaveLength(1);
