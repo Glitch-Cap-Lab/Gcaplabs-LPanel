@@ -25,7 +25,7 @@ const SKILL_FIXTURES = [
     source: "official",
     identifier: "official/security/1password",
     trust_level: "builtin",
-    repo: "https://github.com/nousresearch/hermes-skills",
+    repo: "https://github.com/headmaster/skills",
     path: "security/1password",
     tags: ["security", "passwords"],
     extra: { verified: true },
@@ -87,6 +87,7 @@ describe("hermesSkillsClient", () => {
     global.fetch = fetchMock;
     __resetCacheForTests();
     delete process.env.HERMES_SKILLS_REGISTRY_URL;
+    delete process.env.HEADMASTER_SKILLS_INDEX_URL;
     delete process.env.HERMES_SKILLS_INDEX_TTL_MS;
   });
 
@@ -121,6 +122,27 @@ describe("hermesSkillsClient", () => {
       expect(normalizeSkillSummary({})).toBeNull();
       expect(normalizeSkillSummary({ name: "no ref" })).toBeNull();
       expect(normalizeSkillSummary(null)).toBeNull();
+    });
+  });
+
+  describe("index source", () => {
+    it("reads the Core-hosted index and never contacts a vendor host", async () => {
+      fetchMock.mockResolvedValueOnce(mockJsonResponse(200, buildIndexPayload()));
+      await listSkills({ limit: 1 });
+      const urls = fetchMock.mock.calls.map((call) => String(call[0]));
+      expect(urls).toHaveLength(1);
+      expect(urls[0]).toBe(DEFAULT_HERMES_SKILLS_INDEX_URL);
+      expect(urls.join(" ")).not.toMatch(new RegExp(["nous", "research"].join(""), "i"));
+    });
+
+    it("prefers HEADMASTER_SKILLS_INDEX_URL when set", async () => {
+      process.env.HEADMASTER_SKILLS_INDEX_URL = "https://mirror.example.com/skills-index.json";
+      fetchMock.mockResolvedValueOnce(mockJsonResponse(200, buildIndexPayload()));
+      await listSkills({ limit: 1 });
+      expect(fetchMock).toHaveBeenCalledWith(
+        "https://mirror.example.com/skills-index.json",
+        expect.any(Object),
+      );
     });
   });
 
@@ -316,7 +338,7 @@ describe("hermesSkillsClient", () => {
         source: "official",
         trustLevel: "builtin",
         tags: ["security", "passwords"],
-        repo: "https://github.com/nousresearch/hermes-skills",
+        repo: "https://github.com/headmaster/skills",
         path: "security/1password",
         extra: { verified: true },
         stale: false,
