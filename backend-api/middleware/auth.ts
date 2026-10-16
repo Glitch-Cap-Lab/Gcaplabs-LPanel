@@ -98,6 +98,13 @@ function tryDecodeSession(token) {
  */
 async function checkSocketSession(payload) {
   if (!isSessionTokenPayload(payload)) return { ok: false, status: 401, code: "session_invalid" };
+  // JWT verification covers expiry at upgrade time; established sockets retain
+  // the decoded payload, so every periodic check must enforce the same bound.
+  if (payload.exp !== undefined &&
+      (typeof payload.exp !== "number" || !Number.isFinite(payload.exp) ||
+       payload.exp <= Math.floor(Date.now() / 1000))) {
+    return { ok: false, status: 401, code: "session_revoked" };
+  }
   if (payload.hm) {
     try {
       await require("../headmasterLaunch").assertPrivilegedSocketSession(payload);

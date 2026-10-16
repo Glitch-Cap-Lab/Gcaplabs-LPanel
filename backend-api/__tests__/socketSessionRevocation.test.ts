@@ -242,6 +242,20 @@ describe("socket errors during the async session check", () => {
 });
 
 describe("periodic socket re-check uses the stored session and role", () => {
+  it("closes an open native log socket when its login token expires", async () => {
+    jest.useFakeTimers({ doNotFake: ["setImmediate"] });
+    const { buildSessionPayload } = require("../sessionVersion");
+    const token = jwt.sign(buildSessionPayload(users.get("admin-1")), process.env.JWT_SECRET, {
+      expiresIn: 1, algorithm: "HS256",
+    });
+    const { ws } = await upgrade("/ws/logs/agent-1", token);
+    await flushAsyncWork();
+    expect(ws.closed).toBe(false);
+    await jest.advanceTimersByTimeAsync(1000 + RECHECK_MS);
+    await flushAsyncWork();
+    expect(ws.closed).toBe(true);
+  });
+
   it("closes an admin's log socket on an agent it does not own after demotion", async () => {
     jest.useFakeTimers({ doNotFake: ["setImmediate"] });
     const { ws } = await upgrade("/ws/logs/agent-1", login("admin-1"));
