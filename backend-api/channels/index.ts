@@ -3,6 +3,7 @@
  * Channels module — CRUD + messaging for agent communication channels.
  */
 
+const crypto = require("crypto");
 const db = require("../db");
 const { encrypt, decrypt, ensureEncryptionConfigured } = require("../crypto");
 const { runtimeUrlForAgent } = require("../../agent-runtime/lib/agentEndpoints");
@@ -11,6 +12,46 @@ const { getAdapter, listAdapterTypes } = require("./adapters");
 
 const REDACTED_SECRET = "[REDACTED]";
 const SECRET_CONFIG_KEY_RE = /(token|secret|password|webhook_url|smtp_pass|auth_token)/i;
+
+// Inbound webhook signing. Scheme and header names match the generic HMAC "V2"
+// scheme of the agent runtime's webhook adapter: X-Webhook-Signature-V2 is the
+// hex HMAC-SHA256 of "<timestamp>.<raw body>", X-Webhook-Timestamp is Unix seconds.
+const INBOUND_SECRET_KEY = "inbound_secret";
+const WEBHOOK_TIMESTAMP_TOLERANCE_SECONDS = 300;
+
+function generateInboundSecret() {
+  return crypto.randomBytes(32).toString("hex");
+}
+
+function safeEqualHex(provided, expected) {
+  const a = Buffer.from(String(provided || ""), "utf8");
+  const b = Buffer.from(String(expected || ""), "utf8");
+  return a.length === b.length && crypto.timingSafeEqual(a, b);
+}
+
+/**
+ * Check the signed-webhook headers against a channel secret in constant time.
+ *
+ * @param {string} secret - Per-channel inbound secret.
+ * @param {Object} headers - Lower-cased request headers.
+ * @param {Buffer|string} rawBody - Exact request bytes.
+ * @param {number} [nowMs=Date.now()] - Clock for replay-window checks.
+ * @returns {boolean} True only for a fresh, correct signature.
+ */
+function verifyInboundSignature(secret, headers, rawBody, nowMs = Date.now()) {
+  if (!secret || !rawBody) return false;
+  const signature = headers?.["x-webhook-signature-v2"];
+  const timestamp = headers?.["x-webhook-timestamp"];
+  if (!signature || !timestamp || !/^\d{1,12}$/.test(String(timestamp))) return false;
+  if (Math.abs(nowMs / 1000 - Number(timestamp)) > WEBHOOK_TIMESTAMP_TOLERANCE_SECONDS) {
+    return false;
+  }
+  const expected = crypto
+    .createHmac("sha256", secret)
+    .update(Buffer.concat([Buffer.from(`${timestamp}.`), Buffer.from(rawBody)]))
+    .digest("hex");
+  return safeEqualHex(signature, expected);
+}
 
 // Channel config security
 
@@ -188,15 +229,21 @@ async function listChannels(agentId) {
 async function createChannel(agentId, type, name, config = {}) {
   // Verify the adapter type exists
   getAdapter(type);
+  const inboundSecret = generateInboundSecret();
   const { secured, hasSensitiveMaterial } = protectChannelConfig(type, config);
+  // Only caller-supplied credentials require the encryption key; with the
+  // NORA_ALLOW_PLAINTEXT_SECRETS override the generated secret is stored as
+  // encrypt() returns it (plaintext when no key is set), as elsewhere.
   if (hasSensitiveMaterial) {
     ensureEncryptionConfigured("Channel credential storage");
   }
+  secured[INBOUND_SECRET_KEY] = encrypt(inboundSecret);
   const result = await db.query(
     "INSERT INTO channels(agent_id, type, name, config) VALUES($1, $2, $3, $4) RETURNING *",
     [agentId, type, name, JSON.stringify(secured)],
   );
-  return sanitizeChannel(result.rows[0]);
+  // The inbound signing secret is shown once, here; later reads are redacted.
+  return { ...sanitizeChannel(result.rows[0]), inbound_secret: inboundSecret };
 }
 
 /**
@@ -224,10 +271,21 @@ async function updateChannel(channelId, agentId, updates) {
     params.push(updates.name);
   }
   if (updates.config !== undefined) {
-    const restoredConfig = restoreRedactedConfigValue(
-      parseConfig(updates.config),
-      revealChannelConfig(existing.type, existing.config),
-    );
+    const currentConfig = revealChannelConfig(existing.type, existing.config);
+    const restoredConfig = restoreRedactedConfigValue(parseConfig(updates.config), currentConfig);
+    // Omitting inbound_secret keeps the current one; supplying a new value rotates it.
+    const nextInbound = restoredConfig[INBOUND_SECRET_KEY];
+    if (nextInbound && nextInbound !== currentConfig[INBOUND_SECRET_KEY]) {
+      if (String(nextInbound).length < 16) {
+        const bad = new Error("inbound_secret must be at least 16 characters");
+        bad.statusCode = 400;
+        throw bad;
+      }
+    } else if (currentConfig[INBOUND_SECRET_KEY]) {
+      restoredConfig[INBOUND_SECRET_KEY] = currentConfig[INBOUND_SECRET_KEY];
+    } else {
+      delete restoredConfig[INBOUND_SECRET_KEY];
+    }
     const { secured, hasSensitiveMaterial } = protectChannelConfig(existing.type, restoredConfig);
     sets.push(`config = $${idx++}`);
     params.push(JSON.stringify(secured));
@@ -352,17 +410,23 @@ async function testChannel(channelId, agentId) {
  * Format and audit a public channel webhook, then forward it to a reachable agent runtime.
  *
  * Runtime network failures become retryable 503 errors after the inbound audit row is written.
- * Adapter webhook signatures are not authenticated by this function.
+ * The request must carry a valid per-channel HMAC signature; an unknown channel, a channel
+ * without an inbound secret, or a bad signature is rejected with 401 before any write or forward.
  *
  * @param {string} channelId - Target channel identifier.
  * @param {Object} payload - Provider webhook payload.
- * @param {Object} headers - Request headers, currently unused by adapter formatting.
+ * @param {Object} headers - Request headers (signature and timestamp).
+ * @param {Buffer} rawBody - Exact request bytes the signature covers.
  * @returns {Promise<Object>} Receipt acknowledgement.
  */
-async function handleInboundWebhook(channelId, payload, headers) {
+async function handleInboundWebhook(channelId, payload, headers, rawBody) {
   const chResult = await db.query("SELECT * FROM channels WHERE id = $1", [channelId]);
   const channel = hydrateChannel(chResult.rows[0]);
-  if (!channel) throw new Error("Channel not found");
+  if (!channel || !verifyInboundSignature(channel.config?.[INBOUND_SECRET_KEY], headers, rawBody)) {
+    const denied = new Error("Invalid webhook signature");
+    denied.statusCode = 401;
+    throw denied;
+  }
   if (!channel.enabled) throw new Error("Channel is disabled");
 
   const adapter = getAdapter(channel.type);
@@ -433,6 +497,7 @@ module.exports = {
   getMessages,
   testChannel,
   handleInboundWebhook,
+  verifyInboundSignature,
   getChannelTypes,
   buildCloneableChannel,
   redactChannelConfig,

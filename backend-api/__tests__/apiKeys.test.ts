@@ -1077,6 +1077,7 @@ describe("auth middleware: API key intake", () => {
   });
 
   it("loads teammate-owned assigned agents for API-key NemoClaw routes", async () => {
+    process.env.ENABLED_SANDBOX_PROFILES = "nemoclaw";
     const keyRow = {
       id: "k-shared-agent",
       workspace_id: "ws-A",
@@ -1118,5 +1119,6 @@ describe("auth middleware: API key intake", () => {
 
     expect(status.status).toBe(200);
     expect(status.body).toEqual({ status: "stopped", sandbox: null });
+    delete process.env.ENABLED_SANDBOX_PROFILES;
   });
 });

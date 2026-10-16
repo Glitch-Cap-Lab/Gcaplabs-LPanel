@@ -68,11 +68,59 @@ describe("channel config encryption", () => {
 
     expect(mockEnsureEncryptionConfigured).toHaveBeenCalledWith("Channel credential storage");
     expect(mockEncrypt).toHaveBeenCalledWith("secret-token");
-    expect(JSON.parse(mockDb.query.mock.calls[0][1][3])).toEqual({
+    const stored = JSON.parse(mockDb.query.mock.calls[0][1][3]);
+    expect(stored).toEqual({
       bot_token: "enc(secret-token)",
       chat_id: "42",
+      inbound_secret: expect.stringMatching(/^enc\([0-9a-f]{64}\)$/),
     });
     expect(result.config).toEqual({ bot_token: "[REDACTED]", chat_id: "42" });
+  });
+
+  it("creates a channel without caller credentials even when no encryption key is set", async () => {
+    mockEnsureEncryptionConfigured.mockClear();
+    mockEnsureEncryptionConfigured.mockImplementation(() => {
+      throw new Error("no key");
+    });
+    mockDb.query.mockResolvedValueOnce({
+      rows: [{ id: "ch-9", agent_id: "agent-1", type: "telegram", name: "x", config: "{}" }],
+    });
+    const result = await channels.createChannel("agent-1", "telegram", "Plain", { chat_id: "42" });
+    expect(mockEnsureEncryptionConfigured).not.toHaveBeenCalled();
+    expect(result.inbound_secret).toMatch(/^[0-9a-f]{64}$/);
+
+    // Caller-supplied credentials still need the key.
+    await expect(
+      channels.createChannel("agent-1", "telegram", "Secret", { bot_token: "t" }),
+    ).rejects.toThrow("no key");
+    mockEnsureEncryptionConfigured.mockReset();
+  });
+
+  it("rotates the inbound secret through a config update and keeps it when omitted", async () => {
+    const row = (secret) => ({
+      id: "ch-8",
+      agent_id: "agent-1",
+      type: "telegram",
+      name: "x",
+      config: JSON.stringify({ chat_id: "42", inbound_secret: `enc(${secret})` }),
+    });
+    mockDb.query.mockReset();
+    mockDb.query.mockResolvedValueOnce({ rows: [row("old-secret-value-1234")] });
+    mockDb.query.mockResolvedValueOnce({ rows: [row("new-secret-value-5678")] });
+    await channels.updateChannel("ch-8", "agent-1", {
+      config: { chat_id: "42", inbound_secret: "new-secret-value-5678" },
+    });
+    expect(JSON.parse(mockDb.query.mock.calls[1][1][0]).inbound_secret).toBe(
+      "enc(new-secret-value-5678)",
+    );
+
+    mockDb.query.mockReset();
+    mockDb.query.mockResolvedValueOnce({ rows: [row("old-secret-value-1234")] });
+    mockDb.query.mockResolvedValueOnce({ rows: [row("old-secret-value-1234")] });
+    await channels.updateChannel("ch-8", "agent-1", { config: { chat_id: "43" } });
+    expect(JSON.parse(mockDb.query.mock.calls[1][1][0]).inbound_secret).toBe(
+      "enc(old-secret-value-1234)",
+    );
   });
 
   it("decrypts stored secrets before adapter send", async () => {
