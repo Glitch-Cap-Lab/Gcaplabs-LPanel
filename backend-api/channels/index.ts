@@ -407,11 +407,34 @@ async function testChannel(channelId, agentId) {
 // ── Inbound Webhooks ─────────────────────────────────────
 
 /**
+ * Inbound webhook signing mode from HEADMASTER_INBOUND_WEBHOOK_SIGNING.
+ *
+ * "enforce" (the default when unset) rejects unsigned requests. "off" accepts unsigned
+ * requests during a sender migration, but signed requests must still verify. Any other
+ * value fails closed to "enforce" and logs an error.
+ *
+ * @param {Object} env - Environment to read (defaults to process.env).
+ * @returns {"enforce"|"off"} The effective mode.
+ */
+function inboundSigningMode(env = process.env) {
+  const raw = env.HEADMASTER_INBOUND_WEBHOOK_SIGNING;
+  if (raw === undefined || raw === "") return "enforce";
+  const value = String(raw).trim().toLowerCase();
+  if (value === "enforce" || value === "off") return value;
+  console.error(
+    `[channels] HEADMASTER_INBOUND_WEBHOOK_SIGNING has unknown value ${JSON.stringify(String(raw).slice(0, 32))}; enforcing signatures`,
+  );
+  return "enforce";
+}
+
+/**
  * Format and audit a public channel webhook, then forward it to a reachable agent runtime.
  *
  * Runtime network failures become retryable 503 errors after the inbound audit row is written.
  * The request must carry a valid per-channel HMAC signature; an unknown channel, a channel
  * without an inbound secret, or a bad signature is rejected with 401 before any write or forward.
+ * With HEADMASTER_INBOUND_WEBHOOK_SIGNING=off, a request with no signature headers is accepted
+ * (with a warning); a request that does carry a signature must still verify.
  *
  * @param {string} channelId - Target channel identifier.
  * @param {Object} payload - Provider webhook payload.
@@ -422,10 +445,19 @@ async function testChannel(channelId, agentId) {
 async function handleInboundWebhook(channelId, payload, headers, rawBody) {
   const chResult = await db.query("SELECT * FROM channels WHERE id = $1", [channelId]);
   const channel = hydrateChannel(chResult.rows[0]);
-  if (!channel || !verifyInboundSignature(channel.config?.[INBOUND_SECRET_KEY], headers, rawBody)) {
-    const denied = new Error("Invalid webhook signature");
-    denied.statusCode = 401;
-    throw denied;
+  const denied = new Error("Invalid webhook signature");
+  denied.statusCode = 401;
+  if (!channel) throw denied;
+  const signed = Boolean(
+    headers?.["x-webhook-signature-v2"] || headers?.["x-webhook-timestamp"],
+  );
+  if (signed || inboundSigningMode() === "enforce") {
+    // A request that carries a signature must always verify, whatever the mode.
+    if (!verifyInboundSignature(channel.config?.[INBOUND_SECRET_KEY], headers, rawBody)) throw denied;
+  } else {
+    console.warn(
+      `[channels] accepted unsigned inbound webhook for channel ${channelId} (HEADMASTER_INBOUND_WEBHOOK_SIGNING=off)`,
+    );
   }
   if (!channel.enabled) throw new Error("Channel is disabled");
 
@@ -498,6 +530,7 @@ module.exports = {
   testChannel,
   handleInboundWebhook,
   verifyInboundSignature,
+  inboundSigningMode,
   getChannelTypes,
   buildCloneableChannel,
   redactChannelConfig,
