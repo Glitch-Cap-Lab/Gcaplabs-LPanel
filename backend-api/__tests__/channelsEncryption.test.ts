@@ -68,9 +68,11 @@ describe("channel config encryption", () => {
 
     expect(mockEnsureEncryptionConfigured).toHaveBeenCalledWith("Channel credential storage");
     expect(mockEncrypt).toHaveBeenCalledWith("secret-token");
-    expect(JSON.parse(mockDb.query.mock.calls[0][1][3])).toEqual({
+    const stored = JSON.parse(mockDb.query.mock.calls[0][1][3]);
+    expect(stored).toEqual({
       bot_token: "enc(secret-token)",
       chat_id: "42",
+      inbound_secret: expect.stringMatching(/^enc\([0-9a-f]{64}\)$/),
     });
     expect(result.config).toEqual({ bot_token: "[REDACTED]", chat_id: "42" });
   });

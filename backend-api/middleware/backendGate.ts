@@ -2,7 +2,10 @@
 // Mount-time gate for deploy-target-specific admin and operator surfaces.
 // A surface whose deploy target is not in ENABLED_BACKENDS answers 404, as if
 // the route did not exist. Read per request so env changes in tests apply.
-const { getEnabledBackends } = require("../../agent-runtime/lib/backendCatalog");
+const {
+  getEnabledBackends,
+  getEnabledSandboxProfiles,
+} = require("../../agent-runtime/lib/backendCatalog");
 
 // The catalog's ENABLED_BACKENDS parser accepts docker, k8s and proxmox only;
 // Remote Docker hosts are an opt-in token on the same variable
@@ -24,7 +27,24 @@ function requireBackendEnabled(backendId) {
   };
 }
 
-module.exports = { isBackendEnabled, requireBackendEnabled };
+// Sandbox profiles (NemoClaw) are opt-in through ENABLED_SANDBOX_PROFILES.
+function isSandboxProfileEnabled(profileId, env = process.env) {
+  return getEnabledSandboxProfiles(env, { runtimeFamily: "openclaw" }).includes(profileId);
+}
+
+function requireSandboxProfileEnabled(profileId) {
+  return function sandboxProfileGate(_req, res, next) {
+    if (isSandboxProfileEnabled(profileId)) return next();
+    return res.status(404).json({ error: "Not found" });
+  };
+}
+
+module.exports = {
+  isBackendEnabled,
+  requireBackendEnabled,
+  isSandboxProfileEnabled,
+  requireSandboxProfileEnabled,
+};
 
 // Optional admin surfaces this install does not use. Each stays off (nav
 // hidden, routes 404) unless named in ADMIN_OPTIONAL_SURFACES, e.g.

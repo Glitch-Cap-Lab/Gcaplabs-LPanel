@@ -1,10 +1,11 @@
 // @ts-nocheck
 const db = require("./db");
 const { decrypt, encrypt, ensureEncryptionConfigured } = require("./crypto");
+const { DEFAULT_AGENT_MEMORY_MB } = require("../agent-runtime/lib/memoryLimits");
 
 const DEFAULT_DEPLOYMENT_DEFAULTS = Object.freeze({
   vcpu: 1,
-  ram_mb: 3072,
+  ram_mb: DEFAULT_AGENT_MEMORY_MB,
   disk_gb: 10,
 });
 const DEFAULT_SYSTEM_BANNER = Object.freeze({

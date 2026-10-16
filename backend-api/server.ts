@@ -59,7 +59,11 @@ const {
   resolveSafeHermesDashboardTarget,
 } = require("./gatewayProxy");
 const { isGatewayAvailableStatus } = require("./agentStatus");
-const { isBackendEnabled, enabledAdminSurfaces } = require("./middleware/backendGate");
+const {
+  isBackendEnabled,
+  enabledAdminSurfaces,
+  requireSandboxProfileEnabled,
+} = require("./middleware/backendGate");
 const { assertRemoteHostAgentUse, toPublicRemoteHostAuthorizationError } = require("./remoteHosts");
 const { repairHermesAgentConfig } = require("./hermesUi");
 const { HERMES_EMBED_AGENT_COLUMNS, GATEWAY_EMBED_AGENT_COLUMNS } = require("./embedAgentColumns");
@@ -716,7 +720,15 @@ if (billing.BILLING_ENABLED) {
   });
 }
 
-app.use(express.json({ limit: "1mb" }));
+app.use(
+  express.json({
+    limit: "1mb",
+    // Inbound channel webhooks are signed over the exact bytes sent.
+    verify: (req, _res, buf) => {
+      if (String(req.originalUrl || req.url || "").startsWith("/webhooks/")) req.rawBody = buf;
+    },
+  }),
+);
 app.use(correlationId);
 app.use(require("./middleware/requestMetrics"));
 
@@ -852,7 +864,7 @@ app.get("/config/backends", async (_req, res) => {
   });
 });
 
-app.get("/config/nemoclaw", (req, res) => {
+app.get("/config/nemoclaw", requireSandboxProfileEnabled("nemoclaw"), (req, res) => {
   const nemoclaw =
     getSandboxProfileCatalog(process.env, { runtimeFamily: "openclaw" }).find(
       (profile) => profile.id === "nemoclaw",
@@ -871,7 +883,7 @@ app.get("/config/nemoclaw", (req, res) => {
 // Inbound webhook receiver (public — external services POST here)
 app.post("/webhooks/:channelId", async (req, res) => {
   try {
-    await channels.handleInboundWebhook(req.params.channelId, req.body, req.headers);
+    await channels.handleInboundWebhook(req.params.channelId, req.body, req.headers, req.rawBody);
     res.json({ received: true });
   } catch (e) {
     // 503 for runtime-unreachable so providers retry delivery; 400 for

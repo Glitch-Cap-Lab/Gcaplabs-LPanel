@@ -199,6 +199,17 @@ router.patch("/:id/channels/:cid", async (req, res) => {
   }
 });
 
+router.post("/:id/channels/:cid/inbound-secret", async (req, res) => {
+  try {
+    if (isOpenClawAgent(req.agent)) {
+      return res.status(400).json({ error: "Inbound webhooks are not used for this runtime" });
+    }
+    res.json(await channels.rotateInboundSecret(req.params.cid, req.params.id));
+  } catch (e) {
+    sendError(res, e, "Failed to rotate inbound secret");
+  }
+});
+
 router.delete("/:id/channels/:cid", async (req, res) => {
   try {
     if (isOpenClawAgent(req.agent)) {

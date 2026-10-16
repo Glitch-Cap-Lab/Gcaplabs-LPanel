@@ -1,6 +1,9 @@
 // @ts-nocheck
 const ProvisionerBackend = require("./interface");
-const { AGENT_MEMORY_CHOICES_MB } = require("../../../agent-runtime/lib/memoryLimits");
+const {
+  AGENT_MEMORY_CHOICES_MB,
+  DEFAULT_AGENT_MEMORY_MB,
+} = require("../../../agent-runtime/lib/memoryLimits");
 const { demuxDockerExecStream } = require("./dockerExecStream");
 const crypto = require("crypto");
 const path = require("path");
@@ -1036,7 +1039,7 @@ class DockerBackend extends ProvisionerBackend {
           // CPU: vcpu cores -> NanoCPUs
           NanoCpus: (vcpu || 2) * 1e9,
           // Memory in bytes
-          Memory: (ram_mb || 2048) * 1024 * 1024,
+          Memory: (ram_mb || DEFAULT_AGENT_MEMORY_MB) * 1024 * 1024,
           // Restart policy
           RestartPolicy: { Name: "unless-stopped" },
           // Standard agents do not need ambient Linux capabilities. Bound the
