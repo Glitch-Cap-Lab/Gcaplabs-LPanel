@@ -392,7 +392,7 @@ describe("hermes skills routes", () => {
     });
   });
 
-  it("returns hermes_registry_unavailable when the registry cannot be reached", async () => {
+  it("returns skills_index_unavailable when the registry cannot be reached", async () => {
     const handler = getRouteHandler("/skills");
     fetchMock.mockRejectedValue(new Error("network down"));
 
@@ -402,8 +402,8 @@ describe("hermes skills routes", () => {
 
     expect(res.statusCode).toBe(502);
     expect(res.body).toEqual({
-      error: "hermes_registry_unavailable",
-      message: "Could not reach the Hermes skills registry.",
+      error: "skills_index_unavailable",
+      message: "Could not reach the skills index.",
     });
   });
 

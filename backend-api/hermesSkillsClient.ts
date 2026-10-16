@@ -196,8 +196,8 @@ async function loadIndex() {
     }
     throw createHermesSkillsError(
       502,
-      "hermes_registry_unavailable",
-      "Could not reach the Hermes skills registry.",
+      "skills_index_unavailable",
+      "Could not reach the skills index.",
     );
   }
 }

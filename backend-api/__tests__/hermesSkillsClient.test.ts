@@ -264,30 +264,30 @@ describe("hermesSkillsClient", () => {
       expect(result.stale).toBe(false);
     });
 
-    it("throws hermes_registry_unavailable when no cache exists and fetch fails", async () => {
+    it("throws skills_index_unavailable when no cache exists and fetch fails", async () => {
       fetchMock.mockRejectedValue(new Error("network down"));
 
       await expect(listSkills({})).rejects.toMatchObject({
         statusCode: 502,
-        code: "hermes_registry_unavailable",
+        code: "skills_index_unavailable",
       });
     });
 
-    it("throws hermes_registry_unavailable on non-2xx registry responses", async () => {
+    it("throws skills_index_unavailable on non-2xx registry responses", async () => {
       fetchMock.mockResolvedValue(mockJsonResponse(500, { error: "boom" }));
 
       await expect(listSkills({})).rejects.toMatchObject({
         statusCode: 502,
-        code: "hermes_registry_unavailable",
+        code: "skills_index_unavailable",
       });
     });
 
-    it("throws hermes_registry_unavailable on malformed index JSON", async () => {
+    it("throws skills_index_unavailable on malformed index JSON", async () => {
       fetchMock.mockResolvedValue(mockTextResponse(200, "<html>not json</html>"));
 
       await expect(listSkills({})).rejects.toMatchObject({
         statusCode: 502,
-        code: "hermes_registry_unavailable",
+        code: "skills_index_unavailable",
       });
     });
   });
