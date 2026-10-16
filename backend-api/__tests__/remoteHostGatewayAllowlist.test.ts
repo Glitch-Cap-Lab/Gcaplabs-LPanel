@@ -6,6 +6,7 @@
  * enforcing the hard blocked-IP floor.
  */
 const { EventEmitter } = require("events");
+const { setImmediate: realSetImmediate } = require("node:timers");
 
 const mockDbQuery = jest.fn();
 const mockGatewaySockets = [];
@@ -139,9 +140,9 @@ function createClientWebSocket() {
 }
 
 async function flushPromiseWork() {
-  for (let index = 0; index < 10; index += 1) {
-    await Promise.resolve();
-  }
+  // Drain the authorization chain without coupling assertions to its number
+  // of awaits. Keep the real event-loop turn when the relay uses fake timers.
+  await new Promise(realSetImmediate);
 }
 
 beforeEach(() => {

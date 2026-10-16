@@ -13,6 +13,7 @@ const { decrypt } = require("./crypto");
 const integrations = require("./integrations");
 const { resolveAgentRuntimeFamily } = require("./agentRuntimeFields");
 const { scopeByMethod } = require("./middleware/auth");
+const { checkGatewayEmbedSession } = require("./gatewayEmbedSession");
 const {
   buildAccessibleAgentQuery,
   findAccessibleAgentForRequest,
@@ -2496,6 +2497,8 @@ function attachGatewayWS(server) {
     if (!match) return; // not ours — let other handlers process
 
     const agentId = match[1];
+    const onError = () => socket.destroy();
+    socket.on?.("error", onError);
     // Authenticate via the HttpOnly embed session cookie (scoped+agentId-bound
     // JWT). The browser sends this cookie automatically on same-origin WS
     // upgrades, so the token never appears in the URL/query-string and isn't
@@ -2525,9 +2528,22 @@ function attachGatewayWS(server) {
       return;
     }
 
-    wss.handleUpgrade(request, socket, head, (ws) => {
-      wss.emit("connection", ws, request, agentId, payload);
-    });
+    void checkGatewayEmbedSession(payload)
+      .then((session) => {
+        if (socket.destroyed) return;
+        if (!session.ok) {
+          socket.write(session.status === 503
+            ? "HTTP/1.1 503 Service Unavailable\r\n\r\n"
+            : "HTTP/1.1 401 Unauthorized\r\n\r\n");
+          socket.destroy();
+          return;
+        }
+        wss.handleUpgrade(request, socket, head, (ws) => {
+          wss.emit("connection", ws, request, agentId, session.actor);
+        });
+        socket.removeListener?.("error", onError);
+      })
+      .catch(() => socket.destroy());
   });
 
   wss.on("connection", async (ws, _req, agentId, user) => {
@@ -2597,7 +2613,6 @@ function attachGatewayWS(server) {
       const gwWs = new WebSocket(`ws://${relayHost}:${addr.port}`);
       let relayEnded = false;
       let relayHandshakeTimer = null;
-      const requiresRelayAuthorization = remoteHosts.isRemoteDockerAgent(agent);
       let relayAuthorizationTimer = null;
       let relayAuthorizationPromise = null;
       let relayAuthorizationCheckedAt = initialRelayAuthorizationCheckedAt;
@@ -2665,13 +2680,24 @@ function attachGatewayWS(server) {
 
       async function ensureRelayAuthorized({ force = false } = {}) {
         if (relayEnded) return false;
-        if (!requiresRelayAuthorization) return true;
         if (!force && Date.now() - relayAuthorizationCheckedAt < REMOTE_HOST_AUTH_RECHECK_MS) {
           return true;
         }
         if (relayAuthorizationPromise) return relayAuthorizationPromise;
         relayAuthorizationPromise = (async () => {
           try {
+            const session = await checkGatewayEmbedSession({ id: user.id, session: user });
+            if (!session.ok) {
+              finishRelay({
+                type: "error", code: session.code,
+                message: session.status === 503 ? "Session check unavailable" : "Session has been revoked",
+              });
+              return false;
+            }
+            if (!(await resolveAgent(agentId, session.actor.id))) {
+              finishRelay({ type: "error", message: "Agent not found" });
+              return false;
+            }
             await assertCurrentGatewayAccess(agent);
             relayAuthorizationCheckedAt = Date.now();
             return true;
@@ -2689,12 +2715,10 @@ function attachGatewayWS(server) {
         return relayAuthorizationPromise;
       }
 
-      if (requiresRelayAuthorization) {
-        relayAuthorizationTimer = setInterval(() => {
-          ensureRelayAuthorized({ force: true }).catch(() => {});
-        }, REMOTE_HOST_AUTH_RECHECK_MS);
-        relayAuthorizationTimer.unref?.();
-      }
+      relayAuthorizationTimer = setInterval(() => {
+        ensureRelayAuthorized({ force: true }).catch(() => finishRelay());
+      }, REMOTE_HOST_AUTH_RECHECK_MS);
+      relayAuthorizationTimer.unref?.();
 
       async function sendRelayConnect() {
         if (relayEnded || relayConnectSent || gwWs.readyState !== WebSocket.OPEN) return;

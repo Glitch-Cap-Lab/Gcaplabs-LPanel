@@ -45,7 +45,8 @@ const {
   isSignupEnabled,
 } = require("./bootstrapAdmin");
 const { ensureFirstRegisteredUserIsAdmin } = require("./ensureAdminUser");
-const { authenticateToken } = require("./middleware/auth");
+const { authenticateToken, isSessionTokenPayload } = require("./middleware/auth");
+const { checkGatewayEmbedSession } = require("./gatewayEmbedSession");
 const {
   buildAccessibleAgentQuery,
   requireApiKeyAgentPathScope,
@@ -550,6 +551,7 @@ async function resolveEmbedAccess(
 
   let userId;
   let relayToken;
+  let loginSession;
 
   if (mintingToken) {
     let payload;
@@ -569,6 +571,7 @@ async function resolveEmbedAccess(
       return null;
     }
     userId = payload.id;
+    loginSession = isSessionTokenPayload(payload) ? payload : payload.session;
   } else if (cookieToken) {
     let payload;
     try {
@@ -585,9 +588,21 @@ async function resolveEmbedAccess(
     }
     userId = payload.id;
     relayToken = cookieToken;
+    loginSession = payload.session;
   } else {
     res.status(401).send("embed session required");
     return null;
+  }
+
+  if (scope === "gateway-embed") {
+    const verdict = await checkGatewayEmbedSession({ id: userId, session: loginSession });
+    if (!verdict.ok) {
+      res.status(verdict.status).send(
+        verdict.status === 503 ? "Session check unavailable" : "Session has been revoked",
+      );
+      return null;
+    }
+    loginSession = verdict.actor;
   }
 
   const agent = await lookupAgent(agentId, userId);
@@ -622,10 +637,11 @@ async function resolveEmbedAccess(
   }
 
   if (!relayToken) {
-    relayToken = jwt.sign({ id: userId, agentId, scope }, process.env.JWT_SECRET, {
-      expiresIn: Math.floor(EMBED_SESSION_TTL_MS / 1000),
-      algorithm: "HS256",
-    });
+    relayToken = jwt.sign(
+      { id: userId, agentId, scope, ...(scope === "gateway-embed" ? { session: loginSession } : {}) },
+      process.env.JWT_SECRET,
+      { expiresIn: Math.floor(EMBED_SESSION_TTL_MS / 1000), algorithm: "HS256" },
+    );
     res.cookie(embedCookieName, relayToken, {
       httpOnly: true,
       sameSite: "lax",
