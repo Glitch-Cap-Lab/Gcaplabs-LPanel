@@ -123,6 +123,28 @@ describe("channel config encryption", () => {
     );
   });
 
+  it("never returns the inbound secret on list or update reads", async () => {
+    const stored = JSON.stringify({ chat_id: "42", inbound_secret: "enc(old-secret-value-1234)" });
+    const row = { id: "ch-7", agent_id: "agent-1", type: "telegram", name: "x", config: stored };
+    mockDb.query.mockReset();
+    mockDb.query.mockResolvedValueOnce({ rows: [row] });
+    const listed = await channels.listChannels("agent-1");
+    expect(listed[0].config.inbound_secret).toBe("[REDACTED]");
+    expect(JSON.stringify(listed)).not.toContain("old-secret-value-1234");
+
+    mockDb.query.mockResolvedValueOnce({ rows: [row] });
+    mockDb.query.mockResolvedValueOnce({ rows: [row] });
+    const updated = await channels.updateChannel("ch-7", "agent-1", {
+      config: { chat_id: "42", inbound_secret: "[REDACTED]" },
+    });
+    expect(updated.config.inbound_secret).toBe("[REDACTED]");
+    expect(JSON.stringify(updated)).not.toContain("old-secret-value-1234");
+    // Sending the redacted placeholder back keeps the stored secret.
+    expect(JSON.parse(mockDb.query.mock.calls[2][1][0]).inbound_secret).toBe(
+      "enc(old-secret-value-1234)",
+    );
+  });
+
   it("decrypts stored secrets before adapter send", async () => {
     mockDb.query
       .mockResolvedValueOnce({

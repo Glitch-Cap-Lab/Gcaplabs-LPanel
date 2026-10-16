@@ -3,6 +3,7 @@ import {
   AlertTriangle,
   ChevronDown,
   ChevronUp,
+  KeyRound,
   Link2,
   Loader2,
   LogOut,
@@ -17,6 +18,13 @@ import {
   X,
 } from "lucide-react";
 import MessageTimeline from "./MessageTimeline";
+import InboundSecretDialog from "./InboundSecretDialog";
+import {
+  buildRotationBody,
+  generateInboundSecret,
+  revealFromCreateResponse,
+  type SecretReveal,
+} from "../../lib/inboundSecret";
 import { fetchWithAuth } from "../../lib/api";
 import { useToast } from "../Toast";
 
@@ -1122,6 +1130,7 @@ export default function ChannelsTab({ agentId }: { agentId: string }) {
   const [createPairingState, setCreatePairingState] = useState<CreatePairingState>(() =>
     createEmptyCreatePairingState(),
   );
+  const [secretReveal, setSecretReveal] = useState<SecretReveal | null>(null);
   const toast = useToast();
   const typeRequestRef = useRef(0);
   const loginPollTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
@@ -1393,6 +1402,13 @@ export default function ChannelsTab({ agentId }: { agentId: string }) {
         throw new Error(data.error || "Failed to save channel");
       }
 
+      const createdName = editorName.trim() || normalizedType;
+      const reveal =
+        payload.runtime !== "openclaw" && editorMode === "create"
+          ? revealFromCreateResponse(data, createdName)
+          : null;
+      if (reveal) setSecretReveal(reveal);
+
       toast.success(
         payload.runtime === "openclaw"
           ? "Channel setup saved"
@@ -1408,6 +1424,33 @@ export default function ChannelsTab({ agentId }: { agentId: string }) {
       toast.error(message);
     } finally {
       setSaving(false);
+    }
+  }
+
+  async function handleRotateSecret(channel: ChannelRecord) {
+    if (
+      !window.confirm(
+        `Rotate the webhook secret for "${channel.name}"? Anything signing with the old secret will stop working.`,
+      )
+    ) {
+      return;
+    }
+    setBusyAction(`${channel.id}:rotate`);
+    try {
+      const secret = generateInboundSecret();
+      const res = await fetchWithAuth(`/api/agents/${agentId}/channels/${channel.id}`, {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(buildRotationBody(channel.config, secret)),
+      });
+      const data = await parseJson(res);
+      if (!res.ok) throw new Error(data.error || "Failed to rotate secret");
+      setSecretReveal({ channelName: channel.name, secret, reason: "rotated" });
+      await loadChannels({ quiet: true });
+    } catch (nextError: any) {
+      toast.error(nextError.message || "Failed to rotate secret");
+    } finally {
+      setBusyAction("");
     }
   }
 
@@ -2146,6 +2189,24 @@ export default function ChannelsTab({ agentId }: { agentId: string }) {
                             Edit
                           </button>
                         ) : null}
+                        {payload.runtime !== "openclaw" &&
+                        channel.actions?.canEdit !== false &&
+                        !channel.readOnly ? (
+                          <button
+                            onClick={() => {
+                              void handleRotateSecret(channel);
+                            }}
+                            disabled={busyAction === `${channel.id}:rotate`}
+                            className="inline-flex items-center gap-1.5 rounded-xl border border-slate-200 px-3 py-2 text-xs font-bold text-slate-700 transition-colors hover:bg-slate-50 disabled:opacity-50"
+                          >
+                            {busyAction === `${channel.id}:rotate` ? (
+                              <Loader2 size={12} className="animate-spin" />
+                            ) : (
+                              <KeyRound size={12} />
+                            )}
+                            {channel.config?.inbound_secret ? "Rotate secret" : "Generate secret"}
+                          </button>
+                        ) : null}
                         {channel.actions?.canToggle !== false && channel.configured ? (
                           <button
                             onClick={() => {
@@ -2482,6 +2543,8 @@ export default function ChannelsTab({ agentId }: { agentId: string }) {
           </div>
         </div>
       ) : null}
+
+      <InboundSecretDialog reveal={secretReveal} onClose={() => setSecretReveal(null)} />
 
       <QrLoginDialog
         state={loginState}
