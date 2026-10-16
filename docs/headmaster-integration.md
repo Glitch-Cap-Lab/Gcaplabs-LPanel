@@ -76,6 +76,19 @@ closed. Revocation paths:
 Every issuance, redemption, rejection, and revocation is written to the
 `headmaster_audit` table with the GCAP/Nora identity pair.
 
+Gateway embed cookies also retain the originating login's session claims inside
+their agent-bound scope. Gateway assets and WebSocket upgrades check that login
+using the existing session-version/role check or privileged Headmaster session
+check. A revoked login is refused with HTTP 401; unavailable session storage is
+refused with HTTP 503. Open gateway relays repeat the check every
+`REMOTE_HOST_AUTH_RECHECK_MS` (default 5 seconds), before sending runtime
+credentials, and close both peers when authorization fails. The original login
+expiry still applies. Scoped cookies cannot authenticate as full login sessions.
+
+Older gateway embed cookies without originating login claims fail closed. Reload
+the embed with a current login cookie to mint a replacement; no database change
+or new session store is needed.
+
 ## Configuration
 
 Nora backend (`/opt/nora/.env`):

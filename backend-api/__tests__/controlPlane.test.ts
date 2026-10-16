@@ -795,6 +795,10 @@ describe("gateway control-plane embed", () => {
     expect(res.headers["set-cookie"]).toEqual(
       expect.arrayContaining([expect.stringContaining("__nora_gateway_embed_agent-1=")]),
     );
+    const embedCookie = res.headers["set-cookie"].find((value) => value.startsWith("__nora_gateway_embed_agent-1="));
+    const embed = jwt.verify(embedCookie.split(";")[0].split("=")[1], JWT_SECRET);
+    expect(embed.session).toEqual(jwt.verify(token, JWT_SECRET));
+    expect(embed.scope).toBe("gateway-embed");
     expect(res.headers["content-security-policy"]).toContain(
       "script-src 'self' 'unsafe-inline' 'unsafe-eval'",
     );
@@ -1329,7 +1333,7 @@ describe("gateway control-plane embed", () => {
 
   it("rejects asset proxy access when the embed cookie belongs to a user who does not own the agent", async () => {
     const otherUserCookie = jwt.sign(
-      { id: "user-2", agentId: "agent-1", scope: "gateway-embed" },
+      { id: "user-2", agentId: "agent-1", scope: "gateway-embed", session: { id: "user-2", role: "user" } },
       JWT_SECRET,
       { expiresIn: "15m", algorithm: "HS256" },
     );
@@ -1359,6 +1363,41 @@ describe("gateway control-plane embed", () => {
     expect(res.status).toBe(401);
     expect(global.fetch).not.toHaveBeenCalled();
     expect(mockDb.query).not.toHaveBeenCalled();
+  });
+
+  it("rejects legacy gateway cookies until a current login refreshes the embed", async () => {
+    const legacy = jwt.sign(
+      { id: "user-1", agentId: "agent-1", scope: "gateway-embed" },
+      JWT_SECRET,
+      { expiresIn: "15m", algorithm: "HS256" },
+    );
+    const denied = await request(app)
+      .get("/agents/agent-1/gateway/assets/app.js")
+      .set("Host", "nora.test")
+      .set("Cookie", `__nora_gateway_embed_agent-1=${legacy}`);
+    expect(denied.status).toBe(401);
+    expect(mockDb.query).not.toHaveBeenCalled();
+    expect(global.fetch).not.toHaveBeenCalled();
+
+    mockDb.query.mockResolvedValueOnce({ rows: [{
+      effective_role: "owner", host: "10.0.0.10", gateway_host_port: null,
+      status: "running", gateway_token: "local-test-runtime-password",
+    }] });
+    global.fetch.mockResolvedValueOnce({
+      ok: true, status: 200,
+      headers: new Headers({ "content-type": "text/html; charset=utf-8" }),
+      text: async () => "<html><head></head><body>ok</body></html>",
+    });
+    const refreshed = await request(app)
+      .get("/agents/agent-1/gateway/embed")
+      .set("Host", "nora.test")
+      .set("Cookie", `__nora_gateway_embed_agent-1=${legacy}; nora_auth=${token}`);
+    expect(refreshed.status).toBe(200);
+    const cookie = refreshed.headers["set-cookie"].find((value) =>
+      value.startsWith("__nora_gateway_embed_agent-1="),
+    );
+    expect(jwt.verify(cookie.split(";")[0].split("=")[1], JWT_SECRET).session)
+      .toMatchObject({ id: "user-1" });
   });
 
   it("proxies embed-relative config and navigation paths via the embed session cookie", async () => {
@@ -1459,7 +1498,7 @@ describe("gateway control-plane embed", () => {
   it("accepts a scoped embed token on its own embed route but not as a session", async () => {
     const jwt = require("jsonwebtoken");
     const embedToken = jwt.sign(
-      { id: "user-1", agentId: "agent-1", scope: "gateway-embed" },
+      { id: "user-1", agentId: "agent-1", scope: "gateway-embed", session: jwt.verify(token, JWT_SECRET) },
       process.env.JWT_SECRET,
       { algorithm: "HS256", expiresIn: "15m" },
     );
