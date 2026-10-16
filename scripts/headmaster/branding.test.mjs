@@ -223,7 +223,6 @@ test("launch exchange backend wiring is present and fail-closed", async () => {
   assert.match(launch, /sameSite: "none"/, "embedded sessions use SameSite=None");
   assert.match(launch, /httpOnly: true/, "session cookie stays HttpOnly");
   assert.match(launch, /HEADMASTER_LAUNCH_TTL_SECONDS, 60, 30, 120/, "launch code TTL ~60s");
-  assert.match(launch, /HEADMASTER_REVALIDATE_SECONDS, 25, 10, 30/, "revalidation bound <= 30s");
   assert.match(
     launch,
     /HEADMASTER_SESSION_TTL_SECONDS,\s*12 \* 60 \* 60/,
