@@ -230,41 +230,20 @@ async function createChannel(agentId, type, name, config = {}) {
   // Verify the adapter type exists
   getAdapter(type);
   const inboundSecret = generateInboundSecret();
-  const { secured, hasSensitiveMaterial } = protectChannelConfig(type, {
-    ...parseConfig(config),
-    [INBOUND_SECRET_KEY]: inboundSecret,
-  });
+  const { secured, hasSensitiveMaterial } = protectChannelConfig(type, config);
+  // Only caller-supplied credentials require the encryption key; with the
+  // NORA_ALLOW_PLAINTEXT_SECRETS override the generated secret is stored as
+  // encrypt() returns it (plaintext when no key is set), as elsewhere.
   if (hasSensitiveMaterial) {
     ensureEncryptionConfigured("Channel credential storage");
   }
+  secured[INBOUND_SECRET_KEY] = encrypt(inboundSecret);
   const result = await db.query(
     "INSERT INTO channels(agent_id, type, name, config) VALUES($1, $2, $3, $4) RETURNING *",
     [agentId, type, name, JSON.stringify(secured)],
   );
   // The inbound signing secret is shown once, here; later reads are redacted.
   return { ...sanitizeChannel(result.rows[0]), inbound_secret: inboundSecret };
-}
-
-/**
- * Replace a channel's inbound webhook signing secret and return the new value once.
- * Channels created before inbound signing existed have none and reject webhooks until this runs.
- */
-async function rotateInboundSecret(channelId, agentId) {
-  const existingResult = await db.query("SELECT * FROM channels WHERE id = $1 AND agent_id = $2", [
-    channelId,
-    agentId,
-  ]);
-  const existing = existingResult.rows[0];
-  if (!existing) throw new Error("Channel not found");
-  ensureEncryptionConfigured("Channel credential storage");
-  const inboundSecret = generateInboundSecret();
-  const config = { ...parseConfig(existing.config), [INBOUND_SECRET_KEY]: encrypt(inboundSecret) };
-  await db.query("UPDATE channels SET config = $1 WHERE id = $2 AND agent_id = $3", [
-    JSON.stringify(config),
-    channelId,
-    agentId,
-  ]);
-  return { inbound_secret: inboundSecret };
 }
 
 /**
@@ -294,8 +273,15 @@ async function updateChannel(channelId, agentId, updates) {
   if (updates.config !== undefined) {
     const currentConfig = revealChannelConfig(existing.type, existing.config);
     const restoredConfig = restoreRedactedConfigValue(parseConfig(updates.config), currentConfig);
-    // Config edits never change the inbound signing secret; only rotation does.
-    if (currentConfig[INBOUND_SECRET_KEY]) {
+    // Omitting inbound_secret keeps the current one; supplying a new value rotates it.
+    const nextInbound = restoredConfig[INBOUND_SECRET_KEY];
+    if (nextInbound && nextInbound !== currentConfig[INBOUND_SECRET_KEY]) {
+      if (String(nextInbound).length < 16) {
+        const bad = new Error("inbound_secret must be at least 16 characters");
+        bad.statusCode = 400;
+        throw bad;
+      }
+    } else if (currentConfig[INBOUND_SECRET_KEY]) {
       restoredConfig[INBOUND_SECRET_KEY] = currentConfig[INBOUND_SECRET_KEY];
     } else {
       delete restoredConfig[INBOUND_SECRET_KEY];
@@ -511,7 +497,6 @@ module.exports = {
   getMessages,
   testChannel,
   handleInboundWebhook,
-  rotateInboundSecret,
   verifyInboundSignature,
   getChannelTypes,
   buildCloneableChannel,

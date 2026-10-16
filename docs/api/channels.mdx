@@ -166,4 +166,11 @@ Legacy adapters can receive inbound events through:
 POST /api/webhooks/:channelId
 ```
 
-Nora accepts the payload, logs it as inbound message history, and forwards it to the agent runtime if the agent is running. OpenClaw-managed channels use the OpenClaw runtime's own inbound mechanisms instead of this legacy webhook logger.
+Nora verifies the signature, logs the payload as inbound message history, and forwards it to the agent runtime if the agent is running. OpenClaw-managed channels use the OpenClaw runtime's own inbound mechanisms instead of this legacy webhook logger.
+
+Requests must be signed with the channel's inbound secret. Send two headers:
+
+- `X-Webhook-Timestamp`: the current Unix time in seconds. Requests more than 300 seconds off the server clock are rejected.
+- `X-Webhook-Signature-V2`: the hex HMAC-SHA256 of `<timestamp>.<raw request body>`, keyed with the inbound secret.
+
+An unsigned request, a wrong signature, a stale timestamp, or a channel with no inbound secret returns `401` and nothing is recorded. New channels return their `inbound_secret` once in the create response. To set or rotate it, `PATCH /agents/:id/channels/:cid` with `{"config": {"inbound_secret": "<new value, at least 16 characters>"}}`; channels created before signing existed reject webhooks until a secret is set this way. Services that cannot sign requests themselves need a small signing relay in front of this endpoint.

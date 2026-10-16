@@ -323,7 +323,7 @@ POST /agents/:id/integrations/:iid/test
 
 ## Inbound webhook receiver
 
-Receive events from external services that do not support OAuth callbacks. This endpoint is **public** — no authentication is required. You configure the external service to POST to this URL.
+Receive events from external services that do not support OAuth callbacks. This endpoint takes no `Authorization` header; instead every request must carry a per-channel HMAC signature (see below).
 
 ```
 POST /webhooks/:channelId
@@ -335,7 +335,14 @@ POST /webhooks/:channelId
   The UUID of the Nora channel that should handle the inbound event. Obtain this from `GET /agents/:id/channels`.
 </ParamField>
 
-The request body can be any JSON payload from the external service. Headers are forwarded to the channel handler for signature verification.
+The request body can be any JSON payload.
+
+Requests must be signed with the channel's inbound secret. Send two headers:
+
+- `X-Webhook-Timestamp`: the current Unix time in seconds. Requests more than 300 seconds off the server clock are rejected.
+- `X-Webhook-Signature-V2`: the hex HMAC-SHA256 of `<timestamp>.<raw request body>`, keyed with the inbound secret.
+
+An unsigned request, a wrong signature, a stale timestamp, or a channel with no inbound secret returns `401` and nothing is recorded. New channels return their `inbound_secret` once in the create response. To set or rotate it, `PATCH /agents/:id/channels/:cid` with `{"config": {"inbound_secret": "<new value, at least 16 characters>"}}`; channels created before signing existed reject webhooks until a secret is set this way. Services that cannot sign requests themselves need a small signing relay in front of this endpoint.
 
 ### Response
 
@@ -343,9 +350,14 @@ The request body can be any JSON payload from the external service. Headers are 
 
 <CodeGroup>
   ```bash curl theme={null}
+  BODY='{"event":"push","ref":"refs/heads/main"}'
+  TS=$(date +%s)
+  SIG=$(printf '%s.%s' "$TS" "$BODY" | openssl dgst -sha256 -hmac "$INBOUND_SECRET" | awk '{print $NF}')
   curl -X POST http://localhost:8080/api/webhooks/d5e6f7a8-b9c0-1234-defa-123456789012 \
     -H "Content-Type: application/json" \
-    -d '{"event":"push","ref":"refs/heads/main"}'
+    -H "X-Webhook-Timestamp: $TS" \
+    -H "X-Webhook-Signature-V2: $SIG" \
+    -d "$BODY"'
   ```
 </CodeGroup>
 
