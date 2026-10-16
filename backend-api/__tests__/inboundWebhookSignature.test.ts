@@ -130,3 +130,69 @@ describe("inbound channel webhook authentication", () => {
     expect(writes()).toHaveLength(1);
   });
 });
+
+describe("HEADMASTER_INBOUND_WEBHOOK_SIGNING switch", () => {
+  const ORIGINAL = process.env.HEADMASTER_INBOUND_WEBHOOK_SIGNING;
+  let warn;
+  let error;
+
+  beforeEach(() => {
+    mockDb.query.mockReset();
+    mockDb.query.mockImplementation(async (sql) => {
+      if (/FROM channels/.test(sql)) return { rows: [channelRow()] };
+      return { rows: [] };
+    });
+    warn = jest.spyOn(console, "warn").mockImplementation(() => {});
+    error = jest.spyOn(console, "error").mockImplementation(() => {});
+  });
+
+  afterEach(() => {
+    if (ORIGINAL === undefined) delete process.env.HEADMASTER_INBOUND_WEBHOOK_SIGNING;
+    else process.env.HEADMASTER_INBOUND_WEBHOOK_SIGNING = ORIGINAL;
+    warn.mockRestore();
+    error.mockRestore();
+  });
+
+  const writes = () => mockDb.query.mock.calls.filter(([sql]) => /INSERT/.test(sql));
+  const post = (headers = {}) =>
+    request(buildApp()).post("/webhooks/ch-1").set("content-type", "application/json").set(headers).send(BODY);
+
+  it("rejects unsigned requests when unset", async () => {
+    delete process.env.HEADMASTER_INBOUND_WEBHOOK_SIGNING;
+    const res = await post();
+    expect(res.status).toBe(401);
+    expect(writes()).toHaveLength(0);
+  });
+
+  it("accepts an unsigned request when off and warns once without the secret", async () => {
+    process.env.HEADMASTER_INBOUND_WEBHOOK_SIGNING = "off";
+    const res = await post();
+    expect(res.status).toBe(200);
+    expect(writes()).toHaveLength(1);
+    expect(warn).toHaveBeenCalledTimes(1);
+    expect(String(warn.mock.calls[0][0])).not.toContain(SECRET);
+  });
+
+  it("still rejects a bad signature when off", async () => {
+    process.env.HEADMASTER_INBOUND_WEBHOOK_SIGNING = "off";
+    const res = await post(sign(BODY, "some-other-secret"));
+    expect(res.status).toBe(401);
+    expect(writes()).toHaveLength(0);
+  });
+
+  it("accepts a good signature when off without warning", async () => {
+    process.env.HEADMASTER_INBOUND_WEBHOOK_SIGNING = "off";
+    const res = await post(sign(BODY));
+    expect(res.status).toBe(200);
+    expect(writes()).toHaveLength(1);
+    expect(warn).not.toHaveBeenCalled();
+  });
+
+  it("treats an unknown value as enforce and logs an error", async () => {
+    process.env.HEADMASTER_INBOUND_WEBHOOK_SIGNING = "disabled";
+    const res = await post();
+    expect(res.status).toBe(401);
+    expect(writes()).toHaveLength(0);
+    expect(error).toHaveBeenCalled();
+  });
+});
