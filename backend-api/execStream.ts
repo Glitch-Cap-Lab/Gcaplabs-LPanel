@@ -78,12 +78,16 @@ function attachExecStream(server) {
 
     // Same session checks as the HTTP middleware (revoked, demoted, or
     // unverifiable sessions are refused before the upgrade completes).
-    void authenticateSocketUpgrade(request, socket, url.searchParams).then((actor) => {
-      if (!actor) return;
-      wss.handleUpgrade(request, socket, head, (ws) => {
-        wss.emit("connection", ws, request, match[1], actor);
-      });
-    }, () => socket.destroy());
+    void authenticateSocketUpgrade(request, socket, url.searchParams)
+      .then((auth) => {
+        if (!auth) return;
+        const { actor } = auth;
+        wss.handleUpgrade(request, socket, head, (ws) => {
+          wss.emit("connection", ws, request, match[1], actor);
+        });
+        auth.release();
+      })
+      .catch(() => socket.destroy());
   });
 
   wss.on("connection", async (ws, _req, agentId, user) => {
@@ -106,8 +110,10 @@ function attachExecStream(server) {
 
     try {
       const findAuthorizedAgent = async () => {
-        // Re-run the HTTP session check on every pass and authorize with the
-        // role stored for the user, so logout or demotion closes the socket.
+        // Re-run the HTTP session check on every pass. Logout bumps the session
+        // version, and any token/stored role mismatch revokes the whole session
+        // (evaluateSessionAgainstUser), so a demoted admin loses the socket
+        // outright. Access is then resolved with the role from the users row.
         const session = await checkSocketSession(user);
         if (!session.ok) {
           throw authorizationFailure(

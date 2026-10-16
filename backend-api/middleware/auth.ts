@@ -124,15 +124,27 @@ async function checkSocketSession(payload) {
  * `?token=`), applying checkSocketSession. On failure the upgrade is refused
  * with 401 (or 503 when the check is unavailable) and the socket destroyed.
  *
+ * The session check is async, and nothing else listens for socket errors
+ * until `ws` takes the socket over, so a client reset during the lookup would
+ * be an uncaught error. A guard destroys the socket on error until the caller
+ * calls `release()` right after `handleUpgrade`.
+ *
  * @param {Object} request - HTTP upgrade request.
  * @param {Object} socket - Raw upgrade socket.
  * @param {URLSearchParams} searchParams - Parsed upgrade query string.
- * @returns {Promise<Object|null>} The authorized actor, or null when refused.
+ * @returns {Promise<{actor: Object, release: Function}|null>} The authorized
+ *   actor and the guard release, or null when refused.
  */
 async function authenticateSocketUpgrade(request, socket, searchParams) {
+  const onError = () => socket.destroy();
+  socket.on?.("error", onError);
   const payload = tryDecodeSession(extractSessionTokenFromUpgrade(request, searchParams));
   const verdict = payload ? await checkSocketSession(payload) : { ok: false, status: 401 };
-  if (verdict.ok) return verdict.actor;
+  // The client may have gone away during the lookup; nothing to upgrade.
+  if (socket.destroyed) return null;
+  if (verdict.ok) {
+    return { actor: verdict.actor, release: () => socket.removeListener?.("error", onError) };
+  }
   socket.write(
     verdict.status === 503
       ? "HTTP/1.1 503 Service Unavailable\r\n\r\n"

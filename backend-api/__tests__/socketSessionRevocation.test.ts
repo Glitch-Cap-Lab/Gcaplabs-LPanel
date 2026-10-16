@@ -13,7 +13,9 @@ const users = new Map();
 const agents = new Map();
 const mockDb = {
   failNext: false,
+  gate: null,
   query: jest.fn(async (sql, params) => {
+    if (mockDb.gate) await mockDb.gate;
     if (mockDb.failNext) {
       mockDb.failNext = false;
       throw new Error("db down");
@@ -113,6 +115,7 @@ beforeEach(() => {
     user_id: "owner-1",
   });
   mockDb.failNext = false;
+  mockDb.gate = null;
   mockDb.query.mockClear();
   wsConnections.length = 0;
 
@@ -183,6 +186,58 @@ describe("socket upgrades check the session like HTTP", () => {
     expect(ws).toBeUndefined();
     expect(socket.write).toHaveBeenCalledWith("HTTP/1.1 503 Service Unavailable\r\n\r\n");
     expect(socket.destroy).toHaveBeenCalled();
+  });
+});
+
+describe("socket errors during the async session check", () => {
+  it("destroys the socket instead of crashing when the client resets mid-check", async () => {
+    const token = login("admin-1");
+    let openGate;
+    mockDb.gate = new Promise((resolve) => {
+      openGate = resolve;
+    });
+    const socket = new EventEmitter();
+    socket.destroyed = false;
+    socket.write = jest.fn();
+    socket.destroy = jest.fn(() => {
+      socket.destroyed = true;
+    });
+
+    server.emit(
+      "upgrade",
+      { url: `/ws/exec/agent-1?token=${encodeURIComponent(token)}`, headers: { host: "nora.test" } },
+      socket,
+      Buffer.alloc(0),
+    );
+
+    // An EventEmitter with no 'error' listener throws; the guard must catch it.
+    expect(() => socket.emit("error", new Error("ECONNRESET"))).not.toThrow();
+    expect(socket.destroy).toHaveBeenCalled();
+
+    openGate();
+    await flushAsyncWork();
+    expect(wsConnections).toHaveLength(0);
+  });
+
+  it("removes the error guard once the socket is handed to the WebSocket server", async () => {
+    const socket = new EventEmitter();
+    socket.destroyed = false;
+    socket.write = jest.fn();
+    socket.destroy = jest.fn();
+
+    server.emit(
+      "upgrade",
+      {
+        url: `/ws/exec/agent-1?token=${encodeURIComponent(login("admin-1"))}`,
+        headers: { host: "nora.test" },
+      },
+      socket,
+      Buffer.alloc(0),
+    );
+    await flushAsyncWork();
+
+    expect(wsConnections).toHaveLength(1);
+    expect(socket.listenerCount("error")).toBe(0);
   });
 });
 
