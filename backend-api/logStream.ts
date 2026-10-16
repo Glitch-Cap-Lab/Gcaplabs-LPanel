@@ -1,17 +1,19 @@
 // @ts-nocheck
 // backend-api/logStream.ts — WebSocket-based agent log streaming
 const { WebSocketServer } = require("ws");
-const jwt = require("jsonwebtoken");
 const db = require("./db");
 const containerManager = require("./containerManager");
 const { resolveAgentBackendType } = require("./agentRuntimeFields");
-const { extractSessionTokenFromUpgrade } = require("./authCookie");
+const {
+  authenticateSocketUpgrade,
+  checkSocketSession,
+} = require("./middleware/auth");
 const { findAccessibleAgentForActor } = require("./middleware/ownership");
 const { assertRemoteHostAgentUse, isRemoteHostAccessRevokedError } = require("./remoteHosts");
 
 const ACCESS_RECHECK_MS = Math.max(
   250,
-  Number.parseInt(process.env.REMOTE_HOST_AUTH_RECHECK_MS || "1000", 10) || 1000,
+  Number.parseInt(process.env.REMOTE_HOST_AUTH_RECHECK_MS || "5000", 10) || 5000,
 );
 
 function authorizationFailure(message, code, cause) {
@@ -67,40 +69,14 @@ function attachLogStream(server) {
       return; // not ours — let other upgrade handlers (exec, etc.) handle it
     }
 
-    const token = extractSessionTokenFromUpgrade(request, url.searchParams);
-    let payload;
-    try {
-      payload = jwt.verify(token, process.env.JWT_SECRET, {
-        algorithms: ["HS256"],
+    // Same session checks as the HTTP middleware (revoked, demoted, or
+    // unverifiable sessions are refused before the upgrade completes).
+    void authenticateSocketUpgrade(request, socket, url.searchParams).then((actor) => {
+      if (!actor) return;
+      wss.handleUpgrade(request, socket, head, (ws) => {
+        wss.emit("connection", ws, request, match[1], actor);
       });
-      if (!require("./middleware/auth").isSessionTokenPayload(payload)) throw new Error("not a session token");
-    } catch {
-      socket.write("HTTP/1.1 401 Unauthorized\r\n\r\n");
-      socket.destroy();
-      return;
-    }
-
-    // Headmaster-launched sessions: fail closed when revoked or when shared
-    // session state cannot be reached. Only hm sessions take the async path;
-    // native sessions keep the original synchronous upgrade.
-    if (payload.hm) {
-      require("./headmasterLaunch")
-        .assertPrivilegedSocketSession(payload)
-        .then(() => {
-          wss.handleUpgrade(request, socket, head, (ws) => {
-            wss.emit("connection", ws, request, match[1], payload);
-          });
-        })
-        .catch(() => {
-          socket.write("HTTP/1.1 401 Unauthorized\r\n\r\n");
-          socket.destroy();
-        });
-      return;
-    }
-
-    wss.handleUpgrade(request, socket, head, (ws) => {
-      wss.emit("connection", ws, request, match[1], payload);
-    });
+    }, () => socket.destroy());
   });
 
   wss.on("connection", async (ws, _req, agentId, user) => {
@@ -123,9 +99,18 @@ function attachLogStream(server) {
 
     try {
       const findAuthorizedAgent = async () => {
+        // Re-run the HTTP session check on every pass and authorize with the
+        // role stored for the user, so logout or demotion closes the socket.
+        const session = await checkSocketSession(user);
+        if (!session.ok) {
+          throw authorizationFailure(
+            session.status === 503 ? "Session check unavailable" : "Session has been revoked",
+            session.code,
+          );
+        }
         let currentAgent;
         try {
-          currentAgent = await findAccessibleAgentForActor(agentId, user, "viewer");
+          currentAgent = await findAccessibleAgentForActor(agentId, session.actor, "viewer");
         } catch (error) {
           throw authorizationFailure(
             "Unable to verify agent access",

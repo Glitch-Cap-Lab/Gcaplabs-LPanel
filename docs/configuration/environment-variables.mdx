@@ -347,7 +347,7 @@ backend replicas.
 
 | Variable                               | Required | Default | Description                                                                                                                                          |
 | -------------------------------------- | -------- | ------- | ---------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `REMOTE_HOST_AUTH_RECHECK_MS`          | No       | `1000`  | Grant recheck interval in milliseconds for active gateway, log, and terminal streams. Minimum 250.                                                   |
+| `REMOTE_HOST_AUTH_RECHECK_MS`          | No       | `5000`  | Recheck interval in milliseconds for active gateway, log, and terminal streams (grant; log and terminal also re-check the login session). Min 250.   |
 | `REMOTE_HOST_MUTATION_LOCK_TIMEOUT_MS` | No       | `15000` | Maximum wait for another create/edit/Test/pin-reset/delete/share/unshare operation on the same host id. Timeout rejects the competing request (409). |
 
 ## Proxmox

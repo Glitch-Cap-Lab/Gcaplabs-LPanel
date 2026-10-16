@@ -1,6 +1,6 @@
 // @ts-nocheck
 const jwt = require("jsonwebtoken");
-const { readAuthCookie } = require("../authCookie");
+const { readAuthCookie, extractSessionTokenFromUpgrade } = require("../authCookie");
 
 // Session and API-key authentication
 
@@ -83,6 +83,63 @@ function tryDecodeSession(token) {
   } catch {
     return null;
   }
+}
+
+/**
+ * Run the same per-request session checks as authenticateToken for a
+ * WebSocket session: Headmaster-launched sessions must still exist, and
+ * password/OAuth sessions must match the stored session version and role.
+ * Fails closed (503) when the check cannot reach its storage. Used at
+ * upgrade time and again on every periodic socket re-check.
+ *
+ * @param {Object} payload - Verified session JWT payload.
+ * @returns {Promise<{ok: true, actor: Object} | {ok: false, status: number, code: string}>}
+ *   `actor` carries the role read from the users row for password/OAuth sessions.
+ */
+async function checkSocketSession(payload) {
+  if (!isSessionTokenPayload(payload)) return { ok: false, status: 401, code: "session_invalid" };
+  if (payload.hm) {
+    try {
+      await require("../headmasterLaunch").assertPrivilegedSocketSession(payload);
+    } catch (error) {
+      const status = error?.statusCode === 503 ? 503 : 401;
+      return { ok: false, status, code: error?.code || "session_revoked" };
+    }
+    return { ok: true, actor: payload };
+  }
+  const { checkSession } = require("../sessionVersion");
+  const verdict = await checkSession(require("../db"), payload);
+  if (!verdict.ok) {
+    return {
+      ok: false,
+      status: verdict.code === "session_check_unavailable" ? 503 : 401,
+      code: verdict.code,
+    };
+  }
+  return { ok: true, actor: { ...payload, role: verdict.role ?? payload.role } };
+}
+
+/**
+ * Authenticate a WebSocket upgrade with the session cookie (or legacy
+ * `?token=`), applying checkSocketSession. On failure the upgrade is refused
+ * with 401 (or 503 when the check is unavailable) and the socket destroyed.
+ *
+ * @param {Object} request - HTTP upgrade request.
+ * @param {Object} socket - Raw upgrade socket.
+ * @param {URLSearchParams} searchParams - Parsed upgrade query string.
+ * @returns {Promise<Object|null>} The authorized actor, or null when refused.
+ */
+async function authenticateSocketUpgrade(request, socket, searchParams) {
+  const payload = tryDecodeSession(extractSessionTokenFromUpgrade(request, searchParams));
+  const verdict = payload ? await checkSocketSession(payload) : { ok: false, status: 401 };
+  if (verdict.ok) return verdict.actor;
+  socket.write(
+    verdict.status === 503
+      ? "HTTP/1.1 503 Service Unavailable\r\n\r\n"
+      : "HTTP/1.1 401 Unauthorized\r\n\r\n",
+  );
+  socket.destroy();
+  return null;
 }
 
 /**
@@ -266,7 +323,9 @@ function requireSession(req, res, next) {
 }
 
 module.exports = {
+  authenticateSocketUpgrade,
   authenticateToken,
+  checkSocketSession,
   extractExplicitAuth,
   isSessionTokenPayload,
   requireAdmin,

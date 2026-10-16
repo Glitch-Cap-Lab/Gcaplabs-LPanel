@@ -77,6 +77,15 @@ jest.mock("../healthChecks", () => ({
 const {
   deriveHeadmasterInferenceKey,
 } = require("../../agent-runtime/lib/headmasterInference");
+// The recheck tests below advance fake timers by one interval; pin it so they
+// do not depend on the production default.
+const originalRemoteHostAuthRecheckMs = process.env.REMOTE_HOST_AUTH_RECHECK_MS;
+process.env.REMOTE_HOST_AUTH_RECHECK_MS = "1000";
+afterAll(() => {
+  if (originalRemoteHostAuthRecheckMs === undefined) delete process.env.REMOTE_HOST_AUTH_RECHECK_MS;
+  else process.env.REMOTE_HOST_AUTH_RECHECK_MS = originalRemoteHostAuthRecheckMs;
+});
+
 const {
   buildDefaultModelCommand,
   buildHermesEnvWriteCommand,
