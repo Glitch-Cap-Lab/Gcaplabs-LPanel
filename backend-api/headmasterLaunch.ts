@@ -28,7 +28,12 @@ const { AUTH_COOKIE_NAME, AUTH_COOKIE_MAX_AGE_MS } = require("./authCookie");
 const IS_TEST_ENV = process.env.NODE_ENV === "test" || !!process.env.JEST_WORKER_ID;
 
 const CODE_TTL_SECONDS = clampInt(process.env.HEADMASTER_LAUNCH_TTL_SECONDS, 60, 30, 120);
-const REVALIDATE_SECONDS = clampInt(process.env.HEADMASTER_REVALIDATE_SECONDS, 25, 10, 30);
+// Operator lever: 10-120 s, default 25 s. A revoked hm session can survive up to
+// this long before the revalidator notices.
+function parseRevalidateSeconds(rawValue) {
+  return clampInt(rawValue, 25, 10, 120);
+}
+const REVALIDATE_SECONDS = parseRevalidateSeconds(process.env.HEADMASTER_REVALIDATE_SECONDS);
 // Headmaster-launched sessions live shorter than native ones by default: the
 // GCAP side has no admin session-enumeration API, so liveness revalidation
 // covers role/suspension while this TTL bounds any stale binding. Re-launch
@@ -676,7 +681,7 @@ let revalidatorStarted = false;
  * Periodically re-check every active hm session against the Headmaster site.
  * The site endpoint freshly re-verifies the GCAP session and admin role; a
  * dead session, suspended account, or demoted role revokes the Nora session
- * and its live sockets. Bound: REVALIDATE_SECONDS (≤30s by default).
+ * and its live sockets. Bound: REVALIDATE_SECONDS (default 25s, max 120s).
  */
 function startSessionRevalidator() {
   if (revalidatorStarted || IS_TEST_ENV) return;
@@ -832,6 +837,7 @@ module.exports = {
   CODE_PATTERN,
   BROWSER_NONCE_PATTERN,
   REVALIDATE_SECONDS,
+  parseRevalidateSeconds,
   ensureSchema,
   listHeadmasterLinks,
   createHeadmasterLink,
