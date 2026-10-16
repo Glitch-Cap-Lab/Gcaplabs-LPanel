@@ -167,10 +167,13 @@ Some integrations can also send events into Nora from an external service. Nora 
 POST /webhooks/:channelId
 ```
 
-External services (such as GitHub Actions, Stripe, or PagerDuty) can POST event payloads to this URL. Nora logs the inbound payload and forwards it to the agent runtime if the agent is running.
+Services that can sign requests POST event payloads to this URL. Nora verifies the signature, logs the inbound payload, and forwards it to the agent runtime if the agent is running.
 
 <Note>
-  The inbound webhook endpoint is public and does not require an `Authorization` header. Use a
-  signing secret or verify token in your integration's config to validate inbound payloads on the
-  agent side.
+  The inbound webhook endpoint requires a per-channel signature. Send `X-Webhook-Timestamp` (Unix
+  seconds, accepted within 300 seconds) and `X-Webhook-Signature-V2` (hex HMAC-SHA256 of
+  `<timestamp>.<raw body>` using the channel's inbound secret). The secret is shown once when the
+  channel is created; set or rotate it by updating the channel config with a new `inbound_secret`.
+  Services that cannot sign requests (for example GitHub, Stripe or PagerDuty) need a signing relay
+  in front of this endpoint. Unsigned requests get `401`.
 </Note>

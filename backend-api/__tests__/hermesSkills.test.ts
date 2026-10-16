@@ -58,7 +58,7 @@ const INDEX_SKILLS = [
     source: "official",
     identifier: "official/security/1password",
     trust_level: "builtin",
-    repo: "https://github.com/nousresearch/hermes-skills",
+    repo: "https://github.com/headmaster/skills",
     path: "security/1password",
     tags: ["security"],
     extra: { verified: true },
@@ -370,7 +370,7 @@ describe("hermes skills routes", () => {
       source: "official",
       trustLevel: "builtin",
       tags: ["security"],
-      repo: "https://github.com/nousresearch/hermes-skills",
+      repo: "https://github.com/headmaster/skills",
       path: "security/1password",
       extra: { verified: true },
       stale: false,
@@ -392,7 +392,7 @@ describe("hermes skills routes", () => {
     });
   });
 
-  it("returns hermes_registry_unavailable when the registry cannot be reached", async () => {
+  it("returns skills_index_unavailable when the registry cannot be reached", async () => {
     const handler = getRouteHandler("/skills");
     fetchMock.mockRejectedValue(new Error("network down"));
 
@@ -402,8 +402,8 @@ describe("hermes skills routes", () => {
 
     expect(res.statusCode).toBe(502);
     expect(res.body).toEqual({
-      error: "hermes_registry_unavailable",
-      message: "Could not reach the Hermes skills registry.",
+      error: "skills_index_unavailable",
+      message: "Could not reach the skills index.",
     });
   });
 

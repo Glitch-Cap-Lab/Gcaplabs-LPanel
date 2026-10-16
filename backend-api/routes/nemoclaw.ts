@@ -5,8 +5,12 @@ const { runtimeUrlForAgent } = require("../../agent-runtime/lib/agentEndpoints")
 const { runtimeAuthHeaders } = require("../runtimeAuth");
 const { findAgentForRequest, requireApiKeyAgentScope } = require("../middleware/ownership");
 
+const { requireSandboxProfileEnabled } = require("../middleware/backendGate");
+
 const router = express.Router();
 router.param("id", requireApiKeyAgentScope("id"));
+// NemoClaw is an opt-in sandbox profile; its routes 404 unless it is enabled.
+router.use("/:id/nemoclaw", requireSandboxProfileEnabled("nemoclaw"));
 
 async function loadAgent(req, res) {
   const agent = await findAgentForRequest(req, req.params.id);

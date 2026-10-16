@@ -68,7 +68,7 @@ closed. Revocation paths:
 - **Link removal / user deletion** — revokes all sessions for the identity.
 - **Bounded revalidation** — every active hm session is re-checked against
   the Headmaster session-check endpoint every
-  `HEADMASTER_REVALIDATE_SECONDS` (≤30 s, default 25 s); dead GCAP sessions,
+  `HEADMASTER_REVALIDATE_SECONDS` (10-120 s, default 25 s); dead GCAP sessions,
   lost roles, or bans revoke the Nora session. Revocation closes already-open
   privileged WebSockets (logs/terminal/metrics) immediately via Redis
   pub/sub, plus a per-socket re-check backstop.
@@ -98,7 +98,7 @@ Nora backend (`/opt/nora/.env`):
 - `HEADMASTER_PARENT_ORIGIN` — exact HTTPS origin of the Headmaster host.
 - `HEADMASTER_SESSION_CHECK_URL` — Headmaster's session-check endpoint.
 - `HEADMASTER_LAUNCH_TTL_SECONDS` (default 60), `HEADMASTER_REVALIDATE_SECONDS`
-  (default 25, max 30).
+  (default 25, range 10-120).
 
 Nora frontend builds (both dashboards): `NEXT_PUBLIC_HEADMASTER_PARENT_ORIGIN`
 build arg — must equal `HEADMASTER_PARENT_ORIGIN`.
