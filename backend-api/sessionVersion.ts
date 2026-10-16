@@ -40,7 +40,8 @@ function buildSessionPayload(user) {
  * Decide whether a verified session payload is still valid against the
  * stored user row. Pure; the caller fetches the row.
  *
- * @returns {{ok: true} | {ok: false, code: string}}
+ * @returns {{ok: true, role: string} | {ok: false, code: string}}
+ *   `role` is the stored role, for callers that must not trust the token's.
  */
 function evaluateSessionAgainstUser(payload, userRow) {
   if (!payload) return { ok: false, code: "session_revoked" };
@@ -49,7 +50,7 @@ function evaluateSessionAgainstUser(payload, userRow) {
     return { ok: false, code: "session_revoked" };
   }
   if (payload.role !== userRow.role) return { ok: false, code: "session_revoked" };
-  return { ok: true };
+  return { ok: true, role: userRow.role };
 }
 
 /**

@@ -83,7 +83,7 @@ describe("metrics stream websocket auth", () => {
     jest.useRealTimers();
   });
 
-  function openMetricsStream(agentId, userPayload) {
+  async function openMetricsStream(agentId, userPayload) {
     const token = jwt.sign(userPayload, process.env.JWT_SECRET, {
       expiresIn: "1h",
     });
@@ -102,6 +102,9 @@ describe("metrics stream websocket auth", () => {
       Buffer.alloc(0),
     );
 
+    // The upgrade runs the session check first, so the socket opens a few
+    // microtasks later. Wait on microtasks only, so fake timers stay put.
+    for (let i = 0; i < 20 && wsConnections.length === 0; i += 1) await Promise.resolve();
     return wsConnections[0];
   }
 
@@ -119,7 +122,7 @@ describe("metrics stream websocket auth", () => {
       })
       .mockResolvedValueOnce({ rows: [{ role: "viewer" }] });
 
-    const ws = openMetricsStream("agent-1", { id: "viewer-1", role: "user" });
+    const ws = await openMetricsStream("agent-1", { id: "viewer-1", role: "user" });
     await flushAsyncWork();
 
     expect(mockBuildAgentStatsResponse).toHaveBeenCalledWith(
@@ -146,7 +149,7 @@ describe("metrics stream websocket auth", () => {
       })
       .mockResolvedValueOnce({ rows: [] });
 
-    const ws = openMetricsStream("agent-1", { id: "user-2", role: "user" });
+    const ws = await openMetricsStream("agent-1", { id: "user-2", role: "user" });
     await flushAsyncWork();
 
     expect(ws.sent).toContainEqual({
@@ -168,7 +171,7 @@ describe("metrics stream websocket auth", () => {
       ],
     });
 
-    const ws = openMetricsStream("agent-1", { id: "admin-1", role: "admin" });
+    const ws = await openMetricsStream("agent-1", { id: "admin-1", role: "admin" });
     await flushAsyncWork();
 
     expect(mockBuildAgentStatsResponse).toHaveBeenCalledWith(
@@ -202,7 +205,7 @@ describe("metrics stream websocket auth", () => {
       .mockResolvedValueOnce({ id: "shared-host", access: "workspace", canDeploy: true })
       .mockReturnValue(slowRecheck);
 
-    const ws = openMetricsStream(agent.id, { id: agent.user_id, role: "user" });
+    const ws = await openMetricsStream(agent.id, { id: agent.user_id, role: "user" });
     await flushAsyncWork();
 
     jest.advanceTimersByTime(5000);
@@ -250,7 +253,7 @@ describe("metrics stream websocket auth", () => {
       .mockResolvedValueOnce({ id: "shared-host", access: "workspace", canDeploy: true })
       .mockRejectedValue(revokedError);
 
-    const ws = openMetricsStream(agent.id, { id: agent.user_id, role: "user" });
+    const ws = await openMetricsStream(agent.id, { id: agent.user_id, role: "user" });
     await flushAsyncWork();
     expect(mockBuildAgentStatsResponse).toHaveBeenCalledTimes(1);
 
@@ -288,7 +291,7 @@ describe("metrics stream websocket auth", () => {
       .mockResolvedValueOnce({ id: "shared-host", access: "workspace", canDeploy: true })
       .mockRejectedValue(revokedError);
 
-    const activeWs = openMetricsStream(agent.id, { id: agent.user_id, role: "user" });
+    const activeWs = await openMetricsStream(agent.id, { id: agent.user_id, role: "user" });
     await flushAsyncWork();
 
     expect(activeWs.sent).toContainEqual({
@@ -310,7 +313,7 @@ describe("metrics stream websocket auth", () => {
     await jest.advanceTimersByTimeAsync(5000);
     expect(mockAssertRemoteHostAgentUse).toHaveBeenCalledTimes(2);
 
-    openMetricsStream(agent.id, { id: agent.user_id, role: "user" });
+    await openMetricsStream(agent.id, { id: agent.user_id, role: "user" });
     const deniedWs = wsConnections.at(-1);
     await flushAsyncWork();
 

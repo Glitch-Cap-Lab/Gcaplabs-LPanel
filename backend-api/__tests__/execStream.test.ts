@@ -95,7 +95,7 @@ describe("exec stream websocket auth", () => {
     }
   });
 
-  function openExecStream(agentId, userPayload) {
+  async function openExecStream(agentId, userPayload) {
     const token = jwt.sign(userPayload, process.env.JWT_SECRET, {
       expiresIn: "1h",
     });
@@ -114,6 +114,9 @@ describe("exec stream websocket auth", () => {
       Buffer.alloc(0),
     );
 
+    // The upgrade runs the session check first, so the socket opens a few
+    // microtasks later. Wait on microtasks only, so fake timers stay put.
+    for (let i = 0; i < 20 && wsConnections.length === 0; i += 1) await Promise.resolve();
     return wsConnections[0];
   }
 
@@ -133,7 +136,7 @@ describe("exec stream websocket auth", () => {
       })
       .mockResolvedValueOnce({ rows: [{ role: "editor" }] });
 
-    const ws = openExecStream("agent-1", { id: "editor-1", role: "user" });
+    const ws = await openExecStream("agent-1", { id: "editor-1", role: "user" });
     await flushAsyncWork();
 
     expect(ws.sent).toContainEqual({
@@ -159,7 +162,7 @@ describe("exec stream websocket auth", () => {
       })
       .mockResolvedValueOnce({ rows: [{ role: "viewer" }] });
 
-    const ws = openExecStream("agent-1", { id: "viewer-1", role: "user" });
+    const ws = await openExecStream("agent-1", { id: "viewer-1", role: "user" });
     await flushAsyncWork();
 
     expect(ws.sent).toContainEqual({
@@ -183,7 +186,7 @@ describe("exec stream websocket auth", () => {
       ],
     });
 
-    const ws = openExecStream("agent-1", { id: "admin-1", role: "admin" });
+    const ws = await openExecStream("agent-1", { id: "admin-1", role: "admin" });
     await flushAsyncWork();
 
     expect(ws.sent).toContainEqual({
@@ -220,7 +223,7 @@ describe("exec stream websocket auth", () => {
       exec: { resize },
     });
 
-    const ws = openExecStream("agent-k8s", { id: "admin-1", role: "admin" });
+    const ws = await openExecStream("agent-k8s", { id: "admin-1", role: "admin" });
     await flushAsyncWork();
 
     backendStream.write("ready\n");
@@ -277,7 +280,7 @@ describe("exec stream websocket auth", () => {
       .mockResolvedValueOnce({ id: "shared-host", access: "workspace", canDeploy: true })
       .mockReturnValue(slowRecheck);
 
-    const ws = openExecStream(agent.id, { id: agent.user_id, role: "user" });
+    const ws = await openExecStream(agent.id, { id: agent.user_id, role: "user" });
     await flushAsyncWork();
 
     await jest.advanceTimersByTimeAsync(250);
@@ -326,7 +329,7 @@ describe("exec stream websocket auth", () => {
     });
     mockAssertRemoteHostAgentUse.mockResolvedValue({ id: "shared-host" });
 
-    const ws = openExecStream(agent.id, { id: "editor-1", role: "user" });
+    const ws = await openExecStream(agent.id, { id: "editor-1", role: "user" });
     await flushAsyncWork();
     expect(ws.closed).toBe(false);
 
@@ -364,7 +367,7 @@ describe("exec stream websocket auth", () => {
     });
     mockAssertRemoteHostAgentUse.mockResolvedValue({ id: "shared-host" });
 
-    const ws = openExecStream(agent.id, { id: "owner-1", role: "user" });
+    const ws = await openExecStream(agent.id, { id: "owner-1", role: "user" });
     await flushAsyncWork();
     await jest.advanceTimersByTimeAsync(250);
 
@@ -394,7 +397,7 @@ describe("exec stream websocket auth", () => {
       Object.assign(new Error("password authentication failed for database"), { code: "28P01" }),
     );
 
-    const ws = openExecStream(agent.id, { id: agent.user_id, role: "user" });
+    const ws = await openExecStream(agent.id, { id: agent.user_id, role: "user" });
     await flushAsyncWork();
 
     expect(ws.sent).toContainEqual({
@@ -429,7 +432,7 @@ describe("exec stream websocket auth", () => {
       .mockResolvedValueOnce({ id: "shared-host", access: "workspace", canDeploy: true })
       .mockRejectedValue(revokedError);
 
-    const ws = openExecStream(agent.id, { id: agent.user_id, role: "user" });
+    const ws = await openExecStream(agent.id, { id: agent.user_id, role: "user" });
     await flushAsyncWork();
     expect(mockContainerManager.status).toHaveBeenCalledTimes(1);
 
@@ -474,7 +477,7 @@ describe("exec stream websocket auth", () => {
       .mockResolvedValueOnce({ id: "shared-host", access: "workspace", canDeploy: true })
       .mockRejectedValue(revokedError);
 
-    const ws = openExecStream(agent.id, { id: agent.user_id, role: "user" });
+    const ws = await openExecStream(agent.id, { id: agent.user_id, role: "user" });
     await flushAsyncWork();
     expect(mockContainerManager.exec).toHaveBeenCalledTimes(1);
 
@@ -520,7 +523,7 @@ describe("exec stream websocket auth", () => {
       .mockResolvedValueOnce({ id: "shared-host", access: "workspace", canDeploy: true })
       .mockRejectedValue(revokedError);
 
-    const activeWs = openExecStream(agent.id, { id: agent.user_id, role: "user" });
+    const activeWs = await openExecStream(agent.id, { id: agent.user_id, role: "user" });
     await flushAsyncWork();
 
     expect(activeWs.closed).toBe(false);
@@ -541,7 +544,7 @@ describe("exec stream websocket auth", () => {
     await jest.advanceTimersByTimeAsync(500);
     expect(mockAssertRemoteHostAgentUse).toHaveBeenCalledTimes(2);
 
-    openExecStream(agent.id, { id: agent.user_id, role: "user" });
+    await openExecStream(agent.id, { id: agent.user_id, role: "user" });
     const deniedWs = wsConnections.at(-1);
     await flushAsyncWork();
 
@@ -609,7 +612,7 @@ describe("exec stream websocket auth", () => {
       stubAgentDb(dbRow);
       stubLiveExec();
 
-      const ws = openExecStream(`agent-${lifecycleStatus}`, { id: "admin-1", role: "admin" });
+      const ws = await openExecStream(`agent-${lifecycleStatus}`, { id: "admin-1", role: "admin" });
       await flushAsyncWork();
 
       const promotions = promotionQueries();
@@ -637,7 +640,7 @@ describe("exec stream websocket auth", () => {
     stubAgentDb(dbRow);
     stubLiveExec();
 
-    const ws = openExecStream("agent-deploying-mem", { id: "admin-1", role: "admin" });
+    const ws = await openExecStream("agent-deploying-mem", { id: "admin-1", role: "admin" });
     await flushAsyncWork();
 
     // containerManager.exec receives the live in-memory agent object; it must not
@@ -664,7 +667,7 @@ describe("exec stream websocket auth", () => {
       stubAgentDb(dbRow);
       stubLiveExec();
 
-      const ws = openExecStream(`agent-stale-${staleStatus}`, { id: "admin-1", role: "admin" });
+      const ws = await openExecStream(`agent-stale-${staleStatus}`, { id: "admin-1", role: "admin" });
       await flushAsyncWork();
 
       expect(promotionQueries()).toHaveLength(1);
