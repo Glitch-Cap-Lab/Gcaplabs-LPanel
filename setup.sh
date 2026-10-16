@@ -1113,14 +1113,15 @@ resolve_available_host_port() {
 }
 
 get_nora_host_port_checks() {
-  local env_path="${1:-$ENV_FILE}" nginx_http_port="${2:-}" backend_api_port
+  local env_path="${1:-$ENV_FILE}" nginx_http_port="${2:-}" backend_api_port nginx_bind_address
 
   if [ -z "$nginx_http_port" ]; then
     nginx_http_port="$(to_port_number "$(read_env_value "$env_path" "NGINX_HTTP_PORT" "8080")" "8080" "NGINX_HTTP_PORT")"
   fi
   backend_api_port="$(to_port_number "$(read_env_value "$env_path" "BACKEND_API_PORT" "4100")" "4100" "BACKEND_API_PORT")"
+  nginx_bind_address="$(read_env_value "$env_path" "NGINX_BIND_ADDRESS" "127.0.0.1")"
 
-  printf "web gateway|nginx|80|%s|0.0.0.0|NGINX_HTTP_PORT\n" "$nginx_http_port"
+  printf "web gateway|nginx|80|%s|%s|NGINX_HTTP_PORT\n" "$nginx_http_port" "${nginx_bind_address:-127.0.0.1}"
   printf "backend API|backend-api|4000|%s|127.0.0.1|BACKEND_API_PORT\n" "$backend_api_port"
   printf "Postgres|postgres|5432|5433|127.0.0.1|\n"
 
@@ -1777,6 +1778,7 @@ NEXTAUTH_URL="http://localhost:8080"
 CORS_ORIGINS="http://localhost:8080"
 NGINX_CONFIG_FILE="nginx.conf"
 NGINX_HTTP_PORT="8080"
+NGINX_BIND_ADDRESS="127.0.0.1"
 BACKEND_API_PORT="4100"
 NORA_FORCE_SECURE_COOKIES=""
 CAN_START_NORA=true
@@ -1823,6 +1825,9 @@ case "$access_answer" in
     [ "$PUBLIC_SCHEME" = "https" ] && NORA_FORCE_SECURE_COOKIES=1
     NGINX_CONFIG_FILE="$PUBLIC_NGINX_CONF"
     NGINX_HTTP_PORT="80"
+    # Public modes: an upstream proxy may run on another machine, so publish
+    # port 80 on every interface. (TLS mode also publishes 80/443 in its overlay.)
+    NGINX_BIND_ADDRESS="0.0.0.0"
     ;;
   *)
     clear_public_access_artifacts
@@ -2085,6 +2090,9 @@ COMPOSE_PROJECT_NAME=${COMPOSE_PROJECT_NAME}
 # ── Access / URL ─────────────────────────────────────────────
 NGINX_CONFIG_FILE=${NGINX_CONFIG_FILE}
 NGINX_HTTP_PORT=${NGINX_HTTP_PORT}
+# Host address nginx publishes NGINX_HTTP_PORT on: 127.0.0.1 unless a proxy on
+# another machine must reach it.
+NGINX_BIND_ADDRESS=${NGINX_BIND_ADDRESS}
 # Forces the Secure flag on the session cookie for always-on-TLS public deploys
 # (set to 1 for https public modes; empty for local http). Guards against an
 # upstream proxy that strips X-Forwarded-Proto.

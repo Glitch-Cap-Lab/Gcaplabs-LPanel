@@ -10,6 +10,7 @@ By default, Nora listens on `localhost:8080` and is only reachable from the mach
 | ------------------- | ----------------------- | ------------------------ | --------------------------------- |
 | `NGINX_CONFIG_FILE` | `nginx.conf`            | `nginx.public.conf`      | `nginx.public.conf` (TLS version) |
 | `NGINX_HTTP_PORT`   | `8080`                  | `80`                     | `80` and `443`                    |
+| `NGINX_BIND_ADDRESS` | `127.0.0.1`             | `0.0.0.0`                | Set by the TLS overlay            |
 | `NEXTAUTH_URL`      | `http://localhost:8080` | `http://app.example.com` | `https://app.example.com`         |
 | `CORS_ORIGINS`      | `http://localhost:8080` | `http://app.example.com` | `https://app.example.com`         |
 | TLS certificate     | None                    | None                     | Let's Encrypt via `setup-tls.sh`  |
@@ -24,6 +25,7 @@ By default, Nora listens on `localhost:8080` and is only reachable from the mach
     ```bash theme={null}
     NGINX_CONFIG_FILE=nginx.public.conf
     NGINX_HTTP_PORT=80
+    NGINX_BIND_ADDRESS=0.0.0.0
     NEXTAUTH_URL=http://app.example.com
     CORS_ORIGINS=http://app.example.com
     ```

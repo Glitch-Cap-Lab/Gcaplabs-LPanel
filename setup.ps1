@@ -1334,9 +1334,11 @@ function Get-NoraHostPortChecks {
         $NginxHttpPort = ConvertTo-PortNumber -Value (Read-EnvValue -EnvPath $EnvPath -Name "NGINX_HTTP_PORT" -Default "8080") -Default 8080 -Name "NGINX_HTTP_PORT"
     }
     $backendApiPort = ConvertTo-PortNumber -Value (Read-EnvValue -EnvPath $EnvPath -Name "BACKEND_API_PORT" -Default "4100") -Default 4100 -Name "BACKEND_API_PORT"
+    $nginxBindAddress = Read-EnvValue -EnvPath $EnvPath -Name "NGINX_BIND_ADDRESS" -Default "127.0.0.1"
+    if (-not $nginxBindAddress) { $nginxBindAddress = "127.0.0.1" }
 
     $checks = @()
-    $checks += New-PortCheck -Name "web gateway" -ServiceName "nginx" -ContainerPort 80 -HostPort $NginxHttpPort -BindAddress "0.0.0.0" -EnvVar "NGINX_HTTP_PORT"
+    $checks += New-PortCheck -Name "web gateway" -ServiceName "nginx" -ContainerPort 80 -HostPort $NginxHttpPort -BindAddress $nginxBindAddress -EnvVar "NGINX_HTTP_PORT"
     $checks += New-PortCheck -Name "backend API" -ServiceName "backend-api" -ContainerPort 4000 -HostPort $backendApiPort -BindAddress "127.0.0.1" -EnvVar "BACKEND_API_PORT"
     $checks += New-PortCheck -Name "Postgres" -ServiceName "postgres" -ContainerPort 5432 -HostPort 5433 -BindAddress "127.0.0.1" -EnvVar ""
 
@@ -1844,6 +1846,7 @@ $NEXTAUTH_URL = "http://localhost:8080"
 $CORS_ORIGINS = "http://localhost:8080"
 $NGINX_CONFIG_FILE = "nginx.conf"
 $NGINX_HTTP_PORT = "8080"
+$NGINX_BIND_ADDRESS = "127.0.0.1"
 $BACKEND_API_PORT = "4100"
 $NORA_FORCE_SECURE_COOKIES = ""
 $CAN_START_NORA = $true
@@ -1872,6 +1875,8 @@ switch ($accessAnswer) {
         if ($PUBLIC_SCHEME -eq "https") { $NORA_FORCE_SECURE_COOKIES = "1" }
         $NGINX_CONFIG_FILE = $PUBLIC_NGINX_CONF
         $NGINX_HTTP_PORT = "80"
+        # A proxy on another machine may need to reach port 80 (TLS mode publishes 80/443 in its overlay).
+        $NGINX_BIND_ADDRESS = "0.0.0.0"
         Write-Ok "Public proxy mode — nginx will serve $PUBLIC_DOMAIN on port 80"
     }
     "3" {
@@ -1891,6 +1896,8 @@ switch ($accessAnswer) {
         $NORA_FORCE_SECURE_COOKIES = "1"
         $NGINX_CONFIG_FILE = $PUBLIC_NGINX_CONF
         $NGINX_HTTP_PORT = "80"
+        # A proxy on another machine may need to reach port 80 (TLS mode publishes 80/443 in its overlay).
+        $NGINX_BIND_ADDRESS = "0.0.0.0"
 
         if (-not (Test-Path "/etc/letsencrypt/live/$PUBLIC_DOMAIN/fullchain.pem") -or -not (Test-Path "/etc/letsencrypt/live/$PUBLIC_DOMAIN/privkey.pem")) {
             $CAN_START_NORA = $false
@@ -2150,6 +2157,9 @@ COMPOSE_PROJECT_NAME=$COMPOSE_PROJECT_NAME
 # ── Access / URL ─────────────────────────────────────────────
 NGINX_CONFIG_FILE=$NGINX_CONFIG_FILE
 NGINX_HTTP_PORT=$NGINX_HTTP_PORT
+# Host address nginx publishes NGINX_HTTP_PORT on: 127.0.0.1 unless a proxy on
+# another machine must reach it.
+NGINX_BIND_ADDRESS=$NGINX_BIND_ADDRESS
 # Forces the Secure flag on the session cookie for always-on-TLS public deploys
 # (set to 1 for https public modes; empty for local http). Guards against an
 # upstream proxy that strips X-Forwarded-Proto.
