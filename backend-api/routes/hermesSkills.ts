@@ -64,10 +64,10 @@ function sendHermesSkillsError(res, error) {
     });
   }
 
-  if (error?.statusCode === 502 || error?.code === "hermes_registry_unavailable") {
+  if (error?.statusCode === 502 || error?.code === "skills_index_unavailable") {
     return res.status(502).json({
-      error: "hermes_registry_unavailable",
-      message: "Could not reach the Hermes skills registry.",
+      error: "skills_index_unavailable",
+      message: "Could not reach the skills index.",
     });
   }
 

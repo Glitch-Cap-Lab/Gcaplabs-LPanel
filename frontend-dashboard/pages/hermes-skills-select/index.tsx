@@ -25,7 +25,7 @@ import {
 } from "../../lib/hermesSkillsView";
 
 const REGISTRY_UNAVAILABLE_MESSAGE =
-  "Could not load skills. The Hermes skills registry may be unavailable.";
+  "Could not load skills. The skills index may be unavailable.";
 
 type HermesSkillDetail = HermesSkillSummary & {
   repo?: string;
