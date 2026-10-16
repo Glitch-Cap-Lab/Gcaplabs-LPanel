@@ -8,7 +8,12 @@ const {
   buildHeadmasterModelConfig,
   buildHeadmasterProviderRow,
 } = require("../../agent-runtime/lib/headmasterInference");
-const { decrypt: decryptProvisionerSecret } = require("./crypto");
+const {
+  decrypt: decryptProvisionerSecret,
+  assertEncryptionConfiguredForStart,
+} = require("./crypto");
+
+assertEncryptionConfiguredForStart();
 const IORedis = require("ioredis");
 const { Client, Pool } = require("pg");
 const {
