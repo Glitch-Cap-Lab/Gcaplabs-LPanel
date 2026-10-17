@@ -23,6 +23,34 @@ function generateInboundSecret() {
   return crypto.randomBytes(32).toString("hex");
 }
 
+// Replay cache for signed inbound webhooks. A signature is only valid inside the
+// timestamp window, so remembering each accepted (channel, signature) pair for that
+// window is enough to refuse a repeat. In-process, like the rest of this module's state.
+const seenInboundSignatures = new Map();
+
+function pruneSeenSignatures(nowMs) {
+  for (const [key, expiresAt] of seenInboundSignatures) {
+    if (expiresAt <= nowMs) seenInboundSignatures.delete(key);
+  }
+}
+
+/**
+ * Record a verified signature; returns false if it was already used in the window.
+ *
+ * @param {string} channelId - Channel the request targeted.
+ * @param {string} signature - The verified signature header.
+ * @param {number} [nowMs=Date.now()] - Clock.
+ * @returns {boolean} True the first time, false for a replay.
+ */
+function claimInboundSignature(channelId, signature, nowMs = Date.now()) {
+  pruneSeenSignatures(nowMs);
+  const key = `${channelId}:${String(signature).toLowerCase()}`;
+  if (seenInboundSignatures.has(key)) return false;
+  // Twice the tolerance covers timestamps up to 300 s in the future as well as the past.
+  seenInboundSignatures.set(key, nowMs + 2 * WEBHOOK_TIMESTAMP_TOLERANCE_SECONDS * 1000);
+  return true;
+}
+
 function safeEqualHex(provided, expected) {
   const a = Buffer.from(String(provided || ""), "utf8");
   const b = Buffer.from(String(expected || ""), "utf8");
@@ -270,22 +298,22 @@ async function updateChannel(channelId, agentId, updates) {
     sets.push(`name = $${idx++}`);
     params.push(updates.name);
   }
-  if (updates.config !== undefined) {
+  const rotate = updates.rotate_inbound_secret === true;
+  const rotatedSecret = rotate ? generateInboundSecret() : null;
+  if (updates.config !== undefined || rotate) {
     const currentConfig = revealChannelConfig(existing.type, existing.config);
-    const restoredConfig = restoreRedactedConfigValue(parseConfig(updates.config), currentConfig);
-    // Omitting inbound_secret keeps the current one; supplying a new value rotates it.
-    const nextInbound = restoredConfig[INBOUND_SECRET_KEY];
-    if (nextInbound && nextInbound !== currentConfig[INBOUND_SECRET_KEY]) {
-      if (String(nextInbound).length < 16) {
-        const bad = new Error("inbound_secret must be at least 16 characters");
-        bad.statusCode = 400;
-        throw bad;
-      }
-    } else if (currentConfig[INBOUND_SECRET_KEY]) {
+    const restoredConfig =
+      updates.config !== undefined
+        ? restoreRedactedConfigValue(parseConfig(updates.config), currentConfig)
+        : { ...currentConfig };
+    // The inbound secret is server-owned: a client-supplied value is ignored and the
+    // current one kept. Rotation goes through rotate_inbound_secret below.
+    if (currentConfig[INBOUND_SECRET_KEY]) {
       restoredConfig[INBOUND_SECRET_KEY] = currentConfig[INBOUND_SECRET_KEY];
     } else {
       delete restoredConfig[INBOUND_SECRET_KEY];
     }
+    if (rotatedSecret) restoredConfig[INBOUND_SECRET_KEY] = rotatedSecret;
     const { secured, hasSensitiveMaterial } = protectChannelConfig(existing.type, restoredConfig);
     sets.push(`config = $${idx++}`);
     params.push(JSON.stringify(secured));
@@ -297,7 +325,6 @@ async function updateChannel(channelId, agentId, updates) {
     sets.push(`enabled = $${idx++}`);
     params.push(updates.enabled);
   }
-
   if (sets.length === 0) throw new Error("No fields to update");
 
   params.push(channelId, agentId);
@@ -306,7 +333,9 @@ async function updateChannel(channelId, agentId, updates) {
     params,
   );
   if (!result.rows[0]) throw new Error("Channel not found");
-  return sanitizeChannel(result.rows[0]);
+  const channel = sanitizeChannel(result.rows[0]);
+  // A rotated secret is shown once, here; later reads are redacted.
+  return rotatedSecret ? { ...channel, inbound_secret: rotatedSecret } : channel;
 }
 
 async function deleteChannel(channelId, agentId) {
@@ -454,6 +483,7 @@ async function handleInboundWebhook(channelId, payload, headers, rawBody) {
   if (signed || inboundSigningMode() === "enforce") {
     // A request that carries a signature must always verify, whatever the mode.
     if (!verifyInboundSignature(channel.config?.[INBOUND_SECRET_KEY], headers, rawBody)) throw denied;
+    if (!claimInboundSignature(channelId, headers["x-webhook-signature-v2"])) throw denied;
   } else {
     console.warn(
       `[channels] accepted unsigned inbound webhook for channel ${channelId} (HEADMASTER_INBOUND_WEBHOOK_SIGNING=off)`,

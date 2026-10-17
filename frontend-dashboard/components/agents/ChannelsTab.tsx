@@ -20,9 +20,9 @@ import {
 import MessageTimeline from "./MessageTimeline";
 import InboundSecretDialog from "./InboundSecretDialog";
 import {
-  buildRotationBody,
-  generateInboundSecret,
   revealFromCreateResponse,
+  revealFromRotateResponse,
+  ROTATION_BODY,
   type SecretReveal,
 } from "../../lib/inboundSecret";
 import { fetchWithAuth } from "../../lib/api";
@@ -1437,15 +1437,17 @@ export default function ChannelsTab({ agentId }: { agentId: string }) {
     }
     setBusyAction(`${channel.id}:rotate`);
     try {
-      const secret = generateInboundSecret();
+      // The server generates the new secret and returns it once.
       const res = await fetchWithAuth(`/api/agents/${agentId}/channels/${channel.id}`, {
         method: "PATCH",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(buildRotationBody(channel.config, secret)),
+        body: JSON.stringify(ROTATION_BODY),
       });
       const data = await parseJson(res);
       if (!res.ok) throw new Error(data.error || "Failed to rotate secret");
-      setSecretReveal({ channelName: channel.name, secret, reason: "rotated" });
+      const reveal = revealFromRotateResponse(data, channel.name);
+      if (!reveal) throw new Error("Failed to rotate secret");
+      setSecretReveal(reveal);
       await loadChannels({ quiet: true });
     } catch (nextError: any) {
       toast.error(nextError.message || "Failed to rotate secret");
