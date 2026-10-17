@@ -5,17 +5,10 @@ import { renderToStaticMarkup } from "react-dom/server";
 
 import InboundSecretDialog from "../components/agents/InboundSecretDialog";
 import {
-  buildRotationBody,
-  generateInboundSecret,
+  ROTATION_BODY,
   revealFromCreateResponse,
+  revealFromRotateResponse,
 } from "./inboundSecret";
-
-test("generated secrets are 64 hex characters and differ each time", () => {
-  const a = generateInboundSecret();
-  const b = generateInboundSecret();
-  assert.match(a, /^[0-9a-f]{64}$/);
-  assert.notEqual(a, b);
-});
 
 test("the create response secret is picked up, not discarded", () => {
   const reveal = revealFromCreateResponse({ id: "c1", inbound_secret: "a".repeat(64) }, "Ops");
@@ -45,12 +38,11 @@ test("the secret shows once with a warning, and is gone after the dialog closes"
   assert.equal(afterClose, "");
 });
 
-test("rotation sends the redacted config back untouched with only the secret replaced", () => {
-  const body = buildRotationBody(
-    { chat_id: "42", bot_token: "[REDACTED]", inbound_secret: "[REDACTED]" },
-    "c".repeat(64),
-  );
-  assert.deepEqual(body, {
-    config: { chat_id: "42", bot_token: "[REDACTED]", inbound_secret: "c".repeat(64) },
-  });
+test("rotation asks the server for the secret and shows only what it returns", () => {
+  assert.deepEqual(ROTATION_BODY, { rotate_inbound_secret: true });
+  assert.ok(!("config" in ROTATION_BODY));
+  const reveal = revealFromRotateResponse({ id: "c1", inbound_secret: "c".repeat(64) }, "Ops");
+  assert.equal(reveal?.secret, "c".repeat(64));
+  assert.equal(reveal?.reason, "rotated");
+  assert.equal(revealFromRotateResponse({ id: "c1", inbound_secret: "[REDACTED]" }, "Ops"), null);
 });

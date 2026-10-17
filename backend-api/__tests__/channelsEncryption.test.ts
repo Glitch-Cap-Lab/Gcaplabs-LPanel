@@ -96,7 +96,7 @@ describe("channel config encryption", () => {
     mockEnsureEncryptionConfigured.mockReset();
   });
 
-  it("rotates the inbound secret through a config update and keeps it when omitted", async () => {
+  it("ignores a client-supplied inbound secret and keeps it when omitted", async () => {
     const row = (secret) => ({
       id: "ch-8",
       agent_id: "agent-1",
@@ -111,7 +111,7 @@ describe("channel config encryption", () => {
       config: { chat_id: "42", inbound_secret: "new-secret-value-5678" },
     });
     expect(JSON.parse(mockDb.query.mock.calls[1][1][0]).inbound_secret).toBe(
-      "enc(new-secret-value-5678)",
+      "enc(old-secret-value-1234)",
     );
 
     mockDb.query.mockReset();

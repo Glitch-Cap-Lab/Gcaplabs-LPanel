@@ -182,7 +182,8 @@ describe("HEADMASTER_INBOUND_WEBHOOK_SIGNING switch", () => {
 
   it("accepts a good signature when off without warning", async () => {
     process.env.HEADMASTER_INBOUND_WEBHOOK_SIGNING = "off";
-    const res = await post(sign(BODY));
+    // A different timestamp from the earlier accepted request, so it is not a replay.
+    const res = await post(sign(BODY, SECRET, Math.floor(Date.now() / 1000) - 7));
     expect(res.status).toBe(200);
     expect(writes()).toHaveLength(1);
     expect(warn).not.toHaveBeenCalled();
@@ -194,5 +195,96 @@ describe("HEADMASTER_INBOUND_WEBHOOK_SIGNING switch", () => {
     expect(res.status).toBe(401);
     expect(writes()).toHaveLength(0);
     expect(error).toHaveBeenCalled();
+  });
+});
+
+describe("inbound webhook replay protection", () => {
+  beforeEach(() => {
+    mockDb.query.mockReset();
+    mockDb.query.mockImplementation(async (sql) =>
+      /FROM channels/.test(sql) ? { rows: [channelRow()] } : { rows: [] },
+    );
+  });
+  const writes = () => mockDb.query.mock.calls.filter(([sql]) => /INSERT/.test(sql));
+  const post = (body, headers) =>
+    request(buildApp()).post("/webhooks/ch-1").set("content-type", "application/json").set(headers).send(body);
+
+  it("refuses the same signed request a second time inside the window", async () => {
+    const body = JSON.stringify({ text: "replay-me" });
+    const headers = sign(body, SECRET, Math.floor(Date.now() / 1000) - 30);
+    expect((await post(body, headers)).status).toBe(200);
+    const replay = await post(body, headers);
+    expect(replay.status).toBe(401);
+    expect(writes()).toHaveLength(1);
+  });
+
+  it("accepts a fresh signed request after one was replayed", async () => {
+    const body = JSON.stringify({ text: "fresh" });
+    const first = sign(body, SECRET, Math.floor(Date.now() / 1000) - 40);
+    expect((await post(body, first)).status).toBe(200);
+    expect((await post(body, first)).status).toBe(401);
+    const fresh = sign(body, SECRET, Math.floor(Date.now() / 1000) - 41);
+    expect((await post(body, fresh)).status).toBe(200);
+  });
+
+  it("does not let a forged signature use up a slot", async () => {
+    const body = JSON.stringify({ text: "forged-first" });
+    const ts = Math.floor(Date.now() / 1000) - 50;
+    expect((await post(body, sign(body, "wrong-secret", ts))).status).toBe(401);
+    expect((await post(body, sign(body, SECRET, ts))).status).toBe(200);
+  });
+});
+
+describe("server-side inbound secret rotation", () => {
+  let stored;
+  beforeEach(() => {
+    stored = { ...channelRow() };
+    mockDb.query.mockReset();
+    mockDb.query.mockImplementation(async (sql, params) => {
+      if (/^UPDATE channels/.test(sql)) {
+        stored = { ...stored, config: params[0] };
+        return { rows: [stored] };
+      }
+      if (/FROM channels/.test(sql)) return { rows: [stored] };
+      return { rows: [] };
+    });
+  });
+  const post = (body, headers) =>
+    request(buildApp()).post("/webhooks/ch-1").set("content-type", "application/json").set(headers).send(body);
+
+  it("returns a fresh server-generated secret once and stores it encrypted", async () => {
+    const res = await channels.updateChannel("ch-1", "agent-1", { rotate_inbound_secret: true });
+    expect(res.inbound_secret).toMatch(/^[0-9a-f]{64}$/);
+    expect(res.inbound_secret).not.toBe(SECRET);
+    expect(JSON.parse(stored.config).inbound_secret).toBe(`enc(${res.inbound_secret})`);
+    expect(JSON.stringify(res.config || {})).not.toContain(res.inbound_secret);
+    const again = await channels.updateChannel("ch-1", "agent-1", { rotate_inbound_secret: true });
+    expect(again.inbound_secret).not.toBe(res.inbound_secret);
+  });
+
+  it("ignores a client-supplied secret, with or without rotation", async () => {
+    const chosen = "client-chosen-secret-1234567890";
+    const plain = await channels.updateChannel("ch-1", "agent-1", {
+      config: { inbound_secret: chosen },
+    });
+    expect(plain.inbound_secret).toBeUndefined();
+    expect(JSON.parse(stored.config).inbound_secret).toBe(`enc(${SECRET})`);
+
+    const rotated = await channels.updateChannel("ch-1", "agent-1", {
+      rotate_inbound_secret: true,
+      config: { inbound_secret: chosen },
+    });
+    expect(rotated.inbound_secret).not.toBe(chosen);
+    expect(JSON.parse(stored.config).inbound_secret).toBe(`enc(${rotated.inbound_secret})`);
+  });
+
+  it("stops the old secret verifying and starts the new one", async () => {
+    const { inbound_secret: fresh } = await channels.updateChannel("ch-1", "agent-1", {
+      rotate_inbound_secret: true,
+    });
+    const body = JSON.stringify({ text: "after-rotate" });
+    const ts = Math.floor(Date.now() / 1000) - 60;
+    expect((await post(body, sign(body, SECRET, ts))).status).toBe(401);
+    expect((await post(body, sign(body, fresh, ts))).status).toBe(200);
   });
 });
