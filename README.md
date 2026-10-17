@@ -57,7 +57,7 @@ Tests, for exactly what you changed:
 ```sh
 cd backend-api && npx jest path/to/file   # API
 cd admin-dashboard && npm run test:helpers && npm run typecheck
-node --test scripts/headmaster/branding.test.mjs   # frame policy, launch exchange, shared theme files
+node --test scripts/headmaster/branding.test.mjs   # frame policy and handshake behaviour
 ```
 
 The embedded console only loads when the dashboards are built with `NEXT_PUBLIC_HEADMASTER_PARENT_ORIGIN=https://headmaster.gcaplabs.com`. That is a build argument, not a runtime variable: change it and rebuild the two dashboards.
