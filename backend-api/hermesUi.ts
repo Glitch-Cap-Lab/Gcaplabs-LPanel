@@ -13,6 +13,11 @@ const {
   buildHeadmasterModelConfig,
 } = require("../agent-runtime/lib/headmasterInference");
 
+const {
+  HEADMASTER_STORAGE_WRITE_PY,
+  storageAllocationBytes,
+} = require("../agent-runtime/lib/headmasterStorage");
+
 const HERMES_CHANNEL_REDACTED = "[REDACTED]";
 
 const HERMES_CHANNEL_DEFINITIONS = Object.freeze({
@@ -815,6 +820,18 @@ print(json.dumps({
   return runHermesPythonJson(agent, script, { timeout: 30000 });
 }
 
+// Adoption receives the canonical RETURNING * row, never request storage metadata.
+async function persistHermesStorageAllocation(agent) {
+  const allocation = storageAllocationBytes(agent);
+  return runHermesPythonJson(
+    agent,
+    `${HEADMASTER_STORAGE_WRITE_PY}
+import json
+print(json.dumps(write_storage_allocation("/opt/data", ${JSON.stringify(allocation === null ? "" : String(allocation))})))
+`,
+  );
+}
+
 /**
  * Stamp the runtime's active memory provider directly into its on-disk
  * config.yaml (`memory.provider`), the same field Hermes's own
@@ -1469,6 +1486,7 @@ module.exports = {
   getPersistedHermesState,
   listHermesChannels,
   persistHermesMemoryProviderConfig,
+  persistHermesStorageAllocation,
   persistHermesModelConfig,
   readHermesRuntimeSnapshot,
   repairHermesAgentConfig,

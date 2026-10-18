@@ -425,7 +425,7 @@ async function buildHermesManagedEnvForAgent(userId, agentId) {
   const headmaster = await db.query(
     `SELECT headmaster_owner_id, headmaster_workspace_id,
             headmaster_memory_bank_id, headmaster_memory_gateway_url,
-            external_namespace, gateway_token
+            external_namespace, gateway_token, disk_gb
        FROM agents WHERE id = $1 AND user_id = $2`,
     [agentId, userId],
   );
@@ -547,6 +547,11 @@ function escapeDotenvValue(value) {
     .replace(/"/g, '\\"')}"`;
 }
 
+const {
+  HEADMASTER_STORAGE_ENV,
+  HEADMASTER_STORAGE_WRITE_PY,
+} = require("../agent-runtime/lib/headmasterStorage");
+
 /**
  * Build a shell command that replaces Nora's managed Hermes environment block
  * while preserving unrelated `.env` content and enforcing private file modes.
@@ -581,6 +586,16 @@ function buildHermesEnvWriteCommand(envVars = {}) {
     'mv "$tmp_file" /opt/data/.env',
     "chown hermes:hermes /opt/data/.env 2>/dev/null || true",
     "chmod 0600 /opt/data/.env",
+    ...(envVars.HEADMASTER_OWNER_ID
+      ? [
+          'storage_python="/opt/hermes/.venv/bin/python"',
+          '[ -x "$storage_python" ] || storage_python="$(command -v python3)"',
+          "\"$storage_python\" - <<'PY_STORAGE'",
+          HEADMASTER_STORAGE_WRITE_PY,
+          `write_storage_allocation("/opt/data", ${JSON.stringify(envVars[HEADMASTER_STORAGE_ENV] || "")})`,
+          "PY_STORAGE",
+        ]
+      : []),
   ].join("\n");
 }
 

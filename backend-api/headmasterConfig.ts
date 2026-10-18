@@ -1,15 +1,19 @@
 // @ts-nocheck
 // Persisted Headmaster state rides the same full-environment reconciliation as
-// provider changes. Never write just these four variables into a runtime.
+// provider changes. Never write only the Headmaster variables into a runtime.
+const {
+  HEADMASTER_STORAGE_ENV,
+  storageAllocationBytes,
+} = require("../agent-runtime/lib/headmasterStorage");
 const FIELDS = Object.freeze({
   HEADMASTER_OWNER_ID: "headmaster_owner_id",
   HEADMASTER_WORKSPACE_ID: "headmaster_workspace_id",
   HEADMASTER_MEMORY_BANK_ID: "headmaster_memory_bank_id",
   HEADMASTER_MEMORY_GATEWAY_URL: "headmaster_memory_gateway_url",
 });
-const HEADMASTER_ENV_NAMES = Object.freeze(Object.keys(FIELDS));
+const HEADMASTER_ENV_NAMES = Object.freeze([...Object.keys(FIELDS), HEADMASTER_STORAGE_ENV]);
 // Columns that must be selected whenever an agents row is handed to headmasterEnv().
-const HEADMASTER_AGENT_COLUMNS = Object.freeze(Object.values(FIELDS));
+const HEADMASTER_AGENT_COLUMNS = Object.freeze([...Object.values(FIELDS), "disk_gb"]);
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
 
 function configError(message, statusCode = 400) {
@@ -17,9 +21,15 @@ function configError(message, statusCode = 400) {
 }
 
 function headmasterEnv(agent = {}) {
-  return Object.fromEntries(
+  const values = Object.fromEntries(
     Object.entries(FIELDS).map(([key, field]) => [key, agent[field] || undefined]),
   );
+  values[HEADMASTER_STORAGE_ENV] = undefined;
+  if (isHeadmasterManagedAgent(agent)) {
+    const allocation = storageAllocationBytes(agent);
+    values[HEADMASTER_STORAGE_ENV] = allocation === null ? undefined : String(allocation);
+  }
+  return values;
 }
 
 // A Hermes runtime is Headmaster-managed once it has adopted a Headmaster
@@ -42,6 +52,12 @@ async function agentIsHeadmasterManaged(agentId, queryable = require("./db")) {
     [agentId],
   );
   return isHeadmasterManagedAgent(result?.rows?.[0]);
+}
+
+function withoutHeadmasterEnv(values = {}) {
+  return Object.fromEntries(
+    Object.entries(values).filter(([name]) => !HEADMASTER_ENV_NAMES.includes(name)),
+  );
 }
 
 function managedConfigStatus(agent) {
@@ -163,7 +179,7 @@ async function updateManagedConfig(agent, body, { retry = false, apiKeyWorkspace
         row = updated.rows[0];
       }
     } else {
-      if (status.integration_key_names.length !== HEADMASTER_ENV_NAMES.length)
+      if (!Object.keys(FIELDS).every((name) => status.integration_key_names.includes(name)))
         throw configError("No complete Headmaster config has been saved");
       if (status.applied_revision >= status.desired_revision) return status;
     }
@@ -207,6 +223,7 @@ module.exports = {
   HEADMASTER_ENV_NAMES,
   HEADMASTER_AGENT_COLUMNS,
   headmasterEnv,
+  withoutHeadmasterEnv,
   isHeadmasterManagedAgent,
   agentIsHeadmasterManaged,
   managedConfigStatus,

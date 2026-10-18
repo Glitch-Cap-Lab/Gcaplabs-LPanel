@@ -1,4 +1,5 @@
-// @ts-nocheck
+export {};
+
 // Behaviour of the Headmaster launch exchange as callers see it: what is
 // refused, with which status and code, and that storage outages fail closed.
 const mockDb = { query: jest.fn() };
@@ -9,7 +10,7 @@ const launch = require("../headmasterLaunch");
 const ORIGIN = "https://headmaster.example.com";
 const NONCE = "a".repeat(32);
 
-async function rejection(promise) {
+async function rejection(promise: Promise<unknown>): Promise<unknown> {
   try {
     await promise;
   } catch (error) {
