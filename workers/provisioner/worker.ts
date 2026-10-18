@@ -1715,10 +1715,29 @@ async function fetchEffectiveProviderState(
 ) {
   // A Headmaster-managed Hermes runtime takes its model from the Headmaster
   // relay: no operator provider key or default provider row reaches it.
-  const headmasterManaged =
-    String(runtimeFamily).toLowerCase() === "hermes" &&
-    Boolean(agentId) &&
-    (await require("../../backend-api/headmasterConfig").agentIsHeadmasterManaged(agentId, db));
+  const {
+    HEADMASTER_AGENT_COLUMNS,
+    headmasterEnv,
+    isHeadmasterManagedAgent,
+  } = require("../../backend-api/headmasterConfig");
+  const { HEADMASTER_STORAGE_ENV } = require("../../agent-runtime/lib/headmasterStorage");
+  const isHermes = String(runtimeFamily).toLowerCase() === "hermes";
+  const agent =
+    isHermes && agentId
+      ? (
+          await db.query(
+            `SELECT external_namespace, ${HEADMASTER_AGENT_COLUMNS.join(", ")}
+               FROM agents WHERE id = $1`,
+            [agentId],
+          )
+        ).rows[0]
+      : null;
+  const headmasterManaged = isHermes && isHeadmasterManagedAgent(agent);
+  // Replacement state must carry the canonical allocation, including an
+  // explicit clear when it is missing/invalid. Integration env is untrusted.
+  const storageEnvVars = isHermes
+    ? { [HEADMASTER_STORAGE_ENV]: headmasterEnv(agent || {})[HEADMASTER_STORAGE_ENV] }
+    : {};
   const [providerEnvVars, defaultProvider, integrationEnvVars, mcpRuntimeState, integrationSync] =
     await Promise.all([
       headmasterManaged ? Promise.resolve({}) : fetchUserLlmEnvVars(userId, providerId),
@@ -1749,6 +1768,7 @@ async function fetchEffectiveProviderState(
     ...(integrationEnvVars || {}),
     ...mcpEnvVars,
     ...envVars,
+    ...storageEnvVars,
   });
   const managedCredentialEnvNames = buildCredentialManagedEnvNames({
     runtimeFamily,
@@ -1767,6 +1787,7 @@ async function fetchEffectiveProviderState(
   return {
     envVars,
     integrationEnvVars: normalizeEnvValueMap(integrationEnvVars || {}),
+    storageEnvVars,
     mcpEnvVars,
     mcpServers: mcpServersConfig,
     mcpEnabledIds: mcpRuntimeState?.enabledIds || [],
@@ -2551,6 +2572,7 @@ async function reconcileRuntimeLlmAuth({
   const {
     envVars: llmEnvVars,
     integrationEnvVars,
+    storageEnvVars,
     mcpEnvVars,
     mcpServers: desiredMcpServers,
     integrationSync,
@@ -2558,9 +2580,11 @@ async function reconcileRuntimeLlmAuth({
     defaultProvider,
     fingerprint: providerFingerprint,
   } = providerState;
+  // Compare the same complete environment used to build providerFingerprint,
+  // so allocation drift is detected and an unchanged allocation stays stable.
   const providerStateChanged = shouldReconcileEffectiveProviderState(
     bootstrappedProviderFingerprint,
-    providerState,
+    { ...providerState, envVars: providerState.credentialEnvVars },
   );
   if (!providerStateChanged && resolvedBackend !== "proxmox") {
     return { status: "skipped", reason: "unchanged", providerFingerprint };
@@ -2587,6 +2611,7 @@ async function reconcileRuntimeLlmAuth({
         ...(integrationEnvVars || {}),
         ...(mcpEnvVars || {}),
         ...buildKubernetesProviderEnv(runtimeFamily, defaultProvider, llmEnvVars),
+        ...storageEnvVars,
         ...(String(runtimeFamily).toLowerCase() === "openclaw"
           ? {
               [OPENCLAW_MANAGED_MCP_SERVERS_ENV]:
@@ -4599,6 +4624,12 @@ const worker = new Worker(
       let agentSecretEnvVars = {};
       try {
         agentSecretEnvVars = normalizeEnvValueMap(await getAgentSecretEnvVars(id));
+        if (resolvedRuntimeFields.runtime_family === "hermes") {
+          // Imported customer env cannot preserve or override control-plane metadata.
+          agentSecretEnvVars = require("../../backend-api/headmasterConfig").withoutHeadmasterEnv(
+            agentSecretEnvVars,
+          );
+        }
         if (
           resolvedRuntimeFields.runtime_family === "hermes" &&
           require("../../backend-api/headmasterConfig").isHeadmasterManagedAgent(agentRow)
@@ -5729,6 +5760,7 @@ module.exports = {
   prepareReplacementRuntime,
   provisionerExecStateDir,
   reconcileProvisioningFailureRuntime,
+  reconcileRuntimeLlmAuth,
   resolveCanonicalDeploymentOwnerUserId,
   runRuntimeCommand,
   runProvisionerExecCommand,

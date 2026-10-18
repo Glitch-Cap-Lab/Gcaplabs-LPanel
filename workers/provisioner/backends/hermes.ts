@@ -285,6 +285,7 @@ class HermesBackend extends DockerBackend {
           "HEADMASTER_WORKSPACE_ID",
           "HEADMASTER_MEMORY_BANK_ID",
           "HEADMASTER_MEMORY_GATEWAY_URL",
+          "HEADMASTER_STORAGE_ALLOCATION_BYTES",
         ]
           .filter((key) => typeof env?.[key] === "string" && env[key])
           .map((key) => [key, env[key]]),

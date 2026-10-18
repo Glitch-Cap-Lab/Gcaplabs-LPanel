@@ -43,6 +43,7 @@ const mockPersistHermesMemoryProviderConfig = jest.fn().mockResolvedValue({
   provider: "hindsight",
   configPath: "/opt/hermes/config.yaml",
 });
+const mockPersistHermesStorageAllocation = jest.fn().mockResolvedValue({ ok: true });
 const mockPersistHermesModelConfig = jest.fn().mockResolvedValue({ ok: true });
 const mockReadHermesRuntimeSnapshot = jest.fn().mockResolvedValue({
   runtimeStatus: {
@@ -346,6 +347,7 @@ jest.mock("../hermesUi", () => ({
   testHermesChannel: mockTestHermesChannel,
   readHermesRuntimeSnapshot: mockReadHermesRuntimeSnapshot,
   persistHermesMemoryProviderConfig: mockPersistHermesMemoryProviderConfig,
+  persistHermesStorageAllocation: mockPersistHermesStorageAllocation,
   persistHermesModelConfig: mockPersistHermesModelConfig,
 }));
 jest.mock("../agentMigrations", () => ({
@@ -5218,11 +5220,7 @@ describe("POST /agents/:id/integrations/headmaster/adopt", () => {
       request(app)
         .post("/agents/a-adopt/integrations/headmaster/adopt")
         .send({
-          external_identity: {
-            namespace: "headmaster",
-            external_id: EXTERNAL_ID,
-            owner_uuid: OWNER_UUID,
-          },
+          external_identity: { namespace: "headmaster", external_id: EXTERNAL_ID, owner_uuid: OWNER_UUID },
         }),
     );
 
@@ -5281,11 +5279,7 @@ describe("POST /agents/:id/integrations/headmaster/adopt", () => {
       request(app)
         .post("/agents/a-adopt-2/integrations/headmaster/adopt")
         .send({
-          external_identity: {
-            namespace: "headmaster",
-            external_id: EXTERNAL_ID,
-            owner_uuid: OWNER_UUID,
-          },
+          external_identity: { namespace: "headmaster", external_id: EXTERNAL_ID, owner_uuid: OWNER_UUID },
         }),
     );
 
@@ -5353,11 +5347,7 @@ describe("POST /agents/:id/integrations/headmaster/adopt", () => {
       request(app)
         .post("/agents/not-mine/integrations/headmaster/adopt")
         .send({
-          external_identity: {
-            namespace: "headmaster",
-            external_id: EXTERNAL_ID,
-            owner_uuid: OWNER_UUID,
-          },
+          external_identity: { namespace: "headmaster", external_id: EXTERNAL_ID, owner_uuid: OWNER_UUID },
         }),
     );
 
@@ -5391,11 +5381,7 @@ describe("POST /agents/:id/integrations/headmaster/adopt", () => {
       request(app)
         .post("/agents/a-adopt-5/integrations/headmaster/adopt")
         .send({
-          external_identity: {
-            namespace: "headmaster",
-            external_id: EXTERNAL_ID,
-            owner_uuid: OWNER_UUID,
-          },
+          external_identity: { namespace: "headmaster", external_id: EXTERNAL_ID, owner_uuid: OWNER_UUID },
           memory: { provider: "hindsight", bank: "hermes-u-bank-5" },
         }),
     );
@@ -5424,11 +5410,7 @@ describe("POST /agents/:id/integrations/headmaster/adopt", () => {
       request(app)
         .post("/agents/a-adopt-6/integrations/headmaster/adopt")
         .send({
-          external_identity: {
-            namespace: "headmaster",
-            external_id: EXTERNAL_ID,
-            owner_uuid: OWNER_UUID,
-          },
+          external_identity: { namespace: "headmaster", external_id: EXTERNAL_ID, owner_uuid: OWNER_UUID },
           memory: { provider: "mem0" },
         }),
     );
@@ -5463,11 +5445,7 @@ describe("POST /agents/:id/integrations/headmaster/adopt", () => {
       request(app)
         .post("/agents/a-adopt-7/integrations/headmaster/adopt")
         .send({
-          external_identity: {
-            namespace: "headmaster",
-            external_id: EXTERNAL_ID,
-            owner_uuid: OWNER_UUID,
-          },
+          external_identity: { namespace: "headmaster", external_id: EXTERNAL_ID, owner_uuid: OWNER_UUID },
           memory: { provider: "hindsight", bank: "hermes-u-bank-7" },
         }),
     );
@@ -5509,14 +5487,32 @@ describe("POST /agents/:id/integrations/headmaster/adopt model stamp", () => {
       request(app)
         .post(`/agents/${id}/integrations/headmaster/adopt`)
         .send({
-          external_identity: {
-            namespace: "headmaster",
-            external_id: EXTERNAL_ID,
-            owner_uuid: OWNER_UUID,
-          },
+          external_identity: { namespace: "headmaster", external_id: EXTERNAL_ID, owner_uuid: OWNER_UUID },
         }),
     );
   }
+
+  it("uses the stored allocation rather than a forged adoption body", async () => {
+    mockPersistHermesStorageAllocation.mockClear();
+    const [first, second] = adoptRows("a-storage-1", "hermes");
+    second.rows[0].disk_gb = 10;
+    mockDb.query.mockResolvedValueOnce(first).mockResolvedValueOnce(second);
+    const res = await adminAuth(
+      request(app)
+        .post("/agents/a-storage-1/integrations/headmaster/adopt")
+        .send({
+          external_identity: { namespace: "headmaster", external_id: EXTERNAL_ID, owner_uuid: OWNER_UUID },
+          storage: { allocation_bytes: 999 },
+          disk_gb: 999,
+          headmaster: { storage: { allocation_bytes: 999 } },
+        }),
+    );
+    expect(res.status).toBe(200);
+    expect(mockPersistHermesStorageAllocation).toHaveBeenCalledWith(
+      expect.objectContaining({ disk_gb: 10 }),
+    );
+    expect(res.body.storage).toEqual({ ok: true });
+  });
 
   it("stamps the relay model block on an adopted Hermes runtime", async () => {
     mockPersistHermesModelConfig.mockClear();
