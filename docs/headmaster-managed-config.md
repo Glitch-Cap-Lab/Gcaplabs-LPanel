@@ -102,6 +102,12 @@ its existing immutable-identity `RETURNING *` row, not request storage fields.
 Creation and full managed environment reconciliation reserve and overwrite or
 clear the bootstrap input. A missing/invalid stored value removes stale YAML
 allocation metadata; it does not retain an imported/customer allocation.
+The provisioning worker re-reads the canonical agent row for each Hermes
+reconciliation and includes allocation in the effective-state fingerprint and
+replacement environment. Kubernetes credential rotation therefore retains the
+allocation through its managed Secret and pod restart; integration values
+cannot override it. Allocation changes also trigger reconciliation when
+credentials are unchanged.
 Bootstrap and adoption preserve other configuration and never stamp a selected
 profile's separate allocation. No new database column, route or store is added.
 
