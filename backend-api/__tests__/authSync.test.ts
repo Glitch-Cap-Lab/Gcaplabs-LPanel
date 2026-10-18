@@ -74,9 +74,7 @@ jest.mock("../healthChecks", () => ({
   waitForAgentReadiness: mockWaitForAgentReadiness,
 }));
 
-const {
-  deriveHeadmasterInferenceKey,
-} = require("../../agent-runtime/lib/headmasterInference");
+const { deriveHeadmasterInferenceKey } = require("../../agent-runtime/lib/headmasterInference");
 // The recheck tests below advance fake timers by one interval; pin it so they
 // do not depend on the production default.
 const originalRemoteHostAuthRecheckMs = process.env.REMOTE_HOST_AUTH_RECHECK_MS;
@@ -260,6 +258,20 @@ describe("auth sync", () => {
     });
     expect(degraded).not.toHaveProperty("OPENAI_API_KEY");
   });
+
+  it.each([10, undefined, 0, 1.5])(
+    "overwrites or clears a forged storage allocation using stored disk_gb %p",
+    async (disk_gb) => {
+      mockDb.query.mockResolvedValue({
+        rows: [{ external_namespace: "headmaster", headmaster_owner_id: "owner", disk_gb }],
+      });
+      mockGetIntegrationEnvVars.mockResolvedValue({ HEADMASTER_STORAGE_ALLOCATION_BYTES: "999" });
+      const env = await buildHermesManagedEnvForAgent("user", "agent");
+      if (disk_gb === 10)
+        expect(env.HEADMASTER_STORAGE_ALLOCATION_BYTES).toBe(String(10 * 1024 ** 3));
+      else expect(env).not.toHaveProperty("HEADMASTER_STORAGE_ALLOCATION_BYTES");
+    },
+  );
 
   it("still gives an ordinary Hermes runtime the account's provider keys and no relay key", async () => {
     mockDb.query.mockResolvedValue({ rows: [{ gateway_token: "some-gateway-key" }] });

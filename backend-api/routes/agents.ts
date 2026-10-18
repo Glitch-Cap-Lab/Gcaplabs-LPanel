@@ -79,6 +79,7 @@ const {
   deleteHermesChannel,
   listHermesChannels,
   persistHermesMemoryProviderConfig,
+  persistHermesStorageAllocation,
   persistHermesModelConfig,
   readHermesRuntimeSnapshot,
   saveHermesChannel,
@@ -2607,9 +2608,22 @@ router.post(
       }
     }
 
+    let storageStamp;
+    if (
+      namespace === "headmaster" &&
+      buildAgentRuntimeFields(updated.rows[0]).runtime_family === "hermes"
+    ) {
+      try {
+        storageStamp = await persistHermesStorageAllocation(updated.rows[0]);
+      } catch {
+        storageStamp = { ok: false };
+      }
+    }
+
     res.json({
       ...serializeAgent(updated.rows[0]),
       adopted: true,
+      ...(storageStamp ? { storage: storageStamp } : {}),
       ...(memoryStamp ? { memory: memoryStamp } : {}),
       ...(inferenceStamp ? { inference: inferenceStamp } : {}),
     });

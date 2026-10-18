@@ -5,6 +5,8 @@ const {
   HEADMASTER_MANAGED_MARKER,
 } = require("./headmasterInference");
 
+const { HEADMASTER_STORAGE_ENV, HEADMASTER_STORAGE_WRITE_PY } = require("./headmasterStorage");
+
 const HERMES_MODEL_CONFIG_ENV = "NORA_HERMES_MODEL_CONFIG_B64";
 const HERMES_MANAGED_ENV_ENV = "NORA_HERMES_MANAGED_ENV_B64";
 const HERMES_EMPTY_STATE_SENTINEL = "__NORA_EMPTY_STATE_V1__";
@@ -120,6 +122,14 @@ function buildHermesRuntimeConfigBootstrapCommand() {
     '  mv "$key_tmp" "$HERMES_DATA_DIR/.env"',
     '  chown hermes:hermes "$HERMES_DATA_DIR/.env" 2>/dev/null || true',
     '  chmod 0600 "$HERMES_DATA_DIR/.env"',
+    "fi",
+    'if [ -n "${HEADMASTER_OWNER_ID:-}" ]; then',
+    '  storage_python="/opt/hermes/.venv/bin/python"',
+    '  [ -x "$storage_python" ] || storage_python="$(command -v python3)"',
+    "  \"$storage_python\" - <<'PY_STORAGE'",
+    ...HEADMASTER_STORAGE_WRITE_PY.trim().split("\n"),
+    `write_storage_allocation("/opt/data", os.environ.get("${HEADMASTER_STORAGE_ENV}"))`,
+    "PY_STORAGE",
     "fi",
     `if [ "\${${HERMES_MODEL_CONFIG_ENV}+x}" = x ]; then`,
     '  HERMES_ROOT="/opt/hermes"',

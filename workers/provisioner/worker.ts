@@ -4599,6 +4599,12 @@ const worker = new Worker(
       let agentSecretEnvVars = {};
       try {
         agentSecretEnvVars = normalizeEnvValueMap(await getAgentSecretEnvVars(id));
+        if (resolvedRuntimeFields.runtime_family === "hermes") {
+          // Imported customer env cannot preserve or override control-plane metadata.
+          agentSecretEnvVars = require("../../backend-api/headmasterConfig").withoutHeadmasterEnv(
+            agentSecretEnvVars,
+          );
+        }
         if (
           resolvedRuntimeFields.runtime_family === "hermes" &&
           require("../../backend-api/headmasterConfig").isHeadmasterManagedAgent(agentRow)

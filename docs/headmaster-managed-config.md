@@ -86,3 +86,34 @@ The seven new columns use append-only startup migrations, mirrored in
 Production migration and Nora deployment require separate owner approval; an
 a merge to `main` does not authorize deployment. Kubernetes live acceptance requires a
 Kubernetes fixture and remains distinct from unit coverage of its allowlist.
+
+## Persistent data-storage allocation
+
+`HEADMASTER_STORAGE_ALLOCATION_BYTES` is a **New**, nonsecret reserved input in
+this existing managed environment family. It transports the canonical
+`agents.disk_gb * 1024**3` allocation to `headmaster.storage.allocation_bytes`
+in UTF-8 `/opt/data/config.yaml`. The previous upstream filesystem sample
+reports shared host capacity on ordinary Docker volumes; it cannot describe
+the bot's own allocated budget.
+
+Only positive safe integer GiB values from the selected control-plane row are
+accepted; the resulting byte count must also be a safe integer. Adoption uses
+its existing immutable-identity `RETURNING *` row, not request storage fields.
+Creation and full managed environment reconciliation reserve and overwrite or
+clear the bootstrap input. A missing/invalid stored value removes stale YAML
+allocation metadata; it does not retain an imported/customer allocation.
+Bootstrap and adoption preserve other configuration and never stamp a selected
+profile's separate allocation. No new database column, route or store is added.
+
+This is an allocated **persistent data-storage budget**, not an enforced Docker
+quota. The existing Hermes volume `nora_hermes_home_<agentId>` mounts at
+`/opt/data`: it includes workspace, all profiles, and persistent HOME data,
+downloads and user caches below that mount. It excludes `/tmp`, `/dev/shm`, the
+image and any writable container layer outside the mount. Core must report an
+unknown budget when metadata or a complete measurement is unavailable, with no
+host filesystem fallback. This change does not enable automatic chat deletion.
+
+The Cloud image's matching `050-headmaster-storage-budget` hook is in the webapp
+runtime recipe. Both writers accept the same integer contract; an old runtime
+must receive the updated image/bootstrap or the existing adoption stamp before
+its budget can be reported. No live backfill is performed by this change.

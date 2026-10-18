@@ -230,6 +230,7 @@ describe("RemoteHermesBackend.create", () => {
     const staged = {
       OPENAI_API_KEY: "hermes-provider-secret-sentinel",
       SLACK_TOKEN: "hermes-integration-secret-sentinel",
+      HEADMASTER_STORAGE_ALLOCATION_BYTES: String(10 * 1024 ** 3),
     };
 
     await backend.create({
@@ -243,6 +244,9 @@ describe("RemoteHermesBackend.create", () => {
     const configEnv = immutableEnv(harness.captured[0]);
     expect(configEnv).not.toHaveProperty("OPENAI_API_KEY");
     expect(configEnv).not.toHaveProperty("SLACK_TOKEN");
+    expect(configEnv.HEADMASTER_STORAGE_ALLOCATION_BYTES).toBe(
+      staged.HEADMASTER_STORAGE_ALLOCATION_BYTES,
+    );
     expect(Object.values(configEnv)).not.toContain(staged.OPENAI_API_KEY);
     expect(Object.values(configEnv)).not.toContain(staged.SLACK_TOKEN);
     expect(backend.updateEnv).toHaveBeenCalledWith(
