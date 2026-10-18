@@ -743,7 +743,8 @@ export function createInferenceService({
   }
 
   // Realtime voice session tokens: personal keys only (a v2 assertion naming the
-  // provider). Never reads assignments, operator keys, or quota counters.
+  // provider). Never reads assignments, operator keys, or spending-cap counters;
+  // it does take the own-key hourly request budget, like own-key chat.
   async function handleRealtime(res, body, claims) {
     const requestId = claims.request_id;
     const provider = claims.byo_provider;
@@ -782,6 +783,28 @@ export function createInferenceService({
     }
     if (typeof apiKey !== "string" || !apiKey)
       return safeError(res, 404, "provider_key_missing", "No API key is stored for this provider.", requestId);
+    if (!byoQuotaStore)
+      return safeError(res, 503, "quota_unavailable", "Managed inference is temporarily unavailable.", requestId);
+    // Same own-key hourly request budget as own-key chat (a request limit, not the spending cap).
+    const reservation = await byoQuotaStore
+      .acquire({ ownerId: claims.sub, requestId, reserveOutputTokens: 0 })
+      .catch((error) => {
+        logger.error?.("headmaster-inference own key quota lookup failed", {
+          requestId,
+          code: error?.code || "quota_store_unavailable",
+        });
+        return null;
+      });
+    if (!reservation)
+      return safeError(res, 503, "quota_unavailable", "Managed inference is temporarily unavailable.", requestId);
+    if (!reservation.allowed)
+      return safeError(
+        res,
+        429,
+        reservation.reason === "concurrency" ? "too_many_concurrent_requests" : "request_budget_exceeded",
+        "This account has reached its request limit.",
+        requestId,
+      );
     let session;
     try {
       session = await mintRealtimeToken({
@@ -805,9 +828,30 @@ export function createInferenceService({
         "The provider could not start a realtime session.",
         requestId,
       );
+    } finally {
+      await byoQuotaStore
+        .finish({
+          ownerId: claims.sub,
+          requestId,
+          quotaDay: reservation.day,
+          promptTokens: 0,
+          completionTokens: 0,
+          totalTokens: 0,
+        })
+        .catch((error) =>
+          logger.error?.("headmaster-inference own key accounting failed", {
+            requestId,
+            code: error?.code || "quota_store_unavailable",
+          }),
+        );
     }
     logger.info?.("headmaster-inference realtime session minted", { ownerId, provider });
-    return sendJson(res, 200, { provider, ...session, request_id: requestId }, requestId);
+    return sendJson(
+      res,
+      200,
+      { provider, ...session, ttl_seconds: request.ttl, ttl_clamped: request.clamped, request_id: requestId },
+      requestId,
+    );
   }
 
   async function handleByo(req, res, body, claims) {

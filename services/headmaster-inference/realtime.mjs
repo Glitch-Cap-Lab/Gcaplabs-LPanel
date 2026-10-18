@@ -79,9 +79,12 @@ export function prepareRealtimeRequest(body) {
   if (parsed.ttl_seconds !== undefined) {
     if (!Number.isSafeInteger(parsed.ttl_seconds) || parsed.ttl_seconds < 1)
       return { error: "ttl_invalid" };
+    // The relay's cap is 600 s whatever admission allows: larger asks are clamped
+    // and the response reports ttl_seconds and ttl_clamped.
     ttl = Math.min(Math.max(parsed.ttl_seconds, REALTIME_MIN_TTL_SECONDS), REALTIME_MAX_TTL_SECONDS);
   }
-  return { model: parsed.model, ttl };
+  const clamped = parsed.ttl_seconds !== undefined && ttl !== parsed.ttl_seconds;
+  return { model: parsed.model, ttl, clamped };
 }
 
 function mintError(code, status) {

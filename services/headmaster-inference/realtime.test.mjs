@@ -43,7 +43,7 @@ function row(owner, provider) {
   return { owner_id: owner, provider, ciphertext, revision: 1 };
 }
 
-async function setup(t, { rows, reply } = {}) {
+async function setup(t, { rows, reply, byoQuotaStore } = {}) {
   const state = { rows: rows ?? [row(OWNER, "openai"), row(OTHER, "openai")], calls: [], logs: [] };
   const fetchImpl = async (url, init) => {
     const href = String(url);
@@ -70,7 +70,7 @@ async function setup(t, { rows, reply } = {}) {
       throw new Error("must not be read");
     },
     quotaStore: createMemoryQuotaStore({ now: () => NOW }),
-    byoQuotaStore: createMemoryByoQuotaStore({ now: () => NOW }),
+    byoQuotaStore: byoQuotaStore || createMemoryByoQuotaStore({ now: () => NOW }),
     resolveOwnKey: createProviderKeyResolver({
       supabaseUrl: SUPABASE,
       serviceRoleKey: "service-role-key",
@@ -180,4 +180,28 @@ test("provider key rejection is reported without echoing the provider body", asy
   assert.equal(res.status, 502);
   assert.equal(res.json.error.code, "provider_key_rejected");
   noKeyLeak(state, res);
+});
+
+test("ttl above 600 s is clamped to 600 and the response says so", async (t) => {
+  const state = await setup(t);
+  const big = await state.mint({ ttl_seconds: 3600 });
+  assert.equal(big.status, 200);
+  assert.equal(big.json.ttl_seconds, 600);
+  assert.equal(big.json.ttl_clamped, true);
+  assert.equal(state.calls[0].body.expires_after.seconds, 600);
+  const ok = await state.mint({ ttl_seconds: 600 });
+  assert.equal(ok.json.ttl_seconds, 600);
+  assert.equal(ok.json.ttl_clamped, false);
+});
+
+test("realtime mints use the own-key hourly request budget and release slots", async (t) => {
+  const byoQuotaStore = createMemoryByoQuotaStore({ now: () => NOW, maxRequestsPerHour: 2 });
+  const state = await setup(t, { byoQuotaStore });
+  assert.equal((await state.mint()).status, 200);
+  assert.equal(byoQuotaStore.inspect(OWNER).active, 0);
+  assert.equal((await state.mint()).status, 200);
+  const limited = await state.mint();
+  assert.equal(limited.status, 429);
+  assert.equal(limited.json.error.code, "request_budget_exceeded");
+  assert.equal(state.calls.length, 2);
 });
