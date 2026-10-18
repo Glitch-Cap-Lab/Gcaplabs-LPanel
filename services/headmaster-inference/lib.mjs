@@ -16,6 +16,12 @@ import {
   tierAssignments,
   DEFAULT_TIER_MODELS,
 } from "./policy.mjs";
+import {
+  REALTIME_SESSION_PATH,
+  isRealtimeProvider,
+  mintRealtimeToken,
+  prepareRealtimeRequest,
+} from "./realtime.mjs";
 
 export const MAX_REQUEST_BYTES = 36 * 1024 * 1024;
 export const MAX_RESPONSE_BYTES = 32 * 1024 * 1024;
@@ -268,7 +274,8 @@ export function createInferenceService({
       url.search ||
       !(
         (req.method === "GET" && url.pathname === MODEL_PATH) ||
-        (req.method === "POST" && url.pathname === COMPLETION_PATH)
+        (req.method === "POST" && url.pathname === COMPLETION_PATH) ||
+        (req.method === "POST" && url.pathname === REALTIME_SESSION_PATH)
       )
     ) {
       return safeError(res, 404, "not_found", "Route not found.", null);
@@ -329,6 +336,7 @@ export function createInferenceService({
       );
     // A verified byo_provider claim selects the personal-key path. It never
     // reads assignments, operator provider rows, or operator quota counters.
+    if (url.pathname === REALTIME_SESSION_PATH) return handleRealtime(res, body, claims);
     if (claims.byo_provider !== undefined) return handleByo(req, res, body, claims);
     let mapping;
     try {
@@ -732,6 +740,74 @@ export function createInferenceService({
     const retryHeaders =
       retryAfter && /^\d{1,6}$/.test(retryAfter) ? { "retry-after": retryAfter } : {};
     return safeError(res, failure.status, failure.code, failure.message, requestId, retryHeaders);
+  }
+
+  // Realtime voice session tokens: personal keys only (a v2 assertion naming the
+  // provider). Never reads assignments, operator keys, or quota counters.
+  async function handleRealtime(res, body, claims) {
+    const requestId = claims.request_id;
+    const provider = claims.byo_provider;
+    if (provider === undefined)
+      return safeError(
+        res,
+        400,
+        "realtime_requires_own_key",
+        "Realtime sessions need your own API key.",
+        requestId,
+      );
+    if (!isRealtimeProvider(provider))
+      return safeError(
+        res,
+        400,
+        "realtime_provider_unsupported",
+        "Realtime sessions are not supported for this provider.",
+        requestId,
+      );
+    const request = prepareRealtimeRequest(body);
+    if (request.error)
+      return safeError(res, 400, request.error, "The realtime session request is invalid.", requestId);
+    if (typeof resolveOwnKey !== "function")
+      return safeError(res, 503, "own_key_unavailable", "Your API key is temporarily unavailable.", requestId);
+    const ownerId = claims.sub.toLowerCase();
+    let apiKey;
+    try {
+      apiKey = await resolveOwnKey(ownerId, provider);
+    } catch (error) {
+      logger.warn?.("headmaster-inference own key unavailable", {
+        requestId,
+        provider,
+        code: error?.code || "own_key_unavailable",
+      });
+      return safeError(res, 503, "own_key_unavailable", "Your API key is temporarily unavailable.", requestId);
+    }
+    if (typeof apiKey !== "string" || !apiKey)
+      return safeError(res, 404, "provider_key_missing", "No API key is stored for this provider.", requestId);
+    let session;
+    try {
+      session = await mintRealtimeToken({
+        provider,
+        apiKey,
+        model: request.model,
+        ttl: request.ttl,
+        fetchImpl,
+        now,
+      });
+    } catch (error) {
+      logger.warn?.("headmaster-inference realtime session failed", {
+        requestId,
+        provider,
+        code: error?.code || "provider_error",
+      });
+      return safeError(
+        res,
+        error?.status === 429 ? 429 : error?.status === 400 ? 400 : 502,
+        error?.code || "provider_error",
+        "The provider could not start a realtime session.",
+        requestId,
+      );
+    }
+    logger.info?.("headmaster-inference realtime session minted", { ownerId, provider });
+    return sendJson(res, 200, { provider, ...session, request_id: requestId }, requestId);
   }
 
   async function handleByo(req, res, body, claims) {
