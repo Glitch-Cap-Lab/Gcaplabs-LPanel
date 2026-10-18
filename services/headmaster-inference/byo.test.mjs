@@ -200,6 +200,20 @@ test("byo anthropic: fixed OpenAI-compatible endpoint, user's key in both auth h
   assert.ok(!JSON.stringify(state.logs).includes(USER_KEY));
 });
 
+test("byo gemini: own-key chat goes to Gemini's OpenAI-compatible endpoint with the user's key", async (t) => {
+  const ciphertext = encryptProviderKey({ secret: KEY_SECRET, ownerId: OWNER, provider: "gemini", apiKey: USER_KEY });
+  const { state, chat } = await setup(t, {
+    rows: [{ owner_id: OWNER, provider: "gemini", ciphertext, revision: 1 }],
+  });
+  assert.equal((await chat({ ...CHAT, model: "gemini-2.5-flash" }, { byo_provider: "gemini" })).status, 200);
+  const [c] = state.providerCalls;
+  assert.equal(c.url, "https://generativelanguage.googleapis.com/v1beta/openai/chat/completions");
+  assert.equal(c.init.headers.authorization, `Bearer ${USER_KEY}`);
+  assert.equal(JSON.parse(c.init.body).model, "gemini-2.5-flash");
+  assert.equal(state.assignmentCalls + state.providerLookups, 0);
+  assert.ok(!JSON.stringify(state.logs).includes(USER_KEY));
+});
+
 test("byo chat: streams SSE unchanged", async (t) => {
   const { chat } = await setup(t);
   const res = await chat({ ...CHAT, stream: true });

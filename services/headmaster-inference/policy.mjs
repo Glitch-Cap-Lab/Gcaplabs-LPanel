@@ -68,6 +68,12 @@ const PROVIDER_ENDPOINTS = Object.freeze({
   openrouter: { baseUrl: "https://openrouter.ai/api/v1", hosts: ["openrouter.ai"] },
   // Personal keys only (no operator coverage). Anthropic's OpenAI-compatible endpoint.
   anthropic: { baseUrl: "https://api.anthropic.com/v1", hosts: ["api.anthropic.com"] },
+  // Personal keys only. Gemini's OpenAI-compatible endpoint (also used for
+  // realtime session tokens, see realtime.mjs).
+  gemini: {
+    baseUrl: "https://generativelanguage.googleapis.com/v1beta/openai",
+    hosts: ["generativelanguage.googleapis.com"],
+  },
 });
 
 const CLIENT_AUTHORITY_FIELDS = new Set([
