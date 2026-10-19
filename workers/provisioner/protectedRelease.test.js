@@ -226,7 +226,7 @@ function database(f, deploymentId = uuid(10)) {
   } };
 }
 
-module.exports = { fixture };
+module.exports = { fixture, database, protectedJobData };
 if (!process.env.PROTECTED_RELEASE_FIXTURE_ONLY) {
 test("receipt journal cancellation closes only the operation-owned transport and never acknowledges a late write", async () => {
   const { EventEmitter } = require("node:events"), abort = new AbortController(); let cancelled = false, complete, calls = 0;
