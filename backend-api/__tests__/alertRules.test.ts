@@ -227,6 +227,7 @@ describe("evaluateAndDeliver", () => {
 
   it("enqueues a webhook delivery for a matching rule instead of POSTing inline", async () => {
     mockDb.query
+      .mockResolvedValueOnce({ rows: [{ workspace_id: "ws-1" }] }) // agent assignment
       .mockResolvedValueOnce({
         rows: [
           {
@@ -251,7 +252,7 @@ describe("evaluateAndDeliver", () => {
     expect(job.channel).toMatchObject({ type: "webhook", url: "https://hooks/a" });
     expect(job.eventType).toBe("agent.error");
     // recordFiring records last_fired_at with no inline error (webhook is async)
-    const recordCall = mockDb.query.mock.calls[1];
+    const recordCall = mockDb.query.mock.calls[2];
     expect(recordCall[0]).toContain("UPDATE alert_rules");
     expect(recordCall[1][1]).toBeNull();
   });
@@ -377,6 +378,7 @@ describe("runAlertDeliveryJob", () => {
   let fetchMock;
 
   beforeEach(() => {
+    mockDb.query.mockReset().mockResolvedValue({ rows: [{ id: "r-1" }] });
     originalFetch = global.fetch;
     fetchMock = jest.fn().mockResolvedValue({ ok: true, status: 200 });
     global.fetch = fetchMock;
@@ -388,6 +390,7 @@ describe("runAlertDeliveryJob", () => {
   it("POSTs the channel URL with the job payload", async () => {
     await alertRules.runAlertDeliveryJob({
       ruleId: "r-1",
+      workspaceId: "ws-1",
       ruleName: "Errors",
       channel: { type: "webhook", url: "https://hooks/a" },
       eventType: "agent.error",
@@ -410,10 +413,11 @@ describe("runAlertDeliveryJob", () => {
     await expect(
       alertRules.runAlertDeliveryJob({
         ruleId: "r-1",
+        workspaceId: "ws-1",
         channel: { type: "webhook", url: "https://hooks/x" },
         eventType: "agent.error",
         message: "Boom",
-        metadata: {},
+        metadata: { workspaceId: "ws-1" },
         firedAt: "2026-05-07T00:00:00Z",
       }),
     ).rejects.toThrow(/503/);

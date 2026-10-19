@@ -306,7 +306,9 @@ function clampMetadataForQueue(metadata) {
     originalBytes: serialized.length,
     workspace:
       metadata.workspace || (metadata.workspaceId ? { id: metadata.workspaceId } : undefined),
+    agentId: metadata.agentId,
     agent: metadata.agent,
+    sourceAgent: metadata.sourceAgent,
   };
 }
 
@@ -373,10 +375,44 @@ async function deliverWebhook(channel, payload) {
 }
 
 /**
- * Fire enabled rules matching an event without propagating delivery failures.
- * Webhooks are queued per channel; email remains inline. A workspace ID in the
- * metadata restricts matching to that workspace, so workspace-local callers
- * must include it; absent workspace context leaves all matching rules eligible.
+ * Resolve recipient workspaces from explicit event scope and current agent
+ * assignments, using the same workspace_agents authority as agent access and
+ * monitoring. Multiple agent references require shared access to every agent.
+ * Provenance (including system/admin sources) never grants tenant access.
+ */
+async function resolveEventWorkspaces(metadata) {
+  if (!metadata || typeof metadata !== "object" || Array.isArray(metadata)) return [];
+  const workspaceHints = [metadata.workspace?.id, metadata.workspaceId];
+  const agentHints = [metadata.agentId, metadata.agent?.id, metadata.sourceAgent?.id];
+  const validId = (value) => typeof value === "string" && value.trim().length > 0;
+  const supplied = (value) => value !== undefined && value !== null;
+  if ([...workspaceHints, ...agentHints].some((value) => supplied(value) && !validId(value))) {
+    return [];
+  }
+  if (metadata.agentId && metadata.agent?.id && metadata.agentId !== metadata.agent.id) return [];
+  const workspaceIds = [...new Set(workspaceHints.filter(supplied))];
+  if (workspaceIds.length > 1) return [];
+  const agentIds = [...new Set(agentHints.filter(supplied))];
+  if (!agentIds.length) return workspaceIds;
+
+  const result = await db.query(
+    `SELECT wa.workspace_id
+       FROM workspace_agents wa
+       JOIN agents a ON a.id = wa.agent_id
+      WHERE a.id::text = ANY($1::text[])
+      GROUP BY wa.workspace_id
+     HAVING count(DISTINCT a.id) = $2`,
+    [agentIds, agentIds.length],
+  );
+  return [...new Set(result.rows.map((row) => row.workspace_id))].filter(
+    (id) => validId(id) && (!workspaceIds.length || workspaceIds[0] === id),
+  );
+}
+
+/**
+ * Fire enabled rules only within resolved event workspaces. Missing, deleted,
+ * conflicting or unavailable ownership fails closed without undoing audit
+ * persistence. Webhooks are queued per channel; email remains inline.
  *
  * @param {string} eventType - Event type matched against rule patterns.
  * @param {string} message - Human-readable alert message.
@@ -387,11 +423,15 @@ async function deliverWebhook(channel, payload) {
 async function evaluateAndDeliver(eventType, message, metadata = {}) {
   if (!eventType) return;
   let rules;
+  let workspaceIds;
   try {
+    workspaceIds = await resolveEventWorkspaces(metadata);
+    if (!workspaceIds.length) return;
     const result = await db.query(
       `SELECT id, workspace_id, name, event_pattern, channels
          FROM alert_rules
-        WHERE enabled = true`,
+        WHERE enabled = true AND workspace_id::text = ANY($1::text[])`,
+      [workspaceIds],
     );
     rules = result.rows;
   } catch (err) {
@@ -399,16 +439,10 @@ async function evaluateAndDeliver(eventType, message, metadata = {}) {
     return;
   }
 
-  // Workspace context lets a rule scope itself to events for its own workspace
-  // when the event metadata carries a workspace id. Without that scoping, every
-  // rule would fire for every workspace's events.
-  const eventWorkspaceId = metadata?.workspace?.id || metadata?.workspaceId || null;
-
-  const matches = rules.filter((rule) => {
-    if (!patternMatches(rule.event_pattern, eventType)) return false;
-    if (eventWorkspaceId && rule.workspace_id !== eventWorkspaceId) return false;
-    return true;
-  });
+  const matches = rules.filter(
+    (rule) =>
+      workspaceIds.includes(rule.workspace_id) && patternMatches(rule.event_pattern, eventType),
+  );
 
   if (matches.length === 0) return;
 
@@ -477,6 +511,15 @@ async function runAlertDeliveryJob(jobData) {
   if (!channel || channel.type !== "webhook") {
     throw new Error(`alert delivery job has unsupported channel type: ${channel?.type}`);
   }
+  // Recheck persisted jobs as well: an assignment or rule may have been
+  // removed since enqueue, and older jobs may predate scoped evaluation.
+  const workspaceIds = await resolveEventWorkspaces(metadata);
+  if (!workspaceIds.includes(jobData.workspaceId)) return;
+  const rule = await db.query(
+    "SELECT id FROM alert_rules WHERE id = $1 AND workspace_id = $2 AND enabled = true",
+    [ruleId, jobData.workspaceId],
+  );
+  if (!rule.rows.length) return;
   const payload = {
     eventType,
     message,
