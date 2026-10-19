@@ -111,7 +111,10 @@ async function historyFor(agent, run, fetchApi) {
       id: m.id ?? m.message_id ?? null,
       role: m.role,
       content: m.content,
-      createdAt: typeof m.timestamp === "number" ? new Date(m.timestamp * 1000).toISOString() : m.timestamp ?? m.created_at ?? null,
+      createdAt:
+        typeof m.timestamp === "number"
+          ? new Date(m.timestamp * 1000).toISOString()
+          : (m.timestamp ?? m.created_at ?? null),
     }));
 }
 async function inspectChat(agent, identity, fetchApi) {

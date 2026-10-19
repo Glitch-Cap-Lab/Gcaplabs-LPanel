@@ -1700,7 +1700,13 @@ router.get(
     try {
       res.json(await inspectChat(agent, identity, fetchHermesApi));
     } catch (error) {
-      res.status(error.statusCode || 409).json({ code: error.code || "chat_recovery_unavailable", error: "The request could not be verified. Keep this conversation open and refresh again." });
+      res
+        .status(error.statusCode || 409)
+        .json({
+          code: error.code || "chat_recovery_unavailable",
+          error:
+            "The request could not be verified. Keep this conversation open and refresh again.",
+        });
     }
   }),
 );
@@ -1711,11 +1717,17 @@ router.post(
   asyncHandler(async (req, res) => {
     const agent = await loadHermesUiAgent(req, { requiredRole: "editor" });
     const identity = chatIdentity(req.body, req.user.id);
-    if (req.body?.confirm !== true) return res.status(400).json({ error: "Explicit confirmation is required" });
+    if (req.body?.confirm !== true)
+      return res.status(400).json({ error: "Explicit confirmation is required" });
     try {
       res.json(await resolveChat(agent, identity, req.body.receipt, fetchHermesApi));
     } catch (error) {
-      res.status(error.statusCode || 409).json({ code: error.code || "chat_resolution_refused", error: "The request was not resolved. Refresh its status before trying again." });
+      res
+        .status(error.statusCode || 409)
+        .json({
+          code: error.code || "chat_resolution_refused",
+          error: "The request was not resolved. Refresh its status before trying again.",
+        });
     }
   }),
 );
