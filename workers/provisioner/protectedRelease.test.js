@@ -197,7 +197,8 @@ test("queue ACK failure after real state commit compensates only this completed 
     saveReceipt: async receipt => { if (!failed && receipt.phase === "external_metadata_pending") { failed = true; throw new Error("lost queue ACK"); } } }), /PROTECTED_RELEASE_FAILED/);
   assert.equal(f.row().container_id, "old"); assert.equal(f.row().status, "running");
   assert.equal(db.deployments.get(deploymentId), "failed"); assert.equal(db.deployments.get(uuid(11)), "completed");
-  assert.equal((await f.adapter.readReceipt(f.manifest.targets[0], { old: `hm-owned-release-${digest(f.manifest).slice(0, 16)}`, stage: `.protected-release-${digest(f.manifest)}` })).phase, "rolled_back");
+  const receipt = await f.adapter.readReceipt(f.manifest.targets[0], { old: `hm-owned-release-${digest(f.manifest).slice(0, 16)}`, stage: `.protected-release-${digest(f.manifest)}` });
+  assert.equal(receipt.phase, "rolled_back"); assert.equal(receipt.lp_committed, false);
 });
 
 test("recovery owner mismatch refuses before stopping the current candidate", async t => {

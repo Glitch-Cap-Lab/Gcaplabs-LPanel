@@ -63,7 +63,7 @@ async function runProtectedRuntimeRelease({ manifest: input, action = "apply", a
       await record("restored", { snapshot_restore_required: false });
       await state.rollback(manifest, null, r.previous_status, r);
       await adapter.start(target.container_id);
-      await record("rolled_back", { old_started: true });
+      await record("rolled_back", { old_started: true, lp_committed: false });
       return r;
     }
     if (candidate) {
@@ -82,7 +82,7 @@ async function runProtectedRuntimeRelease({ manifest: input, action = "apply", a
     if (candidate) await adapter.retainFailed(candidate.Id, names);
     await adapter.restoreName(target, names);
     if (r.previous_status !== "stopped") await adapter.start(target.container_id);
-    await record("rolled_back", { old_started: r.previous_status !== "stopped" });
+    await record("rolled_back", { old_started: r.previous_status !== "stopped", lp_committed: false });
     return r;
   };
 
