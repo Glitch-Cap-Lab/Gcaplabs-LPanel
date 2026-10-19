@@ -18,23 +18,34 @@ function createProtectedReleaseStatusHandler({ db, getJob, acquireLock, loadBack
         || !/^[0-9a-f]{64}$/.test(req.params.releaseId ?? "") || Object.keys(req.query || {}).length
         || req.headers["content-length"] !== undefined || req.headers["transfer-encoding"] !== undefined
         || (req.body && Object.keys(req.body).length)) return res.status(400).json({code:"invalid_request"});
-    const read = async () => (await db.query("SELECT * FROM agents WHERE id = $1",[req.params.id])).rows[0];
+    const controller=new AbortController();
+    const disconnect=()=>{if(!res.writableEnded)controller.abort(new Error("protected status disconnected"));};
+    res.once("close",disconnect);
+    let queryable=db;
+    const read = async () => {
+      if(controller.signal.aborted)throw new Error("protected status disconnected");
+      return (await queryable.query("SELECT * FROM agents WHERE id = $1",[req.params.id])).rows[0];
+    };
     let lock;
     try {
       const visible = await read();
       if (!visible || visible.user_id !== req.user.id) return res.status(404).json({code:"release_not_found"});
-      lock = await acquireLock(visible.id,{applicationName:"headmaster-protected-release-status"});
+      lock = await acquireLock(visible.id,{applicationName:"headmaster-protected-release-status",signal:controller.signal});
+      // Production uses the same held advisory-lock PG session. The fallback
+      // keeps dependency-injected local query adapters explicit.
+      if(typeof lock.query === "function")queryable=lock;
       const row = await read();
       if (!row || row.user_id !== req.user.id) return res.status(404).json({code:"release_not_found"});
       const job = await getJob(`protected-release-${req.params.releaseId}`);
       if (!job) return res.status(404).json({code:"release_not_found"});
       const backend = await loadBackend(row);
       const status = await readStatus({manifest:job.data?.protected_release?.manifest,adapter:new Adapter(backend),state:{read},job});
+      if(controller.signal.aborted || lock.signal?.aborted)throw new Error("protected status lease lost");
       return res.json(status);
     } catch (error) {
       const status=(typeof error?.code === "string" && error.code.startsWith("PROTECTED_RELEASE_")) || error?.statusCode===409 ? 409 : 503;
       return res.status(status).json({code:"release_status_unconfirmed",publication_blocked:true});
-    } finally { if (lock) await lock.release(); }
+    } finally { res.off("close",disconnect);if (lock) await lock.release(); }
   };
 }
 module.exports = {createProtectedReleaseStatusHandler,loadShared};

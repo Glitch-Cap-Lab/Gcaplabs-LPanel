@@ -57,16 +57,19 @@ test('account token is protected stdin/in-memory only; owner HTTP is bodyless fo
 test('actual owner-only status HTTP uses canonical reader and refuses stale owner, API keys, body/query and vanished receipt without runtime mutation',async t=>{
   const f=await fixture(t),receipt=await f.run(),id=digest(f.manifest),target=f.manifest.targets[0];
   const job={id:`protected-release-${id}`,data:{id:target.agent_id,protected_release:{manifest:f.manifest,release_id:id,receipt}},getState:async()=> 'completed'};
-  let owner=target.owner_id,transfer=false,transferOnLock=false,dbOutage=false;
+  let owner=target.owner_id,transfer=false,transferOnLock=false,dbOutage=false,lockLost=false,poolQueries=0,lockQueries=0;
+  const rowQuery=async()=>{if(dbOutage)throw new Error('sensitive backend detail');return {rows:[{...f.row(),...(transfer?{user_id:'foreign'}:{})}]};};
   const app=express();app.use((req,res,next)=>{req.user={id:owner};if(req.headers['x-test-api-key'])req.apiKey={};next();});
   app.get('/api/agents/:id/protected-runtime-releases/:releaseId',createProtectedReleaseStatusHandler({
-    db:{query:async()=>{if(dbOutage)throw new Error('sensitive backend detail');return {rows:[{...f.row(),...(transfer?{user_id:'foreign'}:{})}]};}},getJob:async key=>key===job.id?job:null,
-    acquireLock:async()=>{if(transferOnLock)transfer=true;return {release:async()=>{}};},loadBackend:async()=>f.backend,
+    db:{query:async()=>{poolQueries++;return rowQuery();}},getJob:async key=>key===job.id?job:null,
+    acquireLock:async()=>{if(transferOnLock)transfer=true;const controller=new AbortController();if(lockLost)controller.abort();return {signal:controller.signal,query:async()=>{lockQueries++;return rowQuery();},release:async()=>{}};},loadBackend:async()=>f.backend,
   }));
   const server=app.listen(0,'127.0.0.1');await new Promise(r=>server.once('listening',r));t.after(()=>new Promise(r=>server.close(r)));
   const url=`http://127.0.0.1:${server.address().port}/api/agents/${target.agent_id}/protected-runtime-releases/${id}`;
   const before=f.events.length;
   assert.equal((await fetch(url)).status,200);
+  assert.equal(poolQueries,1);assert.ok(lockQueries>=2,'all proof reads after acquire use held PG query session');
+  lockLost=true;assert.equal((await fetch(url)).status,503);lockLost=false;
   dbOutage=true;const unavailable=await fetch(url);assert.equal(unavailable.status,503);assert.ok(!(await unavailable.text()).includes('sensitive'));dbOutage=false;
   owner='foreign';assert.equal((await fetch(url)).status,404);owner=target.owner_id;
   transferOnLock=true;assert.equal((await fetch(url)).status,404);transfer=false;transferOnLock=false;
