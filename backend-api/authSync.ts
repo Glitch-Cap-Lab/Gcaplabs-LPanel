@@ -1133,9 +1133,11 @@ async function stageProviderAuthForStoppedAgent(userId, agent, options = {}) {
   }
 
   await assertRemoteHostAgentUse(agent, { includeProfile: false });
-  const defaultRow = await db.query(
-    "SELECT id, provider, model, config FROM llm_providers WHERE user_id = $1 AND is_default = true LIMIT 1",
-    [userId],
+  const defaultRow = await readManagedEnvSource("default model", () =>
+    db.query(
+      "SELECT id, provider, model, config FROM llm_providers WHERE user_id = $1 AND is_default = true LIMIT 1",
+      [userId],
+    ),
   );
   const defaultProvider = defaultRow.rows[0] || null;
   const runtimeFamily = resolveAgentRuntimeFamily(agent);
@@ -1161,6 +1163,7 @@ async function stageProviderAuthForStoppedAgent(userId, agent, options = {}) {
           ? attachHermesCustomApiKey(persistedModelConfig, defaultProvider, envVars)
           : generatedModelConfig
         : null;
+    options.beforeRuntimeMutation?.();
     await reconcileManagedRuntimeEnv(
       agent,
       {
@@ -1182,6 +1185,7 @@ async function stageProviderAuthForStoppedAgent(userId, agent, options = {}) {
   const managedEnv = await readManagedEnvSource("runtime environment", () =>
     buildOpenClawManagedEnvForAgent(userId, agent.id, defaultProvider, { mcpRuntimeState }),
   );
+  options.beforeRuntimeMutation?.();
   await reconcileManagedRuntimeEnv(agent, managedEnv, "openclaw", {
     extraManagedEnvNames: [
       ...(options.extraManagedEnvNames || []),
@@ -1253,12 +1257,18 @@ function createProviderAuthLifecycleError(agent, cause = null) {
 async function markProviderAuthPending(agent, action) {
   const pendingStatus = action === "start" ? "stopped" : "error";
   const updated = await db.query(
-    `UPDATE agents
+    `WITH prior AS (
+       SELECT id, status, paused_reason FROM agents
+        WHERE id = $1 AND user_id = $4 FOR UPDATE
+     )
+     UPDATE agents
         SET status = $2,
             paused_reason = $3
-      WHERE id = $1
-      RETURNING *`,
-    [agent.id, pendingStatus, PROVIDER_AUTH_PENDING_REASON],
+       FROM prior
+      WHERE agents.id = prior.id
+      RETURNING agents.*, prior.status AS provider_auth_previous_status,
+                prior.paused_reason AS provider_auth_previous_paused_reason`,
+    [agent.id, pendingStatus, PROVIDER_AUTH_PENDING_REASON, agent.user_id],
   );
   if (!updated.rows[0]) {
     const error = new Error(`Agent ${agent.id} no longer exists`);
@@ -1266,8 +1276,39 @@ async function markProviderAuthPending(agent, action) {
     error.code = "AGENT_NOT_FOUND";
     throw error;
   }
-  Object.assign(agent, updated.rows[0]);
-  return agent;
+  const {
+    provider_auth_previous_status: status,
+    provider_auth_previous_paused_reason: pausedReason,
+    ...pendingAgent
+  } = updated.rows[0];
+  Object.assign(agent, pendingAgent);
+  return { status, pausedReason, pendingStatus };
+}
+
+async function restoreProviderAuthPreflightState(agent, prior) {
+  const restored = await db.query(
+    `UPDATE agents
+        SET status = $2, paused_reason = $3
+      WHERE id = $1 AND user_id = $6
+        AND status = $4 AND paused_reason = $5
+      RETURNING *`,
+    [
+      agent.id,
+      prior.status,
+      prior.pausedReason,
+      prior.pendingStatus,
+      PROVIDER_AUTH_PENDING_REASON,
+      agent.user_id,
+    ],
+  );
+  if (!restored.rows[0]) {
+    const error = new Error(
+      `Agent ${agent.id} lifecycle state changed during configuration preflight`,
+    );
+    error.code = "AGENT_AUTH_STATE_CHANGED";
+    throw error;
+  }
+  Object.assign(agent, restored.rows[0]);
 }
 
 async function publishProviderAuthReady(agent) {
@@ -1310,15 +1351,21 @@ async function resumeAgentWithProviderAuth(agent, action, options = {}) {
     );
   }
 
-  await markProviderAuthPending(agent, action);
+  const priorState = await markProviderAuthPending(agent, action);
   let lifecycleResult = null;
   let syncFailureContained = false;
   let phase = action === "start" ? "offline_stage" : "auth_sync";
+  let runtimeMutationStarted = false;
+  const beforeRuntimeMutation = () => {
+    runtimeMutationStarted = true;
+    phase = phase === "offline_stage" ? "offline_apply" : "auth_apply";
+  };
 
   try {
     if (action === "start") {
       await stageProviderAuthForStoppedAgent(agent.user_id, agent, {
         providerLockHeld: true,
+        beforeRuntimeMutation,
       });
       phase = "physical_start";
       lifecycleResult = await containerManager.start(agent);
@@ -1331,6 +1378,7 @@ async function resumeAgentWithProviderAuth(agent, action, options = {}) {
       providerLockHeld: true,
       includeProviderAuthPending: true,
       startupStateStaged: action === "start",
+      beforeRuntimeMutation,
     });
     const result = Array.isArray(results)
       ? results.find((entry) => entry?.agentId === agent.id)
@@ -1339,7 +1387,13 @@ async function resumeAgentWithProviderAuth(agent, action, options = {}) {
       syncFailureContained = Boolean(
         result?.runtimeStopped && result?.statusPersisted && result?.quarantinePersisted,
       );
-      throw createProviderAuthLifecycleError(agent, result?.error || result?.status || null);
+      const error = createProviderAuthLifecycleError(
+        agent,
+        result?.error || result?.status || null,
+      );
+      error.failureCode = result?.code || null;
+      error.reconciliationPhase = result?.phase || phase;
+      throw error;
     }
 
     phase = "final_status";
@@ -1352,6 +1406,21 @@ async function resumeAgentWithProviderAuth(agent, action, options = {}) {
         : phase === "physical_start"
           ? candidate
           : createProviderAuthLifecycleError(agent, candidate);
+    error.failureCode = candidate?.failureCode || candidate?.code || null;
+    error.reconciliationPhase = candidate?.reconciliationPhase || phase;
+    error.runtimeMutationStarted = runtimeMutationStarted;
+    if (error.failureCode === "managed_env_source_unavailable" && !runtimeMutationStarted) {
+      // Only a proven preflight failure may undo our temporary pending marker.
+      // A concurrent lifecycle/owner change wins; never quarantine or overwrite
+      // it merely because restoring the marker failed.
+      try {
+        await restoreProviderAuthPreflightState(agent, priorState);
+      } catch (restoreError) {
+        error.statusCode = 500;
+        error.restoreError = restoreError;
+      }
+      throw error;
+    }
     if (!syncFailureContained) {
       const stopped = await stopAgentAfterAuthSyncFailure(agent);
       if (stopped.stopError || stopped.quarantineError || !stopped.statusPersisted) {
@@ -1421,9 +1490,11 @@ async function syncAuthToUserAgents(userId, agentId = null, options = {}) {
   const extraManagedEnvNames = Array.isArray(options?.extraManagedEnvNames)
     ? options.extraManagedEnvNames
     : [];
-  const defaultRow = await db.query(
-    "SELECT id, provider, model, config FROM llm_providers WHERE user_id = $1 AND is_default = true LIMIT 1",
-    [userId],
+  const defaultRow = await readManagedEnvSource("default model", () =>
+    db.query(
+      "SELECT id, provider, model, config FROM llm_providers WHERE user_id = $1 AND is_default = true LIMIT 1",
+      [userId],
+    ),
   );
   const defaultProvider = defaultRow.rows[0] || null;
   const modelCommand = buildDefaultModelCommand(defaultProvider);
@@ -1483,7 +1554,9 @@ async function syncAuthToUserAgents(userId, agentId = null, options = {}) {
   const agentParams = agentId
     ? [agentId, userId, includeProviderAuthPending, PROVIDER_AUTH_PENDING_REASON, apiKeyWorkspaceId]
     : [userId];
-  const agents = await db.query(agentQuery, agentParams);
+  const agents = await readManagedEnvSource("runtime inventory", () =>
+    db.query(agentQuery, agentParams),
+  );
   if (apiKeyWorkspaceId && agents.rows.some((agent) => isRemoteDockerAgent(agent))) {
     const error = new Error("Remote Docker agent operations require session authentication");
     error.statusCode = 403;
@@ -1501,6 +1574,11 @@ async function syncAuthToUserAgents(userId, agentId = null, options = {}) {
 
   const results = [];
   for (const agent of agents.rows) {
+    let phase = "preflight";
+    const beforeRuntimeMutation = () => {
+      phase = "apply";
+      options.beforeRuntimeMutation?.();
+    };
     try {
       const runtimeFamily = resolveAgentRuntimeFamily(agent);
       // Fail closed before the first runtime mutation. Adapter-level guards are
@@ -1511,6 +1589,7 @@ async function syncAuthToUserAgents(userId, agentId = null, options = {}) {
         if (agent.paused_reason !== PROVIDER_AUTH_PENDING_REASON) {
           throw new Error("Offline provider authentication staging is no longer pending");
         }
+        beforeRuntimeMutation();
         if (evictConnection) evictConnection(agent);
         await refreshDockerRuntimeAddress(agent);
         const readiness = await waitForAgentReadiness(
@@ -1539,6 +1618,7 @@ async function syncAuthToUserAgents(userId, agentId = null, options = {}) {
         await stageProviderAuthForStoppedAgent(userId, agent, {
           providerLockHeld: true,
           extraManagedEnvNames,
+          beforeRuntimeMutation,
         });
         if (evictConnection) evictConnection(agent);
         await clearProviderAuthQuarantine(agent.id);
@@ -1581,6 +1661,7 @@ async function syncAuthToUserAgents(userId, agentId = null, options = {}) {
             modelConfig: selectedHermesModelConfig,
           }),
         };
+        beforeRuntimeMutation();
         if (evictConnection) evictConnection(agent);
         await reconcileManagedRuntimeEnv(agent, managedHermesEnv, "hermes", {
           extraManagedEnvNames,
@@ -1638,6 +1719,7 @@ async function syncAuthToUserAgents(userId, agentId = null, options = {}) {
       const managedEnv = await readManagedEnvSource("runtime environment", () =>
         buildOpenClawManagedEnvForAgent(userId, agent.id, defaultProvider, { mcpRuntimeState }),
       );
+      beforeRuntimeMutation();
       if (evictConnection) evictConnection(agent);
       await reconcileManagedRuntimeEnv(agent, managedEnv, "openclaw", {
         extraManagedEnvNames: [
@@ -1741,12 +1823,14 @@ async function syncAuthToUserAgents(userId, agentId = null, options = {}) {
       results.push({ agentId: agent.id, status: "synced" });
     } catch (e) {
       console.warn(`[authSync] Failed for agent ${agent.id}:`, e.message);
-      if (e.code === "managed_env_source_unavailable") {
+      if (e.code === "managed_env_source_unavailable" && phase === "preflight") {
         results.push({
           agentId: agent.id,
           status: "failed",
           error: e.message,
           code: e.code,
+          phase,
+          runtimeMutationStarted: false,
           runtimeStopped: false,
           statusPersisted: false,
           quarantinePersisted: false,
@@ -1765,6 +1849,8 @@ async function syncAuthToUserAgents(userId, agentId = null, options = {}) {
         status: "failed",
         error: e.message,
         code: e.code || null,
+        phase,
+        runtimeMutationStarted: true,
         runtimeStopped: stopped.runtimeStopped,
         statusPersisted: stopped.statusPersisted,
         quarantinePersisted: stopped.quarantinePersisted,
