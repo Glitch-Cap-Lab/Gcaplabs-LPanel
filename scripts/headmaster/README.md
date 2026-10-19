@@ -240,6 +240,25 @@ no Docker socket and creates no runtime. The mixed-worker check loads the whole
 worker source from main commit `b022f0c66e253a4727e0944aa45504164b2eb747` under
 the existing Jest service mocks; this Git object must be available locally.
 
+For substantive PostgreSQL cancellation proof, the optional maintained fixture
+requires an already-installed PostgreSQL 17 and explicit **new** absolute cluster
+directory, unprivileged localhost port, and mode. It never reads the application's
+database configuration. Each invocation creates only its new synthetic cluster,
+checks transaction rollback or delayed autocommit cancellation, lock reacquisition
+and post-abort refusal, then verifies its private ownership marker and server
+`data_directory` before stopping that exact cluster. Data/logs are retained.
+Run from `workers/provisioner`, choosing fresh paths and unused ports:
+
+```sh
+node --import ./node_modules/tsx/dist/loader.mjs protectedReleasePostgres.fixture.mjs --cluster=C:/task-only/new-pg-transaction --port=55946 --mode=transaction
+node --import ./node_modules/tsx/dist/loader.mjs protectedReleasePostgres.fixture.mjs --cluster=C:/task-only/new-pg-autocommit --port=55947 --mode=autocommit
+```
+
+`--bin=ABSOLUTE_PATH` can select an existing PostgreSQL binary directory; the
+Windows default is `C:/Program Files/PostgreSQL/17/bin`. Nothing is installed.
+This fixture proves cancellation before a delayed write, not rollback of an
+already-committed statement or production proxy/TLS behavior.
+
 For the fixed filesystem programs themselves, the optional local POSIX fixture
 uses the exact exported production program strings. On Linux with local root
 (only a synthetic temporary tree, no Docker/service/network):
