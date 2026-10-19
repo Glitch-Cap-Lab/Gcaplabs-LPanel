@@ -1,6 +1,6 @@
 # Headmaster compatibility notes
 
-Status: N0 source adoption in progress; no Headmaster Nora image has been released as a tagged Nora release. Production runs operator-built images described under "Production state (30 September 2026)".
+Status: no Headmaster Nora image has been released as a tagged Nora release. Production runs operator-built images on the Hetzner host (production moved from Azure on 13 October 2026); see "Production state (19 October 2026)". The N0 sections below are the historical record of the 23 September 2026 adoption.
 
 ## Source and runtime pins
 
@@ -41,7 +41,17 @@ This comparison confirms those files match, but it does not identify the complet
 
 The production images observed on 2026-09-23, before any N0 release, are recorded in `headmaster-build-manifest.json`. No production Nora image, container, source tree, database, or runtime was changed for N0. The worker and API rollback digests are references only; no rollback action has been performed.
 
-## Production state (30 September 2026)
+## Production state (19 October 2026)
+
+- Host: Hetzner, since 13 October 2026. The earlier Azure host is retired.
+- Both Cloud bots run the runtime image `nora-headmaster-memory:809aa15-e0924d5-mv` (HeadmasterCore `809aa155`). The Headmaster bridge's `HERMES_RUNTIME_IMAGE` must still equal the runtime image in use; the bridge fails closed otherwise.
+- The inference relay runs `headmaster-inference:b022f0c`. That build adds the own-key realtime voice route `POST /v1/realtime/session` and the `gemini` provider row (personal keys only); see `services/headmaster-inference/README.md`.
+- The worker and API image tags in use on 19 October are not recorded in this file or in `headmaster-build-manifest.json`, whose newest block is still `production_2026_09_30`. Read them from the running containers before relying on a rollback reference.
+
+## Production state (30 September 2026, superseded)
+
+Historical. Kept for the record of the `HEADMASTER_*` environment fix.
+
 
 - Cloud runtimes and Nora's default runtime image (`HERMES_DOCKER_IMAGE`) are `nora-headmaster-memory:1de5b492`, built from HeadmasterCore main `1de5b492c0905b7e31b20e6e8e70b1fe01da8ad5`. The Headmaster bridge's `HERMES_RUNTIME_IMAGE` must stay equal to it (the bridge fails closed otherwise).
 - The worker runs `headmaster-nora/worker-provisioner:a318c1e7e6bb`, built from this repository's `a318c1e7e6bbd7d52917b9a5fedd118a5a66d9be`. The API container stays on `headmaster-nora/backend-api:1bae078ad99d`, so API and worker are not from one commit. See `headmaster-build-manifest.json`, `production_2026_09_30`.

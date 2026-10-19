@@ -1,5 +1,10 @@
 # Managed inference relay (S1) — provider coverage
 
+> Status: finished audit, kept as a record. Since it was written the relay also
+> accepts personal keys for Anthropic and Gemini, and mints own-key realtime
+> voice tokens (`POST /v1/realtime/session`). The current behaviour is in
+> `README.md`.
+
 ## Audit: the provider this service must support first is OpenRouter
 
 **Conclusion: OpenRouter must be a first-class protocol here, and OpenRouter's
