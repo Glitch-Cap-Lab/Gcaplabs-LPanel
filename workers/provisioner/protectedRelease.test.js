@@ -62,8 +62,8 @@ async function fixture(t, options = {}) {
   const docker = {
     modem: { demuxStream(raw, stdout) { raw.on("data", x => stdout.write(x)); }, dial(opts, callback) {
       if (faults.helperImage) { opts.abortSignal.addEventListener("abort", () => events.push("abort:helper-image")); return; }
-      assert.match(opts.path, /^\/images\/sha256:[0-9a-f]{64}\/json$/);
-      docker.getImage(opts.path.slice(8, -5)).inspect().then(value => callback(null, value), callback);
+      assert.match(opts.path, /^\/images\/[^/]+\/json$/);
+      docker.getImage(decodeURIComponent(opts.path.slice(8, -5))).inspect().then(value => callback(null, value), callback);
     } },
     getImage(id) { return { async inspect() { return { Id: id === manifest.image.binding ? manifest.image.id : id, RepoDigests: [], Config: { Env: ["PYTHONPATH=/opt/data", "LD_PRELOAD=/opt/data/private.so", "LD_AUDIT=/opt/data/audit.so"], Healthcheck: { Test: ["CMD-SHELL", "unsafe-image-default"] }, Labels: { "org.opencontainers.image.revision": manifest.sources.core, "com.gcaplabs.webapp.revision": manifest.sources.webapp } } }; } }; },
     async listContainers(options = {}) { return [...containers.values()].filter(c => options.all || c.State.Running).filter(c => !options.filters || (c.Config.Labels?.["headmaster.release.id"] === digest(manifest))).map(c => ({ Id: c.Id })); },
@@ -467,4 +467,3 @@ for (const boundary of ["stop", "stage", "create", "restore", "restoreName", "ol
   assert.deepEqual(await fs.readdir(path.join(root, ".worker-tmp")), []);
 });
 }
-

@@ -147,7 +147,10 @@ class ProtectedReleaseDocker {
   // Binding strings are metadata references. Docker's Id is a distinct local
   // config/content identity; no pull or published-registry claim is made here.
   async verifyImageBinding(m) {
-    const image = await this.docker.getImage(m.image.binding).inspect();
+    const image = await boundedDockerCall(signal => new Promise((resolve,reject) => this.docker.modem.dial({
+      path:`/images/${encodeURIComponent(m.image.binding)}/json`,method:"GET",abortSignal:signal,
+      statusCodes:{200:true,404:"no such image",500:"server error"},
+    },(error,value)=>error?reject(error):resolve(value))),this.probeTimeoutMs);
     if (image.Id !== m.image.id || (m.image.binding.includes("@sha256:") && !(image.RepoDigests || []).includes(m.image.binding))) throw refuse("PROTECTED_RELEASE_IMAGE_BINDING_CHANGED");
     return { binding: m.image.binding, local_image_id: image.Id, kind: m.image.binding.includes("@sha256:") ? "local_repo_digest" : "local_reference" };
   }
