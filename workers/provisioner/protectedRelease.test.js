@@ -10,15 +10,19 @@ const { validateManifest, envFingerprint, digest } = require("./protectedRelease
 const { ProtectedReleaseDocker } = require("./protectedReleaseDocker");
 const { runProtectedRuntimeRelease } = require("./protectedRuntimeRelease");
 const { runProtectedReleaseJob } = require("./protectedReleaseJob");
+const { createReceiptJournal } = require("./protectedReleaseJob");
 const { createProtectedReleaseState } = require("./protectedReleaseState");
 const { readProtectedReleaseStatus } = require("./protectedReleaseStatus");
 const { run: command } = require("../../scripts/headmaster/runtime-release");
+const { buildReplacementDeploymentJob } = require("../../backend-api/agentProvisionLock");
 
 const uuid = n => `00000000-0000-0000-0000-${String(n).padStart(12, "0")}`;
 const image = n => `sha256:${String(n).repeat(64)}`;
 const sha = value => crypto.createHash("sha256").update(value).digest("hex");
 const clone = value => JSON.parse(JSON.stringify(value));
 const missing = () => Object.assign(new Error("not found"), { statusCode: 404 });
+const protectedJobData = f => ({ ...buildReplacementDeploymentJob(f.row()), replace_existing_runtime: false,
+  protected_release: { manifest: f.manifest, release_id: digest(f.manifest), action: "apply", deployment_id: uuid(10) } });
 
 async function fixture(t, options = {}) {
   const root = options.root || await fs.mkdtemp(path.join(os.tmpdir(), "protected-release-"));
@@ -62,8 +66,8 @@ async function fixture(t, options = {}) {
   const docker = {
     modem: { demuxStream(raw, stdout) { raw.on("data", x => stdout.write(x)); }, dial(opts, callback) {
       if (faults.helperImage) { opts.abortSignal.addEventListener("abort", () => events.push("abort:helper-image")); return; }
-      assert.match(opts.path, /^\/images\/sha256:[0-9a-f]{64}\/json$/);
-      docker.getImage(opts.path.slice(8, -5)).inspect().then(value => callback(null, value), callback);
+      const reference = decodeURIComponent(opts.path.slice(8, -5)); assert.match(reference, /^sha256:[0-9a-f]{64}$/);
+      docker.getImage(reference).inspect().then(value => callback(null, value), callback);
     } },
     getImage(id) { return { async inspect() { return { Id: id, Config: { Env: ["PYTHONPATH=/opt/data", "LD_PRELOAD=/opt/data/private.so", "LD_AUDIT=/opt/data/audit.so"], Healthcheck: { Test: ["CMD-SHELL", "unsafe-image-default"] }, Labels: { "org.opencontainers.image.revision": manifest.sources.core, "com.gcaplabs.webapp.revision": manifest.sources.webapp } } }; } }; },
     async listContainers(options = {}) { return [...containers.values()].filter(c => options.all || c.State.Running).filter(c => !options.filters || (c.Config.Labels?.["headmaster.release.id"] === digest(manifest))).map(c => ({ Id: c.Id })); },
@@ -142,7 +146,10 @@ async function fixture(t, options = {}) {
           await maintenanceTasks.get(get().Id); return { StatusCode: get().exit || 0 };
         },
         async rename({ name }) { const c = get(); events.push(`rename:${c.Id}`); c.Name = `/${name}`; persist(); if (options.killAfterRestoreName && c.Id === "old" && name === "hm-owned") process.exit(27); },
-        async getArchive({ path: p }) { if (faults.stage && p === "/opt/data/installs") throw new Error("archive failure"); return require("node:stream").Readable.from(await archive(p)); },
+        async getArchive({ path: p }) {
+          if (p === "/etc/passwd") return require("node:stream").Readable.from(await packArchive([{ name: "passwd", type: "file", mode: 0o644, content: Buffer.from(`hermes:x:${faults.uid || (faults.candidateUid && get().Id === "candidate") ? 10001 : 10000}:10000::/opt/data:/bin/sh\n`) }]));
+          if (faults.stage && p === "/opt/data/installs") throw new Error("archive failure"); return require("node:stream").Readable.from(await archive(p));
+        },
         async putArchive(buffer) {
           const tar = require("tar-stream"), extract = tar.extract();
           const done = new Promise((resolve, reject) => {
@@ -221,6 +228,153 @@ function database(f, deploymentId = uuid(10)) {
 
 module.exports = { fixture };
 if (!process.env.PROTECTED_RELEASE_FIXTURE_ONLY) {
+test("receipt journal cancellation closes only the operation-owned transport and never acknowledges a late write", async () => {
+  const { EventEmitter } = require("node:events"), abort = new AbortController(); let cancelled = false, complete, calls = 0;
+  const connection = { disconnect() { cancelled = true; } };
+  const shared = { disconnect() { throw new Error("must not disconnect worker shared transport"); }, duplicate(options) {
+    assert.equal(options.enableOfflineQueue, false); assert.equal(options.maxRetriesPerRequest, 0); return connection;
+  } };
+  class Owned extends EventEmitter { constructor(value) { super(); this.client = Promise.resolve(value); } async close() {} }
+  const job = { data: { before: true }, queue: { client: Promise.resolve(shared) }, backend: { queue: { client: Promise.resolve(shared) }, async updateData(received, value) {
+    assert.equal(received, job); assert.equal(await this.queue.client, connection); calls++;
+    return new Promise(resolve => { complete = resolve; });
+  } } };
+  const journal = await createReceiptJournal(job, abort.signal, Owned), pending = journal.updateData({ after: true });
+  await new Promise(resolve => setImmediate(resolve)); abort.abort(new Error("operation deadline"));
+  await assert.rejects(pending, /operation deadline/); assert.equal(cancelled, true); assert.deepEqual(job.data, { before: true });
+  complete(); await new Promise(resolve => setImmediate(resolve)); assert.deepEqual(job.data, { before: true });
+  await assert.rejects(journal.updateData({ later: true })); assert.equal(calls, 1); journal.close();
+});
+test("stalled real tar input and upload destroy their streams at the adapter deadline", async t => {
+  const f = await fixture(t), tarBytes = await packArchive([
+    { name: "installs", type: "directory", mode: 0o755, content: Buffer.alloc(0) },
+    { name: "installs/partial", type: "file", mode: 0o600, content: Buffer.alloc(4096) },
+  ]);
+  const input = new PassThrough(); input.write(tarBytes.subarray(0, 1200));
+  const adapter = new ProtectedReleaseDocker(f.backend, { archiveTimeoutMs: 25 });
+  const before = Date.now();
+  await assert.rejects(adapter.read({ getArchive: async () => input }, "/opt/data/installs", "installs"), /DOCKER_TIMEOUT/);
+  assert.equal(input.destroyed, true); assert.ok(Date.now() - before < 1000);
+  let uploaded, cancelled = false;
+  await assert.rejects(adapter.upload({ putArchive: (stream, options) => { uploaded = stream; options.abortSignal.addEventListener("abort", () => { cancelled = true; }); return new Promise(() => {}); } }, [
+    { name: "installs/file", type: "file", mode: 0o600, content: Buffer.alloc(1024 * 1024) },
+  ], {}), /DOCKER_TIMEOUT/);
+  assert.equal(cancelled, true); assert.equal(uploaded.destroyed, true);
+});
+
+test("public Docker RPC and exec phases cancel the actual transport instead of waiting indefinitely", async t => {
+  const f = await fixture(t), adapter = new ProtectedReleaseDocker(f.backend, { probeTimeoutMs: 20 });
+  for (const kind of ["inspect", "list", "exec-create", "exec-start", "exec-stream", "exec-inspect"]) {
+    let aborted = false, raw;
+    const stall = options => new Promise(() => options.abortSignal.addEventListener("abort", () => { aborted = true; }));
+    let operation;
+    if (kind === "inspect") operation = () => adapter.inspect({ inspect: stall });
+    else if (kind === "list") { const original = f.docker.listContainers; f.docker.listContainers = stall; operation = async () => { try { await adapter.list(); } finally { f.docker.listContainers = original; } }; }
+    else operation = () => adapter.exec({ exec: kind === "exec-create" ? stall : async () => ({
+      start: kind === "exec-start" ? stall : async () => { raw = new PassThrough(); if (kind !== "exec-stream") setImmediate(() => raw.end("done")); return raw; },
+      inspect: kind === "exec-inspect" ? stall : async () => ({ ExitCode: 0 }),
+    }) }, ["fixed-probe"]);
+    await assert.rejects(operation(), /DOCKER_TIMEOUT/, kind);
+    assert.ok(kind === "exec-stream" ? raw.destroyed : aborted, kind);
+  }
+});
+
+test("a lost candidate-create ACK never starts or creates again until fresh explicit recovery", async t => {
+  const f = await fixture(t), original = f.docker.createContainer.bind(f.docker); f.adapter.probeTimeoutMs = 25;
+  let late, aborted = false;
+  f.docker.createContainer = async cfg => {
+    const value = await original(cfg);
+    if (cfg.Labels?.["headmaster.release.maintenance"]) return value;
+    cfg.abortSignal.addEventListener("abort", () => { aborted = true; });
+    return new Promise(resolve => { late = () => resolve(value); });
+  };
+  await assert.rejects(f.run(), /RECOVERY_REQUIRED/);
+  assert.equal(aborted, true); assert.equal(f.events.filter(x => x === "create:candidate").length, 1);
+  const boundary = f.events.length; late(); await new Promise(resolve => setTimeout(resolve, 30));
+  assert.equal(f.events.length, boundary); assert.ok(!f.events.includes("start:candidate")); assert.ok(!f.events.includes("start:old"));
+  f.docker.createContainer = original; f.adapter.probeTimeoutMs = 60000;
+  assert.equal((await f.run({ action: "recover" })).phase, "rolled_back");
+  assert.equal(f.events.filter(x => x === "create:candidate").length, 1);
+});
+
+test("operation deadline and lost provision lease abort a stalled archive before any later mutation", async t => {
+  for (const mode of ["deadline", "lease"]) {
+    const f = await fixture(t), db = database(f), loss = new AbortController();
+    const original = f.docker.getContainer.bind(f.docker); let stream;
+    f.docker.getContainer = id => { const c = original(id); return { ...c, getArchive: async options => {
+      if (options.path !== "/etc/passwd") return c.getArchive(options);
+      stream = new PassThrough(); stream.write(Buffer.alloc(20)); return stream;
+    } }; };
+    const job = { id: "bounded-job", data: protectedJobData(f) };
+    const lock = { signal: loss.signal, deadlineAt: Date.now() + 180000, query: (...args) => db.query(...args) };
+    const pending = runProtectedReleaseJob(job, { db: { query: () => { throw new Error("pool must not be used"); } }, agentRow: f.row(), provisionLock: lock,
+      operationTimeoutMs: mode === "deadline" ? 50 : 5000, journalAdapter: { updateData: async () => {} },
+      loadBackend: async () => f.backend, withProviderMutationLock: async (_, fn) => fn() });
+    if (mode === "lease") setTimeout(() => loss.abort(new Error("session ended")), 50);
+    await assert.rejects(pending, /DEADLINE|LOCK_LOST/);
+    assert.equal(stream.destroyed, true); assert.ok(!f.events.includes("stop:old"));
+    const count = f.events.length; await new Promise(resolve => setTimeout(resolve, 30)); assert.equal(f.events.length, count);
+  }
+});
+
+test("uncertain queue ACK after create requires explicit recovery without automatic restart", async t => {
+  const f = await fixture(t), db = database(f), job = { id: "uncertain-journal", data: protectedJobData(f) };
+  await assert.rejects(runProtectedReleaseJob(job, { db, agentRow: f.row(), loadBackend: async () => f.backend,
+    withProviderMutationLock: async (_, fn) => fn(), checkReadiness: async () => ({ ok: true }),
+    journalAdapter: { updateData: async data => { if (data.protected_release.receipt.phase === "candidate_created") throw new Error("Command timed out"); job.data = data; } },
+  }), /RECOVERY_REQUIRED/);
+  assert.equal(f.events.filter(x => x === "create:candidate").length, 1);
+  assert.ok(!f.events.includes("start:old")); assert.ok(!f.events.includes("start:candidate"));
+  assert.equal((await f.run({ action: "recover" })).phase, "rolled_back");
+});
+
+test("a lease without cleanup headroom refuses before opening any mutation transport", async t => {
+  const f = await fixture(t); let loaded = false;
+  await assert.rejects(runProtectedReleaseJob({ data: protectedJobData(f) }, { db: database(f), agentRow: f.row(),
+    provisionLock: { deadlineAt: Date.now() + 60000 }, loadBackend: async () => { loaded = true; },
+  }), /OPERATION_DEADLINE/);
+  assert.equal(loaded, false); assert.equal(f.events.length, 0);
+});
+
+test("maintained dry-run deadline cancels its archive and uses the held database session", async t => {
+  const f = await fixture(t); let stream, released = false;
+  const original = f.docker.getContainer.bind(f.docker);
+  f.docker.getContainer = id => { const c = original(id); return { ...c, getArchive: async options => {
+    if (options.path !== "/etc/passwd") return c.getArchive(options);
+    stream = new PassThrough(); stream.write(Buffer.alloc(20)); return stream;
+  } }; };
+  const deps = { operationTimeoutMs: 50, readFile: async () => JSON.stringify(f.manifest),
+    db: { query: () => { throw new Error("must use held lock session"); } },
+    acquireLock: async (_, { signal }) => ({ query: async () => ({ rows: [{ ...f.row(), status: "running" }] }), release: async () => { assert.equal(signal.aborted, true); released = true; } }),
+    loadBackend: async () => f.backend };
+  await assert.rejects(command(["--manifest", "local.json", "--dry-run"], deps), /OPERATION_DEADLINE/);
+  assert.equal(stream.destroyed, true); assert.equal(released, true); assert.ok(!f.events.includes("stop:old"));
+});
+
+test("readiness cancellation reaches fetch and never schedules another probe", async () => {
+  const { waitForHttpReady } = require("./healthChecks"), controller = new AbortController(); let calls = 0, cancelled = false;
+  const pending = waitForHttpReady("http://synthetic.invalid/health", { signal: controller.signal, attempts: 3,
+    fetchImpl: async (_, { signal }) => { calls++; return new Promise((_, reject) => signal.addEventListener("abort", () => { cancelled = true; reject(signal.reason); }, { once: true })); } });
+  controller.abort(new Error("protected deadline")); await assert.rejects(pending, /protected deadline/);
+  assert.equal(calls, 1); assert.equal(cancelled, true);
+});
+
+test("old-worker refusal remains an exact failed-before-receipt operation and explicit recovery is queued safely", async t => {
+  const f = await fixture(t); f.setRow({ ...f.row(), status: "error" });
+  const job = { id: `protected-release-${digest(f.manifest)}`, data: protectedJobData(f), getState: async () => "failed" };
+  const status = await readProtectedReleaseStatus({ manifest: f.manifest, adapter: f.adapter, state: f.state, job });
+  assert.equal(status.phase, "failed_before_receipt"); assert.equal(status.receipt, null); assert.equal(status.publication_blocked, true);
+  let queued;
+  const deps = { readFile: async () => JSON.stringify(f.manifest), db: { query: async () => ({ rows: [f.row()] }) }, acquireLock: async () => ({ release: async () => {} }),
+    loadBackend: async () => f.backend, getJob: async () => job, buildReplacementDeploymentJob,
+    enqueue: async (_, data) => { queued = data; return { id: "explicit-recovery" }; } };
+  await command(["--manifest", "local.json", "--recover"], deps);
+  assert.equal(queued.replace_existing_runtime, false); assert.equal(queued.protected_release.receipt.refused_before_receipt, true);
+  f.setRow({ ...f.row(), status: "queued" });
+  assert.equal((await f.run({ action: "recover", receipt: queued.protected_release.receipt })).phase, "rolled_back");
+  assert.equal(f.events.filter(x => x === "create:candidate").length, 0);
+});
+
 test("immutable manifest rejects secret env inputs and unsupported owner/UID/targets", async t => {
   const f = await fixture(t);
   for (const mutate of [m => { m.env_delta.set.API_SERVER_KEY = "synthetic-secret"; }, m => { m.image.uid = 0; },
@@ -233,10 +387,10 @@ test("immutable manifest rejects secret env inputs and unsupported owner/UID/tar
 
 test("actual worker/controller/state path keeps exact deployment identity and server-owned status", async t => {
   const f = await fixture(t), db = database(f), deploymentId = uuid(10);
-  const job = { id: `protected-release-${digest(f.manifest)}`, data: { id: uuid(1), replace_existing_runtime: true,
-    protected_release: { manifest: f.manifest, release_id: digest(f.manifest), action: "apply", deployment_id: deploymentId } },
+  const job = { id: `protected-release-${digest(f.manifest)}`, data: protectedJobData(f),
     async updateData(value) { this.data = value; }, async getState() { return "completed"; } };
   const result = await runProtectedReleaseJob(job, { db, agentRow: f.row(), loadBackend: async () => f.backend,
+    journalAdapter: { updateData: value => job.updateData(value) },
     withProviderMutationLock: async (owner, fn) => { assert.equal(owner, uuid(2)); return fn(); }, checkReadiness: async () => ({ ok: true }) });
   assert.equal(result.phase, "external_metadata_pending"); assert.equal(result.deployment_id, deploymentId);
   assert.equal(result.external_binding_unchanged, null); assert.equal(db.deployments.get(deploymentId), "completed");
@@ -265,9 +419,9 @@ test("recovery owner mismatch refuses before stopping the current candidate", as
 
 test("real worker preflight rejection compensates exact queued state without runtime mutation", async t => {
   const f = await fixture(t), db = database(f); f.faults.uid = true;
-  const job = { id: "protected-job", data: { id: uuid(1), replace_existing_runtime: true,
-    protected_release: { manifest: f.manifest, release_id: digest(f.manifest), action: "apply", deployment_id: uuid(10) } }, async updateData() {} };
+  const job = { id: "protected-job", data: protectedJobData(f), async updateData() {} };
   await assert.rejects(runProtectedReleaseJob(job, { db, agentRow: f.row(), loadBackend: async () => f.backend,
+    journalAdapter: { updateData: value => job.updateData(value) },
     withProviderMutationLock: async (_, fn) => fn(), checkReadiness: async () => ({ ok: true }) }), /UID_CHANGED/);
   assert.equal(f.row().status, "running"); assert.equal(db.deployments.get(uuid(10)), "failed");
   assert.equal(db.deployments.get(uuid(11)), "completed"); assert.ok(!f.events.includes("stop:old"));
@@ -440,7 +594,7 @@ test("maintained command validates dry run and enqueues one explicit protected j
     enqueue: async (agent, data, options) => { queued = data; return options.addDeploymentJob(data); }, addJob: async () => ({ id: "existing-queue-job" }), cancelJobs: async () => ({ active: 0 }) };
   assert.equal((await command(["--manifest", "local.json", "--dry-run"], deps)).phase, "dry_run");
   assert.equal((await command(["--manifest", "local.json", "--enqueue"], deps)).phase, "queued");
-  assert.equal(queued.replace_existing_runtime, true); assert.equal(queued.protected_release.release_id, digest(f.manifest));
+  assert.equal(queued.replace_existing_runtime, false); assert.equal(queued.protected_release.release_id, digest(f.manifest));
   assert.equal(queued.previous_container_id, "old");
 });
 

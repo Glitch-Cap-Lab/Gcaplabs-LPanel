@@ -71,26 +71,51 @@ const networkIdentity = c => Object.fromEntries(Object.entries(c.NetworkSettings
   ipam: v.IPAMConfig || null, aliases: (v.Aliases || []).filter(x => x !== c.Id && x !== c.Id.slice(0, 12)).sort(),
 }]));
 
-async function boundedDockerCall(run, timeoutMs) {
+async function boundedDockerCall(run, timeoutMs, parentSignal = null) {
   const controller = new AbortController(); let timer;
+  parentSignal?.throwIfAborted();
+  const abort = () => controller.abort(parentSignal.reason || refuse("PROTECTED_RELEASE_CANCELLED"));
+  parentSignal?.addEventListener("abort", abort, { once: true });
   try {
-    return await Promise.race([Promise.resolve().then(() => run(controller.signal)), new Promise((_, reject) => {
-      timer = setTimeout(() => { controller.abort(); reject(refuse("PROTECTED_RELEASE_DOCKER_TIMEOUT")); }, timeoutMs);
+    const result = await Promise.race([Promise.resolve().then(() => { controller.signal.throwIfAborted(); return run(controller.signal); }), new Promise((_, reject) => {
+      controller.signal.addEventListener("abort", () => reject(controller.signal.reason), { once: true });
+      timer = setTimeout(() => controller.abort(refuse("PROTECTED_RELEASE_DOCKER_TIMEOUT")), timeoutMs);
     })]);
-  } finally { clearTimeout(timer); }
+    controller.signal.throwIfAborted(); return result;
+  } finally { clearTimeout(timer); parentSignal?.removeEventListener("abort", abort); }
 }
 
 class ProtectedReleaseDocker {
-  constructor(backend, { checkReadiness, stagingRoot = os.tmpdir(), probeTimeoutMs = 60000 } = {}) { this.backend = backend; this.docker = backend.docker; this.checkReadiness = checkReadiness; this.stagingRoot = stagingRoot; this.probeTimeoutMs = probeTimeoutMs; }
-  async optionalInspect(name) { try { return await this.docker.getContainer(name).inspect(); } catch (e) { if (e.statusCode === 404) return null; throw e; } }
+  constructor(backend, { checkReadiness, stagingRoot = os.tmpdir(), probeTimeoutMs = 60000, archiveTimeoutMs = 900000, signal = null, assertActive = () => {} } = {}) { this.backend = backend; this.docker = backend.docker; this.checkReadiness = checkReadiness; this.stagingRoot = stagingRoot; this.probeTimeoutMs = probeTimeoutMs; this.archiveTimeoutMs = archiveTimeoutMs; this.signal = signal; this.assertActive = assertActive; }
+  guard() { this.signal?.throwIfAborted(); this.assertActive(); }
+  async call(run, timeoutMs = this.probeTimeoutMs) { this.guard(); const result = await boundedDockerCall(run, timeoutMs, this.signal); this.guard(); return result; }
+  async inspect(container) { const c = typeof container === "string" ? this.docker.getContainer(container) : container; return this.call(signal => c.inspect({ abortSignal: signal })); }
+  async list(options = {}) { return this.call(signal => this.docker.listContainers({ ...options, abortSignal: signal })); }
+  async inspectImage(reference) { return this.call(signal => new Promise((resolve, reject) => this.docker.modem.dial({ path: `/images/${encodeURIComponent(reference)}/json`, method: "GET", abortSignal: signal, statusCodes: { 200: true, 404: "no such image", 500: "server error" } }, (error, value) => error ? reject(error) : resolve(value)))); }
+  async read(container, file, root, options = {}) {
+    return this.call(async signal => {
+      let stream;
+      try { stream = await container.getArchive({ path: file, abortSignal: signal }); signal.throwIfAborted(); return await readArchive(stream, root, { ...options, signal }); }
+      finally { stream?.destroy(); }
+    }, this.archiveTimeoutMs);
+  }
+  async exists(container, file) { return this.call(async signal => { const stream = await container.getArchive({ path: file, abortSignal: signal }); stream.on("error", () => {}); stream.destroy(); signal.throwIfAborted(); return true; }); }
+  async upload(container, entries, options) {
+    return this.call(async signal => { const stream = packStream(entries, { ...options, signal }); stream.on("error", () => {});
+      try { await container.putArchive(stream, { path: ROOT, abortSignal: signal }); signal.throwIfAborted(); }
+      finally { stream.destroy(); }
+    }, this.archiveTimeoutMs);
+  }
+  async ownership(container) { const entries = await this.read(container, "/etc/passwd", "passwd", { maxBytes: 1024 * 1024 }); const fields = entries[0].content.toString().split("\n").find(line => line.startsWith("hermes:"))?.split(":"); const uid = Number(fields?.[2]), gid = Number(fields?.[3]); if (!Number.isInteger(uid) || !Number.isInteger(gid)) throw refuse("PROTECTED_RELEASE_UID_CHANGED"); return { uid, gid }; }
+  async optionalInspect(name) { try { return await this.inspect(name); } catch (e) { if (e.statusCode === 404) return null; throw e; } }
   async retained(t, n) { const row = await this.optionalInspect(n.old); if (row && (row.Id !== t.container_id || row.Name !== `/${n.old}` || row.Image !== t.image_id || row.State.Running)) throw refuse("PROTECTED_RELEASE_RETAINED_CHANGED"); return row; }
   async candidate(t, releaseId) {
-    const rows = await this.docker.listContainers({ all: true, filters: JSON.stringify({ label: [`headmaster.release.id=${releaseId}`, `nora.agent.id=${t.agent_id}`] }) });
+    const rows = await this.list({ all: true, filters: JSON.stringify({ label: [`headmaster.release.id=${releaseId}`, `nora.agent.id=${t.agent_id}`] }) });
     if (rows.length > 1) throw refuse("PROTECTED_RELEASE_CANDIDATE_AMBIGUOUS");
-    return rows.length ? this.docker.getContainer(rows[0].Id).inspect() : null;
+    return rows.length ? this.inspect(rows[0].Id) : null;
   }
   async observe(t, candidate = null) {
-    const old = await this.docker.getContainer(t.container_id).inspect();
+    const old = await this.inspect(t.container_id);
     if (old.Id !== t.container_id || old.Image !== t.image_id || old.Config.Labels?.["nora.agent.id"] !== t.agent_id
         || envFingerprint(old.Config.Env) !== t.env_sha256
         || !old.Mounts.some(x => x.Name === t.volume && x.Destination === ROOT && x.Type === "volume" && x.RW)) throw refuse("PROTECTED_RELEASE_RUNTIME_CHANGED");
@@ -99,7 +124,7 @@ class ProtectedReleaseDocker {
   }
   async verifyCandidate(c, m, id) {
     const t = m.targets[0];
-    const old = await this.docker.getContainer(t.container_id).inspect();
+    const old = await this.inspect(t.container_id);
     const expected = new Map(old.Config.Env.map(item => { const p = item.indexOf("="); return [item.slice(0, p), item.slice(p + 1)]; }));
     for (const [key, value] of Object.entries(m.env_delta.set)) expected.set(key, value);
     if (c.Image !== m.image.id || c.Config.Labels?.["headmaster.release.id"] !== id
@@ -112,18 +137,22 @@ class ProtectedReleaseDocker {
         || ["Entrypoint", "Cmd", "User", "WorkingDir"].some(key => digest(c.Config[key] ?? null) !== digest(old.Config[key] ?? null))) throw refuse("PROTECTED_RELEASE_CANDIDATE_CHANGED");
   }
   async exec(container, cmd, user = "10000:10000") {
-    const exec = await container.exec({ Cmd: cmd, User: user, AttachStdout: true, AttachStderr: true });
-    const raw = await exec.start({ hijack: true, stdin: false });
-    const stream = demuxDockerExecStream(this.docker, raw), chunks = []; let bytes = 0;
-    const timeout = setTimeout(() => stream.destroy(refuse("PROTECTED_RELEASE_PROBE_TIMEOUT")), this.probeTimeoutMs);
-    try { for await (const chunk of stream) { bytes += chunk.length; if (bytes > 65536) { stream.destroy(); throw refuse("PROTECTED_RELEASE_PROBE_FAILED"); } chunks.push(chunk); } }
-    finally { clearTimeout(timeout); }
-    if ((await exec.inspect()).ExitCode !== 0) throw refuse("PROTECTED_RELEASE_PROBE_FAILED");
-    return Buffer.concat(chunks).toString("utf8").trim();
+    return this.call(async signal => {
+      let raw, stream; const abort = () => { stream?.destroy(signal.reason); raw?.destroy(); };
+      signal.addEventListener("abort", abort, { once: true });
+      try {
+        const exec = await container.exec({ Cmd: cmd, User: user, AttachStdout: true, AttachStderr: true, abortSignal: signal }); signal.throwIfAborted();
+        raw = await exec.start({ hijack: true, stdin: false, abortSignal: signal }); signal.throwIfAborted();
+        stream = demuxDockerExecStream(this.docker, raw); const chunks = []; let bytes = 0;
+        for await (const chunk of stream) { signal.throwIfAborted(); bytes += chunk.length; if (bytes > 65536) throw refuse("PROTECTED_RELEASE_PROBE_FAILED"); chunks.push(chunk); }
+        signal.throwIfAborted(); if ((await exec.inspect({ abortSignal: signal })).ExitCode !== 0) throw refuse("PROTECTED_RELEASE_PROBE_FAILED");
+        signal.throwIfAborted(); return Buffer.concat(chunks).toString("utf8").trim();
+      } finally { signal.removeEventListener("abort", abort); stream?.destroy(); raw?.destroy(); }
+    });
   }
   async preflight(m, row, { dryRun }) {
-    const t = m.targets[0], old = await this.docker.getContainer(t.container_id).inspect();
-    const image = await this.docker.getImage(m.image.id).inspect(); // locally present exact ID only, never pull
+    const t = m.targets[0], old = await this.inspect(t.container_id);
+    const image = await this.inspectImage(m.image.id); // locally present exact ID only, never pull
     if (image.Id !== m.image.id || old.Id !== t.container_id || old.Image !== t.image_id || old.Name !== `/${t.container_name}`
         || old.Config.Labels?.["nora.agent.id"] !== t.agent_id || envFingerprint(old.Config.Env) !== t.env_sha256
         || image.Config.Labels?.["org.opencontainers.image.revision"] !== m.sources.core
@@ -132,7 +161,7 @@ class ProtectedReleaseDocker {
     const env = Object.fromEntries(old.Config.Env.map(x => { const p = x.indexOf("="); return [x.slice(0, p), x.slice(p + 1)]; }));
     if (env.HEADMASTER_OWNER_ID !== t.account_id || env.HEADMASTER_WORKSPACE_ID !== t.workspace_id) throw refuse("PROTECTED_RELEASE_OWNER_CHANGED");
     if (!old.State.Running) throw refuse("PROTECTED_RELEASE_RUNNING_REQUIRED");
-    const user = await this.backend._containerUserOwnership(this.docker.getContainer(t.container_id), "hermes");
+    const user = await this.ownership(this.docker.getContainer(t.container_id));
     if (user.uid !== 10000 || user.gid !== 10000) throw refuse("PROTECTED_RELEASE_UID_CHANGED");
     const usage = await this.exec(this.docker.getContainer(t.container_id), ["du", "-sk", "/opt/data/installs"]);
     const bytes = Number(usage.split(/\s/)[0]) * 1024;
@@ -145,12 +174,12 @@ class ProtectedReleaseDocker {
   async drain(t) {
     await this.exec(this.docker.getContainer(t.container_id), ["/opt/hermes/.venv/bin/python", "-c", "from gateway.drain_control import write_drain_request; write_drain_request(principal='protected-runtime-release', suppress_notification=True)"]);
   }
-  async stop(id) { const c = this.docker.getContainer(id); if ((await c.inspect()).State.Running) await c.stop({ t: 60 }); }
-  async start(id) { const c = this.docker.getContainer(id); if (!(await c.inspect()).State.Running) await c.start(); }
+  async stop(id) { const c = this.docker.getContainer(id); if ((await this.inspect(c)).State.Running) await this.call(signal => c.stop({ t: 60, abortSignal: signal })); }
+  async start(id) { const c = this.docker.getContainer(id); if (!(await this.inspect(c)).State.Running) await this.call(signal => c.start({ abortSignal: signal })); }
   async assertNoWriters(volume, permitted = null) {
-    for (const row of await this.docker.listContainers()) {
+    for (const row of await this.list()) {
       if (row.Id === permitted) continue;
-      const info = await this.docker.getContainer(row.Id).inspect();
+      const info = await this.inspect(row.Id);
       if (info.State.Running && info.Mounts.some(m => m.Name === volume && m.RW)) throw refuse("PROTECTED_RELEASE_ACTIVE_WRITER");
     }
   }
@@ -168,7 +197,7 @@ class ProtectedReleaseDocker {
   async readReceipt(t, n) {
     try {
       await this.checkStageRoot(t, n);
-      const rows = await readArchive(await (await this.old(t, n)).getArchive({ path: `${ROOT}/${n.stage}/receipt.json` }), "receipt.json", { maxBytes: 65536 });
+      const rows = await this.read(await this.old(t, n), `${ROOT}/${n.stage}/receipt.json`, "receipt.json", { maxBytes: 65536 });
       if (rows[0].uid !== 0 || rows[0].gid !== 0 || rows[0].mode !== 0o600) throw refuse("PROTECTED_RELEASE_RECEIPT_INVALID");
       const receipt = JSON.parse(rows[0].content.toString());
       if (receipt.release_id !== n.stage.replace(/^\.protected-release-/, "")) throw refuse("PROTECTED_RELEASE_RECEIPT_MISMATCH");
@@ -177,24 +206,29 @@ class ProtectedReleaseDocker {
     catch (e) { if (e.statusCode === 404) return null; throw e; }
   }
   async checkStageRoot(t, n) {
-    const header = await archiveRoot(await (await this.old(t, n)).getArchive({ path: `${ROOT}/${n.stage}` }));
+    const container = await this.old(t, n);
+    const header = await this.call(async signal => { let stream; const abort = () => stream?.destroy(signal.reason);
+      signal.addEventListener("abort", abort, { once: true });
+      try { stream = await container.getArchive({ path: `${ROOT}/${n.stage}`, abortSignal: signal }); signal.throwIfAborted(); return await archiveRoot(stream); }
+      finally { signal.removeEventListener("abort", abort); stream?.destroy(); }
+    });
     if (header.name.replace(/\/$/, "") !== n.stage || header.type !== "directory" || header.uid !== 0 || header.gid !== 0 || (header.mode & 0o7777) !== 0o700) throw refuse("PROTECTED_RELEASE_STAGE_OWNER_CHANGED");
   }
   async stage(t, n, image) {
     const c = await this.old(t, n), items = [];
-    try { await c.getArchive({ path: `${ROOT}/${n.stage}/before` }); throw refuse("PROTECTED_RELEASE_STAGE_EXISTS"); }
+    try { await this.exists(c, `${ROOT}/${n.stage}/before`); throw refuse("PROTECTED_RELEASE_STAGE_EXISTS"); }
     catch (e) { if (e.statusCode !== 404) throw e; }
     const spoolRoot = this.localStage(n);
     await fs.mkdir(spoolRoot, { mode: 0o700 });
     try { for (const root of ["installs", "config.yaml", ".env"]) {
       try {
         const spoolDirectory = path.join(spoolRoot, root); await fs.mkdir(spoolDirectory, { mode: 0o700 });
-        items.push(...await readArchive(await c.getArchive({ path: `${ROOT}/${root}` }), root, { maxBytes: root === "installs" ? MAX_BYTES - 2 * CONFIG_BYTES : CONFIG_BYTES, spoolDirectory }));
+        items.push(...await this.read(c, `${ROOT}/${root}`, root, { maxBytes: root === "installs" ? MAX_BYTES - 2 * CONFIG_BYTES : CONFIG_BYTES, spoolDirectory }));
       }
       catch (e) { if (root === "installs" || e.statusCode !== 404) throw e; }
     }
     const result = { inventory_sha256: digest(inventory(items)), inventories: Object.fromEntries(["installs", "config.yaml", ".env"].map(root => [root, digest(inventory(items.filter(x => x.name === root || x.name.startsWith(root + "/"))))])), roots: [...new Set(items.map(x => x.name.split("/")[0]))] };
-    await c.putArchive(packStream(items, { prefix: `${n.stage}/before`, uid: image.uid, gid: image.gid }), { path: ROOT });
+    await this.upload(c, items, { prefix: `${n.stage}/before`, uid: image.uid, gid: image.gid });
     // Verify the actual staged archive before a candidate can start.
     await this.verifyStage(t, n, result);
     return result;
@@ -216,12 +250,12 @@ class ProtectedReleaseDocker {
   async verifyStage(t, n, expected) {
     await this.checkStageRoot(t, n);
     const c = await this.old(t, n), items = [];
-    for (const root of expected.roots) items.push(...await readArchive(await c.getArchive({ path: `${ROOT}/${n.stage}/before/${root}` }), root, { maxBytes: MAX_BYTES, hashOnly: true }));
+    for (const root of expected.roots) items.push(...await this.read(c, `${ROOT}/${n.stage}/before/${root}`, root, { maxBytes: MAX_BYTES, hashOnly: true }));
     if (items.some(x => x.uid !== 10000 || x.gid !== 10000) || digest(inventory(items)) !== expected.inventory_sha256) throw refuse("PROTECTED_RELEASE_STAGE_CHANGED");
   }
-  async renameOld(t, n) { await this.docker.getContainer(t.container_id).rename({ name: n.old }); }
+  async renameOld(t, n) { await this.call(signal => this.docker.getContainer(t.container_id).rename({ name: n.old, abortSignal: signal })); }
   async create(m, n, id) {
-    const t = m.targets[0], old = await this.docker.getContainer(n.old).inspect();
+    const t = m.targets[0], old = await this.inspect(n.old);
     const cfg = { ...old.Config, Image: m.image.id, name: t.container_name, HostConfig: { ...old.HostConfig },
       Labels: { ...old.Config.Labels, "headmaster.release.id": id, "headmaster.release.owner": t.owner_id } };
     const env = new Map(cfg.Env.map(item => { const p = item.indexOf("="); return [item.slice(0, p), item.slice(p + 1)]; }));
@@ -230,27 +264,27 @@ class ProtectedReleaseDocker {
     cfg.NetworkingConfig = { EndpointsConfig: Object.fromEntries(Object.entries(old.NetworkSettings.Networks || {}).map(([name, v]) => [name, {
       ...(v.IPAMConfig ? { IPAMConfig: v.IPAMConfig } : {}), Aliases: (v.Aliases || []).filter(x => x !== old.Id.slice(0, 12)),
     }])) };
-    const result = await this.docker.createContainer(cfg); return result.inspect();
+    const result = await this.call(signal => this.docker.createContainer({ ...cfg, abortSignal: signal })); return this.inspect(result);
   }
   async checkImage(m, id) {
-    const info = await this.docker.getContainer(id).inspect(); await this.verifyCandidate(info, m, digest(m));
-    const user = await this.backend._containerUserOwnership(this.docker.getContainer(id), "hermes");
+    const info = await this.inspect(id); await this.verifyCandidate(info, m, digest(m));
+    const user = await this.ownership(this.docker.getContainer(id));
     if (user.uid !== 10000 || user.gid !== 10000) throw refuse("PROTECTED_RELEASE_UID_CHANGED");
     for (const [file, expected] of [["headmaster/contract/desktop-contract.json", m.image.contract_sha256], ["uv.lock", m.image.dependency_sha256]]) {
       const root = file.split("/").at(-1);
-      const entries = await readArchive(await this.docker.getContainer(id).getArchive({ path: `/opt/hermes/${file}` }), root);
+      const entries = await this.read(this.docker.getContainer(id), `/opt/hermes/${file}`, root);
       if (createHash("sha256").update(entries[0].content).digest("hex") !== expected) throw refuse("PROTECTED_RELEASE_IMAGE_CONTENT_CHANGED");
     }
   }
   async check(m, id) {
     await this.checkImage(m, id);
-    const info = await this.docker.getContainer(id).inspect();
-    const result = await this.checkReadiness(info);
+    const info = await this.inspect(id);
+    const result = await this.call(signal => this.checkReadiness(info, signal));
     if (!result?.ok) throw refuse("PROTECTED_RELEASE_UNHEALTHY");
   }
   async move(t, n, source, destination) {
     await this.assertNoWriters(t.volume);
-    try { await (await this.old(t, n)).getArchive({ path: destination }); throw refuse("PROTECTED_RELEASE_RESTORE_DESTINATION_EXISTS"); }
+    try { await this.exists(await this.old(t, n), destination); throw refuse("PROTECTED_RELEASE_RESTORE_DESTINATION_EXISTS"); }
     catch (e) { if (e.statusCode !== 404) throw e; }
     const roots = ["installs", "config.yaml", ".env"];
     if (!roots.some(root => (source === `${ROOT}/${root}` && destination === `${ROOT}/${n.stage}/failed-${root}`)
@@ -258,8 +292,8 @@ class ProtectedReleaseDocker {
     await this.maintenance(t, n, "move", [source, destination]);
   }
   async assertNoMaintenance(n) {
-    for (const c of await boundedDockerCall(signal => this.docker.listContainers({ abortSignal: signal }), this.probeTimeoutMs)) {
-      const info = await boundedDockerCall(signal => this.docker.getContainer(c.Id).inspect({ abortSignal: signal }), this.probeTimeoutMs);
+    for (const c of await this.list()) {
+      const info = await this.inspect(c.Id);
       if (info.State.Running && info.Config.Labels?.["headmaster.release.maintenance"] === n.stage) throw refuse("PROTECTED_RELEASE_ACTIVE_MAINTENANCE");
     }
   }
@@ -267,10 +301,7 @@ class ProtectedReleaseDocker {
     if (!["move", "receipt"].includes(kind)) throw refuse("PROTECTED_RELEASE_MAINTENANCE_INVALID");
     await this.assertNoMaintenance(n);
     // dockerode 5 Image.inspect omits abortSignal; use its same modem/endpoint with cancellation.
-    const image = await boundedDockerCall(signal => new Promise((resolve, reject) => this.docker.modem.dial({
-      path: `/images/${t.image_id}/json`, method: "GET", abortSignal: signal,
-      statusCodes: { 200: true, 404: "no such image", 500: "server error" },
-    }, (error, value) => error ? reject(error) : resolve(value))), this.probeTimeoutMs);
+    const image = await this.inspectImage(t.image_id);
     if (image.Id !== t.image_id) throw refuse("PROTECTED_RELEASE_RETAINED_CHANGED");
     // Docker merges image ENV defaults. Override every inherited key, including loader hooks.
     const environment = new Map();
@@ -284,25 +315,25 @@ class ProtectedReleaseDocker {
     const env = [...environment].map(([key, value]) => `${key}=${value}`);
     const argv = ["-I", "-S", "-c", kind === "move" ? MOVE_AND_SYNC : PUBLISH_RECEIPT, ...args];
     // A stopped container cannot exec. Image/bot startup hooks and writable Python search paths are ignored.
-    const helper = await boundedDockerCall(signal => this.docker.createContainer({ abortSignal: signal, Image: t.image_id, User: "0:0", Entrypoint: ["/opt/hermes/.venv/bin/python"],
+    const helper = await this.call(signal => this.docker.createContainer({ abortSignal: signal, Image: t.image_id, User: "0:0", Entrypoint: ["/opt/hermes/.venv/bin/python"],
       Cmd: argv, Env: env, WorkingDir: "/", Healthcheck: { Test: ["NONE"] }, Tty: false,
       OpenStdin: kind === "receipt", AttachStdin: kind === "receipt", StdinOnce: kind === "receipt",
       NetworkDisabled: true, Labels: { "headmaster.release.maintenance": n.stage, "headmaster.release.maintenance.kind": kind },
       HostConfig: { NetworkMode: "none", ReadonlyRootfs: true, CapDrop: ["ALL"], CapAdd: ["DAC_OVERRIDE", "FOWNER"], SecurityOpt: ["no-new-privileges:true"],
-        Binds: [`${t.volume}:${ROOT}`], RestartPolicy: { Name: "no" } } }), this.probeTimeoutMs);
-    const inspected = await boundedDockerCall(signal => helper.inspect({ abortSignal: signal }), this.probeTimeoutMs);
+        Binds: [`${t.volume}:${ROOT}`], RestartPolicy: { Name: "no" } } }));
+    const inspected = await this.inspect(helper);
     if (inspected.Image !== t.image_id || inspected.Config.User !== "0:0" || inspected.Config.WorkingDir !== "/"
         || envFingerprint(inspected.Config.Env) !== envFingerprint(env) || digest(inspected.Config.Cmd) !== digest(argv)
         || digest(inspected.Config.Entrypoint) !== digest(["/opt/hermes/.venv/bin/python"])
         || digest(inspected.Config.Healthcheck?.Test) !== digest(["NONE"])
         || inspected.Mounts.length !== 1 || !inspected.Mounts.some(x => x.Name === t.volume && x.Destination === ROOT && x.Type === "volume" && x.RW)) throw refuse("PROTECTED_RELEASE_MAINTENANCE_CHANGED");
-    const attached = kind === "receipt" ? await boundedDockerCall(signal => helper.attach({ stream: true, stdin: true, stdout: false, stderr: false, hijack: true, abortSignal: signal }), this.probeTimeoutMs) : null;
+    const attached = kind === "receipt" ? await this.call(signal => helper.attach({ stream: true, stdin: true, stdout: false, stderr: false, hijack: true, abortSignal: signal })) : null;
     if (attached) attached.on("error", () => {}); // wait/inspect determines success; no raw output or credentials
     let result;
     try {
-      await boundedDockerCall(signal => helper.start({ abortSignal: signal }), this.probeTimeoutMs);
+      await this.call(signal => helper.start({ abortSignal: signal }));
       if (attached) attached.end(input);
-      result = await boundedDockerCall(signal => helper.wait({ abortSignal: signal }), this.probeTimeoutMs);
+      result = await this.call(signal => helper.wait({ abortSignal: signal }));
     } catch (error) {
       await boundedDockerCall(signal => helper.stop({ t: 5, abortSignal: signal }), Math.min(5000, this.probeTimeoutMs)).catch(() => {});
       throw error;
@@ -316,24 +347,24 @@ class ProtectedReleaseDocker {
     for (const root of ["installs", "config.yaml", ".env"]) {
       let source;
       if (staged.roots.includes(root)) {
-        try { source = await readArchive(await c.getArchive({ path: `${ROOT}/${n.stage}/before/${root}` }), root, { maxBytes: MAX_BYTES, hashOnly: true }); }
+        try { source = await this.read(c, `${ROOT}/${n.stage}/before/${root}`, root, { maxBytes: MAX_BYTES, hashOnly: true }); }
         catch (e) {
           if (e.statusCode !== 404) throw e;
-          const current = await readArchive(await c.getArchive({ path: `${ROOT}/${root}` }), root, { maxBytes: MAX_BYTES, hashOnly: true });
+          const current = await this.read(c, `${ROOT}/${root}`, root, { maxBytes: MAX_BYTES, hashOnly: true });
           if (digest(inventory(current)) !== staged.inventories[root] || current.some(x => x.uid !== 10000 || x.gid !== 10000)) throw refuse("PROTECTED_RELEASE_RESTORE_FAILED");
           continue; // Prior restore moved this exact verified root before losing its ACK.
         }
         if (digest(inventory(source)) !== staged.inventories[root] || source.some(x => x.uid !== 10000 || x.gid !== 10000)) throw refuse("PROTECTED_RELEASE_STAGE_CHANGED");
       }
-      try { await c.getArchive({ path: `${ROOT}/${root}` }); await this.move(t, n, `${ROOT}/${root}`, `${ROOT}/${n.stage}/failed-${root}`); }
+      try { await this.exists(c, `${ROOT}/${root}`); await this.move(t, n, `${ROOT}/${root}`, `${ROOT}/${n.stage}/failed-${root}`); }
       catch (e) { if (e.statusCode !== 404) throw e; }
       if (staged.roots.includes(root)) await this.move(t, n, `${ROOT}/${n.stage}/before/${root}`, `${ROOT}/${root}`);
     }
     const restored = [];
-    for (const root of staged.roots) restored.push(...await readArchive(await c.getArchive({ path: `${ROOT}/${root}` }), root, { maxBytes: MAX_BYTES, hashOnly: true }));
+    for (const root of staged.roots) restored.push(...await this.read(c, `${ROOT}/${root}`, root, { maxBytes: MAX_BYTES, hashOnly: true }));
     if (digest(inventory(restored)) !== staged.inventory_sha256) throw refuse("PROTECTED_RELEASE_RESTORE_FAILED");
   }
-  async retainFailed(id, n) { const c = this.docker.getContainer(id); if ((await c.inspect()).Name !== `/${n.old}-failed`) await c.rename({ name: `${n.old}-failed` }); }
-  async restoreName(t, n) { const old = await this.optionalInspect(n.old); if (old) await this.docker.getContainer(n.old).rename({ name: t.container_name }); }
+  async retainFailed(id, n) { const c = this.docker.getContainer(id); if ((await this.inspect(c)).Name !== `/${n.old}-failed`) await this.call(signal => c.rename({ name: `${n.old}-failed`, abortSignal: signal })); }
+  async restoreName(t, n) { const old = await this.optionalInspect(n.old); if (old) await this.call(signal => this.docker.getContainer(n.old).rename({ name: t.container_name, abortSignal: signal })); }
 }
 module.exports = { ProtectedReleaseDocker, maintenancePrograms: Object.freeze({ move: MOVE_AND_SYNC, receipt: PUBLISH_RECEIPT }) };
