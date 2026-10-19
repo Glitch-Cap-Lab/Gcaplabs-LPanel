@@ -1,6 +1,5 @@
 // @ts-nocheck
-const { Readable } = require("stream");
-const { readArchive, packArchive, packStream, inventory, archiveRoot, MAX_BYTES } = require("./protectedReleaseArchive");
+const { readArchive, packStream, inventory, archiveRoot, MAX_BYTES } = require("./protectedReleaseArchive");
 const fs = require("fs/promises");
 const os = require("os");
 const path = require("path");
@@ -11,6 +10,63 @@ const ROOT = "/opt/data";
 const CONFIG_BYTES = 16 * 1024 * 1024;
 // Existing retained-image Python, not a worker dependency. No shell or caller-supplied program text.
 const MOVE_AND_SYNC = "import os,sys\nsrc,dst=sys.argv[1:]\nos.rename(src,dst)\nfor parent in sorted({os.path.dirname(src),os.path.dirname(dst)}):\n fd=os.open(parent,os.O_RDONLY|os.O_DIRECTORY)\n try: os.fsync(fd)\n finally: os.close(fd)";
+const PUBLISH_RECEIPT = [
+  "import hashlib,json,os,re,signal,stat,sys",
+  "signal.alarm(60)",
+  "stage,expected,release_id,create_allowed=sys.argv[1:]",
+  "assert re.fullmatch(r'[0-9a-f]{64}',release_id) and re.fullmatch(r'[0-9a-f]{64}',expected)",
+  "name=os.path.basename(stage)",
+  "assert name=='.protected-release-'+release_id and create_allowed in ('0','1')",
+  "data=sys.stdin.buffer.read(65537)",
+  "assert 0<len(data)<=65536 and hashlib.sha256(data).hexdigest()==expected and json.loads(data)['release_id']==release_id",
+  "parent=os.open(os.path.dirname(stage),os.O_RDONLY|os.O_DIRECTORY|os.O_NOFOLLOW)",
+  "try:",
+  " try: directory=os.open(name,os.O_RDONLY|os.O_DIRECTORY|os.O_NOFOLLOW,dir_fd=parent)",
+  " except FileNotFoundError:",
+  "  assert create_allowed=='1'",
+  "  os.mkdir(name,0o700,dir_fd=parent)",
+  "  directory=os.open(name,os.O_RDONLY|os.O_DIRECTORY|os.O_NOFOLLOW,dir_fd=parent)",
+  "except BaseException:",
+  " os.close(parent)",
+  " raise",
+  "try:",
+  " identity=os.fstat(directory)",
+  " assert identity.st_uid==0 and identity.st_gid==0 and stat.S_IMODE(identity.st_mode)==0o700",
+  " try: previous=os.open('receipt.json',os.O_RDONLY|os.O_NOFOLLOW,dir_fd=directory)",
+  " except FileNotFoundError: assert create_allowed=='1'",
+  " else:",
+  "  try:",
+  "   meta=os.fstat(previous)",
+  "   assert stat.S_ISREG(meta.st_mode) and meta.st_uid==0 and meta.st_gid==0 and stat.S_IMODE(meta.st_mode)==0o600 and 0<meta.st_size<=65536",
+  "   with os.fdopen(os.dup(previous),'rb') as stream: old=stream.read(65537)",
+  "   assert len(old)==meta.st_size and json.loads(old)['release_id']==release_id",
+  "  finally: os.close(previous)",
+  " temporary='.receipt-'+expected+'.json'",
+  " try: meta=os.stat(temporary,dir_fd=directory,follow_symlinks=False)",
+  " except FileNotFoundError: pass",
+  " else:",
+  "  assert stat.S_ISREG(meta.st_mode) and meta.st_uid==0 and meta.st_gid==0 and stat.S_IMODE(meta.st_mode)==0o600",
+  "  os.unlink(temporary,dir_fd=directory)",
+  " fd=os.open(temporary,os.O_WRONLY|os.O_CREAT|os.O_EXCL|os.O_NOFOLLOW,0o600,dir_fd=directory)",
+  " try:",
+  "  os.fchmod(fd,0o600)",
+  "  remaining=memoryview(data)",
+  "  while remaining: remaining=remaining[os.write(fd,remaining):]",
+  "  os.fsync(fd)",
+  " finally: os.close(fd)",
+  " os.replace(temporary,'receipt.json',src_dir_fd=directory,dst_dir_fd=directory)",
+  " for pending in os.listdir(directory):",
+  "  if re.fullmatch(r'\\.receipt-[0-9a-f]{64}\\.json',pending):",
+  "   meta=os.stat(pending,dir_fd=directory,follow_symlinks=False)",
+  "   if stat.S_ISREG(meta.st_mode) and meta.st_uid==0 and meta.st_gid==0 and stat.S_IMODE(meta.st_mode)==0o600: os.unlink(pending,dir_fd=directory)",
+  " os.fsync(directory)",
+  " os.fsync(parent)",
+  " named=os.stat(name,dir_fd=parent,follow_symlinks=False)",
+  " assert stat.S_ISDIR(named.st_mode) and (named.st_dev,named.st_ino)==(identity.st_dev,identity.st_ino)",
+  "finally:",
+  " os.close(directory)",
+  " os.close(parent)",
+].join("\n");
 const networkIdentity = c => Object.fromEntries(Object.entries(c.NetworkSettings.Networks || {}).map(([name, v]) => [name, {
   ipam: v.IPAMConfig || null, aliases: (v.Aliases || []).filter(x => x !== c.Id && x !== c.Id.slice(0, 12)).sort(),
 }]));
@@ -92,12 +148,22 @@ class ProtectedReleaseDocker {
   async old(t, n) { return this.docker.getContainer((await this.optionalInspect(n.old)) ? n.old : t.container_id); }
   async writeReceipt(t, n, value) {
     const text = Buffer.from(JSON.stringify(value));
-    await (await this.old(t, n)).putArchive(await packArchive([{ name: "receipt.json", type: "file", mode: 0o600, content: text }], { prefix: n.stage }), { path: ROOT });
+    if (!text.length || text.length > 65536) throw refuse("PROTECTED_RELEASE_RECEIPT_INVALID");
+    const observed = await this.observe(t);
+    await this.assertNoMaintenance(n);
+    const releaseId = n.stage.replace(/^\.protected-release-/, ""), hash = createHash("sha256").update(text).digest("hex");
+    const createAllowed = !observed.retained.running && !(await this.candidate(t, releaseId));
+    if (createAllowed) await this.assertNoWriters(t.volume);
+    await this.maintenance(t, n, "receipt", [`${ROOT}/${n.stage}`, hash, releaseId, createAllowed ? "1" : "0"], text);
   }
   async readReceipt(t, n) {
     try {
       await this.checkStageRoot(t, n);
-      const rows = await readArchive(await (await this.old(t, n)).getArchive({ path: `${ROOT}/${n.stage}/receipt.json` }), "receipt.json", { maxBytes: 65536 }); return JSON.parse(rows[0].content.toString());
+      const rows = await readArchive(await (await this.old(t, n)).getArchive({ path: `${ROOT}/${n.stage}/receipt.json` }), "receipt.json", { maxBytes: 65536 });
+      if (rows[0].uid !== 0 || rows[0].gid !== 0 || rows[0].mode !== 0o600) throw refuse("PROTECTED_RELEASE_RECEIPT_INVALID");
+      const receipt = JSON.parse(rows[0].content.toString());
+      if (receipt.release_id !== n.stage.replace(/^\.protected-release-/, "")) throw refuse("PROTECTED_RELEASE_RECEIPT_MISMATCH");
+      return receipt;
     }
     catch (e) { if (e.statusCode === 404) return null; throw e; }
   }
@@ -177,15 +243,58 @@ class ProtectedReleaseDocker {
     await this.assertNoWriters(t.volume);
     try { await (await this.old(t, n)).getArchive({ path: destination }); throw refuse("PROTECTED_RELEASE_RESTORE_DESTINATION_EXISTS"); }
     catch (e) { if (e.statusCode !== 404) throw e; }
-    // A stopped container cannot exec. A one-shot retained-image filesystem process never starts its gateway.
+    const roots = ["installs", "config.yaml", ".env"];
+    if (!roots.some(root => (source === `${ROOT}/${root}` && destination === `${ROOT}/${n.stage}/failed-${root}`)
+        || (source === `${ROOT}/${n.stage}/before/${root}` && destination === `${ROOT}/${root}`))) throw refuse("PROTECTED_RELEASE_MOVE_INVALID");
+    await this.maintenance(t, n, "move", [source, destination]);
+  }
+  async assertNoMaintenance(n) {
+    for (const c of await this.docker.listContainers()) {
+      const info = await this.docker.getContainer(c.Id).inspect();
+      if (info.State.Running && info.Config.Labels?.["headmaster.release.maintenance"] === n.stage) throw refuse("PROTECTED_RELEASE_ACTIVE_MAINTENANCE");
+    }
+  }
+  async maintenance(t, n, kind, args, input = null) {
+    if (!["move", "receipt"].includes(kind)) throw refuse("PROTECTED_RELEASE_MAINTENANCE_INVALID");
+    await this.assertNoMaintenance(n);
+    const image = await this.docker.getImage(t.image_id).inspect();
+    if (image.Id !== t.image_id) throw refuse("PROTECTED_RELEASE_RETAINED_CHANGED");
+    // Docker merges image ENV defaults. Override every inherited key, including loader hooks.
+    const environment = new Map();
+    for (const item of image.Config.Env || []) {
+      const key = item.slice(0, item.indexOf("="));
+      if (!/^[A-Za-z_][A-Za-z0-9_]*$/.test(key)) throw refuse("PROTECTED_RELEASE_IMAGE_ENV_INVALID");
+      environment.set(key, "");
+    }
+    for (const key of ["LD_PRELOAD", "LD_LIBRARY_PATH", "PYTHONPATH", "PYTHONHOME"]) environment.set(key, "");
+    for (const [key, value] of Object.entries({ HOME: "/", PATH: "/usr/bin:/bin", LANG: "C.UTF-8", PYTHONNOUSERSITE: "1" })) environment.set(key, value);
+    const env = [...environment].map(([key, value]) => `${key}=${value}`);
+    const argv = ["-I", "-S", "-c", kind === "move" ? MOVE_AND_SYNC : PUBLISH_RECEIPT, ...args];
+    // A stopped container cannot exec. Image/bot startup hooks and writable Python search paths are ignored.
     const helper = await this.docker.createContainer({ Image: t.image_id, User: "0:0", Entrypoint: ["/opt/hermes/.venv/bin/python"],
-      Cmd: ["-c", MOVE_AND_SYNC, source, destination], NetworkDisabled: true, Labels: { "headmaster.release.maintenance": n.stage },
+      Cmd: argv, Env: env, WorkingDir: "/", Healthcheck: { Test: ["NONE"] }, Tty: false,
+      OpenStdin: kind === "receipt", AttachStdin: kind === "receipt", StdinOnce: kind === "receipt",
+      NetworkDisabled: true, Labels: { "headmaster.release.maintenance": n.stage, "headmaster.release.maintenance.kind": kind },
       HostConfig: { NetworkMode: "none", ReadonlyRootfs: true, CapDrop: ["ALL"], CapAdd: ["DAC_OVERRIDE", "FOWNER"], SecurityOpt: ["no-new-privileges:true"],
         Binds: [`${t.volume}:${ROOT}`], RestartPolicy: { Name: "no" } } });
-    await helper.start(); let timeout;
-    const result = await Promise.race([helper.wait(), new Promise((_, reject) => {
-      timeout = setTimeout(() => reject(refuse("PROTECTED_RELEASE_RESTORE_TIMEOUT")), this.probeTimeoutMs);
-    })]).catch(async error => { await helper.stop({ t: 5 }).catch(() => {}); throw error; }).finally(() => clearTimeout(timeout));
+    const inspected = await helper.inspect();
+    if (inspected.Image !== t.image_id || inspected.Config.User !== "0:0" || inspected.Config.WorkingDir !== "/"
+        || envFingerprint(inspected.Config.Env) !== envFingerprint(env) || digest(inspected.Config.Cmd) !== digest(argv)
+        || digest(inspected.Config.Entrypoint) !== digest(["/opt/hermes/.venv/bin/python"])
+        || digest(inspected.Config.Healthcheck?.Test) !== digest(["NONE"])
+        || inspected.Mounts.length !== 1 || !inspected.Mounts.some(x => x.Name === t.volume && x.Destination === ROOT && x.Type === "volume" && x.RW)) throw refuse("PROTECTED_RELEASE_MAINTENANCE_CHANGED");
+    const attached = kind === "receipt" ? await helper.attach({ stream: true, stdin: true, stdout: false, stderr: false, hijack: true, abortSignal: AbortSignal.timeout(this.probeTimeoutMs) }) : null;
+    if (attached) attached.on("error", () => {}); // wait/inspect determines success; no raw output or credentials
+    let timeout;
+    let result;
+    try {
+      await helper.start({ abortSignal: AbortSignal.timeout(this.probeTimeoutMs) });
+      if (attached) attached.end(input);
+      result = await Promise.race([helper.wait(), new Promise((_, reject) => {
+        timeout = setTimeout(() => reject(refuse("PROTECTED_RELEASE_RESTORE_TIMEOUT")), this.probeTimeoutMs);
+      })]);
+    } catch (error) { await helper.stop({ t: 5 }).catch(() => {}); throw error; }
+    finally { clearTimeout(timeout); attached?.destroy(); }
     if (result.StatusCode !== 0) throw refuse("PROTECTED_RELEASE_RESTORE_FAILED");
     // Retain maintenance containers too; cleanup is an independent owner action.
   }
@@ -215,4 +324,4 @@ class ProtectedReleaseDocker {
   async retainFailed(id, n) { const c = this.docker.getContainer(id); if ((await c.inspect()).Name !== `/${n.old}-failed`) await c.rename({ name: `${n.old}-failed` }); }
   async restoreName(t, n) { const old = await this.optionalInspect(n.old); if (old) await this.docker.getContainer(n.old).rename({ name: t.container_name }); }
 }
-module.exports = { ProtectedReleaseDocker };
+module.exports = { ProtectedReleaseDocker, maintenancePrograms: Object.freeze({ move: MOVE_AND_SYNC, receipt: PUBLISH_RECEIPT }) };

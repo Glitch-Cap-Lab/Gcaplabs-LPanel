@@ -31,6 +31,7 @@ async function fixture(t, options = {}) {
   const saved = options.resume ? JSON.parse(await fs.readFile(path.join(root, ".fake-docker.json"), "utf8")) : null;
   const events = saved?.events || [], containers = new Map(saved?.containers || []), metadata = new Map(saved?.metadata || []);
   const faults = {};
+  const attachedInputs = new Map(), maintenanceTasks = new Map();
   let lastReceipt = saved?.lastReceipt || null;
   const contract = Buffer.from("canonical contract"), lock = Buffer.from("locked dependencies");
   const runtime = { container_id: "old", container_name: "hm-owned", host: "hm-owned", backend_type: "docker", runtime_family: "hermes", deploy_target: "docker", execution_target_id: "docker", sandbox_profile: "standard" };
@@ -60,7 +61,7 @@ async function fixture(t, options = {}) {
   }
   const docker = {
     modem: { demuxStream(raw, stdout) { raw.on("data", x => stdout.write(x)); } },
-    getImage() { return { async inspect() { return { Id: image(2), Config: { Labels: { "org.opencontainers.image.revision": manifest.sources.core, "com.gcaplabs.webapp.revision": manifest.sources.webapp } } }; } }; },
+    getImage(id) { return { async inspect() { return { Id: id, Config: { Env: ["PYTHONPATH=/opt/data", "LD_PRELOAD=/opt/data/private.so", "LD_AUDIT=/opt/data/audit.so"], Healthcheck: { Test: ["CMD-SHELL", "unsafe-image-default"] }, Labels: { "org.opencontainers.image.revision": manifest.sources.core, "com.gcaplabs.webapp.revision": manifest.sources.webapp } } }; } }; },
     async listContainers(options = {}) { return [...containers.values()].filter(c => options.all || c.State.Running).filter(c => !options.filters || (c.Config.Labels?.["headmaster.release.id"] === digest(manifest))).map(c => ({ Id: c.Id })); },
     getContainer(name) {
       const get = () => { const c = resolve(name); if (!c) throw missing(); return c; };
@@ -70,18 +71,48 @@ async function fixture(t, options = {}) {
         async start() {
           const c = get(); events.push(`start:${c.Id}`); c.State.Running = true;
           if (c.Config.Labels?.["headmaster.release.maintenance"]) {
-            const [flag, program, source, destination] = c.Config.Cmd;
-            assert.equal(flag, "-c"); assert.match(program, /os\.rename\(src,dst\)/); assert.match(program, /os\.fsync\(fd\)/);
+            const execute = async () => {
+            const [isolated, noSite, flag, program, source, destination, expectedHash] = c.Config.Cmd;
+            assert.equal(isolated, "-I"); assert.equal(noSite, "-S"); assert.equal(flag, "-c"); assert.match(program, /os\.fsync\(/);
             assert.deepEqual(c.Config.Entrypoint, ["/opt/hermes/.venv/bin/python"]); assert.equal(c.Image, image(1));
+            assert.deepEqual(Object.fromEntries(c.Config.Env.map(x => x.split("="))), { PYTHONPATH: "", LD_PRELOAD: "", LD_AUDIT: "", LD_LIBRARY_PATH: "", PYTHONHOME: "", HOME: "/", PATH: "/usr/bin:/bin", LANG: "C.UTF-8", PYTHONNOUSERSITE: "1" }); assert.equal(c.Config.WorkingDir, "/");
+            assert.deepEqual(c.Config.Healthcheck, { Test: ["NONE"] });
             assert.equal(c.HostConfig.NetworkMode, "none"); assert.equal(c.Config.NetworkDisabled, true);
             assert.deepEqual(c.HostConfig.CapDrop, ["ALL"]); assert.deepEqual(c.HostConfig.CapAdd, ["DAC_OVERRIDE", "FOWNER"]);
             assert.equal(c.Config.User, "0:0");
-            if (faults.restore) { c.exit = 1; return; }
-            await fs.rename(local(source), local(destination));
-            for (const [p, meta] of [...metadata]) if (p === local(source) || p.startsWith(local(source) + path.sep)) { metadata.delete(p); metadata.set(local(destination) + p.slice(local(source).length), meta); }
+            const receipt = c.Config.Labels["headmaster.release.maintenance.kind"] === "receipt";
+            let from = source, to = destination;
+            if (receipt) {
+              assert.match(program, /os\.replace\(/); assert.match(program, /os\.O_NOFOLLOW/);
+              const input = await attachedInputs.get(c.Id);
+              const [stage, hash, releaseId, createAllowed] = c.Config.Cmd.slice(4);
+              assert.equal(sha(input), hash); assert.equal(JSON.parse(input).release_id, releaseId);
+              let existing = await fs.stat(local(stage)).then(() => true, () => false);
+              if (!existing) { assert.equal(createAllowed, "1"); await fs.mkdir(local(stage), { mode: 0o700 }); metadata.set(local(stage), { uid: 0, gid: 0, mode: 0o700 }); }
+              assert.deepEqual(metadata.get(local(stage)), { uid: 0, gid: 0, mode: 0o700 });
+              from = `${stage}/.receipt-${hash}.json`; to = `${stage}/receipt.json`;
+              if (faults.receiptUpload) { await fs.writeFile(local(from), input.subarray(0, 5)); metadata.set(local(from), { uid: 0, gid: 0, mode: 0o600 }); c.exit = 1; c.State.Running = false; persist(); return; }
+              await fs.writeFile(local(from), input); metadata.set(local(from), { uid: 0, gid: 0, mode: 0o600 });
+              const value = JSON.parse(input);
+              if (options.killBeforePublish && value.phase === "candidate_created") { c.State.Running = false; persist(); process.exit(29); }
+              if (faults.publishBefore) { c.exit = 1; c.State.Running = false; persist(); return; }
+            } else { assert.match(program, /os\.rename\(src,dst\)/); if (faults.restore) { c.exit = 1; c.State.Running = false; persist(); return; } }
+            await fs.rename(local(from), local(to));
+            for (const [p, meta] of [...metadata]) if (p === local(from) || p.startsWith(local(from) + path.sep)) { metadata.delete(p); metadata.set(local(to) + p.slice(local(from).length), meta); }
             c.exit = 0; c.State.Running = false;
             persist();
+            if (receipt) {
+              const value = JSON.parse(await fs.readFile(local(to), "utf8"));
+              if (options.killAfterPublish && value.phase === "candidate_created") process.exit(30);
+              if (faults.publishAfter) c.exit = 1;
+              for (const name of await fs.readdir(path.dirname(local(to)))) if (/^\.receipt-[0-9a-f]{64}\.json$/.test(name)) { await fs.unlink(path.join(path.dirname(local(to)), name)); metadata.delete(path.join(path.dirname(local(to)), name)); }
+              persist();
+            }
             if (options.killAfterRestore && destination === "/opt/data/installs") process.exit(24);
+            };
+            const task = execute();
+            if (c.Config.Labels["headmaster.release.maintenance.kind"] === "receipt") { maintenanceTasks.set(c.Id, task); task.catch(() => {}); return; }
+            await task;
           } else if (c.Id !== "old") {
             await fs.writeFile(path.join(root, "installs/gen/facts.json"), "failed-attempt");
             await fs.writeFile(path.join(root, "config.yaml"), "candidate-config");
@@ -89,7 +120,12 @@ async function fixture(t, options = {}) {
           persist();
           if (options.killAfterOldStart && c.Id === "old") process.exit(28);
         },
-        async wait() { return { StatusCode: get().exit || 0 }; },
+        async attach() {
+          const c = get(), chunks = []; let complete;
+          attachedInputs.set(c.Id, new Promise(resolve => { complete = resolve; }));
+          return new (require("node:stream").Writable)({ write(chunk, _, callback) { chunks.push(Buffer.from(chunk)); callback(); }, final(callback) { complete(Buffer.concat(chunks)); callback(); } });
+        },
+        async wait() { await maintenanceTasks.get(get().Id); return { StatusCode: get().exit || 0 }; },
         async rename({ name }) { const c = get(); events.push(`rename:${c.Id}`); c.Name = `/${name}`; persist(); if (options.killAfterRestoreName && c.Id === "old" && name === "hm-owned") process.exit(27); },
         async getArchive({ path: p }) { if (faults.stage && p === "/opt/data/installs") throw new Error("archive failure"); return require("node:stream").Readable.from(await archive(p)); },
         async putArchive(buffer) {
@@ -99,12 +135,16 @@ async function fixture(t, options = {}) {
             extract.on("entry", (header, stream, next) => {
               const chunks = []; stream.on("data", x => chunks.push(x)); stream.on("end", async () => {
                 try { const p = local(`/opt/data/${header.name}`); await fs.mkdir(path.dirname(p), { recursive: true });
-                  if (header.type === "directory") await fs.mkdir(p, { recursive: true }); else await fs.writeFile(p, Buffer.concat(chunks));
+                  if (header.type === "directory") await fs.mkdir(p, { recursive: true }); else {
+                    const content = Buffer.concat(chunks);
+                    await fs.writeFile(p, faults.receiptUpload && /^\.receipt-/.test(path.basename(p)) ? content.subarray(0, 5) : content);
+                  }
                   metadata.set(p, { mode: header.mode, uid: header.uid, gid: header.gid }); next();
                 } catch (e) { reject(e); }
               });
             });
           }); if (buffer.pipe) buffer.pipe(extract); else extract.end(buffer); await done; persist();
+          if (faults.receiptUpload) throw new Error("interrupted metadata upload");
           if (options.killAfterStage && await fs.stat(path.join(root, `.protected-release-${digest(manifest)}`, "before/installs")).then(() => true, () => false)) process.exit(26);
         },
         async exec(options) {
@@ -242,6 +282,30 @@ test("repeated dry runs make no write, stop, create or queue mutation", async t 
   assert.ok(f.events.every(x => x.startsWith("exec:"))); assert.equal(f.receipts.length, 0);
 });
 
+test("atomic receipt keeps canonical old or new JSON across interrupted upload and publish ACK", async t => {
+  const f = await fixture(t), target = f.manifest.targets[0], releaseId = digest(f.manifest);
+  const names = { old: `hm-owned-release-${releaseId.slice(0, 16)}`, stage: `.protected-release-${releaseId}` };
+  const old = { release_id: releaseId, phase: "stopped" }, next = { release_id: releaseId, phase: "staged" };
+  await f.adapter.stop(target.container_id);
+  await f.adapter.writeReceipt(target, names, old);
+  await f.adapter.start(target.container_id);
+  const before = f.events.length;
+  f.faults.receiptUpload = true;
+  await assert.rejects(f.adapter.writeReceipt(target, names, next));
+  assert.deepEqual(await f.adapter.readReceipt(target, names), old);
+  f.faults.receiptUpload = false; f.faults.publishBefore = true;
+  await assert.rejects(f.adapter.writeReceipt(target, names, next));
+  assert.deepEqual(await f.adapter.readReceipt(target, names), old);
+  f.faults.publishBefore = false; f.faults.publishAfter = true;
+  await assert.rejects(f.adapter.writeReceipt(target, names, next));
+  assert.deepEqual(await f.adapter.readReceipt(target, names), next);
+  f.faults.publishAfter = false;
+  await f.adapter.writeReceipt(target, names, next);
+  assert.deepEqual(await f.adapter.readReceipt(target, names), next);
+  assert.ok(!(await fs.readdir(path.join(f.root, names.stage))).some(name => name.startsWith(".receipt-")));
+  assert.ok(!f.events.slice(before).includes("stop:old"), "private metadata publication does not stop a healthy runtime");
+});
+
 test("large real tar spools to private disk and repacks with bounded streaming memory", async t => {
   const folder = await fs.mkdtemp(path.join(os.tmpdir(), "protected-release-stream-"));
   t.after(() => fs.rm(folder, { recursive: true, force: true }));
@@ -291,13 +355,13 @@ for (const fault of ["health", "commit", "queue"]) test(`${fault} failure restor
   assert.equal(await fs.readFile(path.join(f.root, stage, "failed-installs/gen/facts.json"), "utf8"), fault === "queue" ? "good" : "failed-attempt");
   if (fault === "queue") assert.ok(!f.events.includes("start:candidate"), "queue ACK loss is before candidate start");
   const restored = f.receipts.findIndex(r => r.phase === "restored"), rolled = f.receipts.findIndex(r => r.phase === "rolled_back");
-  assert.ok(restored >= 0 && rolled > restored); assert.equal(f.events.at(-1), "start:old");
+  assert.ok(restored >= 0 && rolled > restored); assert.equal(f.events.filter(x => /^start:(old|candidate)$/.test(x)).at(-1), "start:old");
   assert.equal(f.row().image, "old-tag");
 });
 
 test("extraction failure never renames the old runtime and resumes it without touching chats", async t => {
   const f = await fixture(t); f.faults.stage = true; await assert.rejects(f.run());
-  assert.ok(!f.events.includes("rename:old")); assert.equal(f.events.at(-1), "start:old");
+  assert.ok(!f.events.includes("rename:old")); assert.equal(f.events.filter(x => /^start:(old|candidate)$/.test(x)).at(-1), "start:old");
   assert.deepEqual(await fs.readdir(path.join(f.root, ".worker-tmp")), []);
 });
 
@@ -310,7 +374,7 @@ test("wrong owner, uid, env or binding fails before stop", async t => {
 test("candidate UID and contract bytes are verified before its first start", async t => {
   for (const change of [f => { f.faults.candidateUid = true; }, f => { f.manifest.image.contract_sha256 = "0".repeat(64); }]) {
     const f = await fixture(t); change(f); await assert.rejects(f.run(), /PROTECTED_RELEASE_FAILED/);
-    assert.ok(!f.events.includes("start:candidate")); assert.equal(f.events.at(-1), "start:old");
+    assert.ok(!f.events.includes("start:candidate")); assert.equal(f.events.filter(x => /^start:(old|candidate)$/.test(x)).at(-1), "start:old");
   }
 });
 
@@ -333,7 +397,7 @@ test("maintained command validates dry run and enqueues one explicit protected j
   assert.equal(queued.previous_container_id, "old");
 });
 
-for (const boundary of ["stop", "stage", "create", "restore", "restoreName", "oldStart"]) test(`actual worker process death after ${boundary} resumes from durable archives without another runtime`, async t => {
+for (const boundary of ["stop", "stage", "create", "restore", "restoreName", "oldStart", "publishBefore", "publishAfter"]) test(`actual worker process death after ${boundary} resumes from durable archives without another runtime`, async t => {
   const root = await fs.mkdtemp(path.join(os.tmpdir(), "protected-release-death-"));
   t.after(() => fs.rm(root, { recursive: true, force: true }));
   const { spawn } = require("node:child_process");
@@ -342,8 +406,12 @@ for (const boundary of ["stop", "stage", "create", "restore", "restoreName", "ol
   });
   let output = ""; child.stderr.on("data", x => { output += x; });
   const code = await new Promise((resolve, reject) => { child.on("error", reject); child.on("exit", resolve); });
-  assert.equal(code, ({ create: 23, restore: 24, stop: 25, stage: 26, restoreName: 27, oldStart: 28 })[boundary], output);
+  assert.equal(code, ({ create: 23, restore: 24, stop: 25, stage: 26, restoreName: 27, oldStart: 28, publishBefore: 29, publishAfter: 30 })[boundary], output);
   const f = await fixture(t, { root, resume: true });
+  if (["publishBefore", "publishAfter"].includes(boundary)) {
+    const releaseId = digest(f.manifest), receipt = await f.adapter.readReceipt(f.manifest.targets[0], { old: `hm-owned-release-${releaseId.slice(0, 16)}`, stage: `.protected-release-${releaseId}` });
+    assert.equal(receipt.phase, boundary === "publishBefore" ? "old_retained" : "candidate_created");
+  }
   assert.equal((await f.run({ action: "recover" })).phase, "rolled_back");
   assert.equal(f.events.filter(x => x === "create:candidate").length, ["stop", "stage"].includes(boundary) ? 0 : 1);
   assert.equal(await fs.readFile(path.join(root, "installs/gen/facts.json"), "utf8"), "good");

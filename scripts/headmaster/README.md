@@ -112,10 +112,13 @@ can be finalized or compensated; historical deployment rows remain unchanged.
 
 On failure, the candidate stops before restoration. A one-shot filesystem
 process uses the exact retained old image and its already-available Python
-interpreter with fixed `os.rename`/directory-`fsync` code. It has no network or
+interpreter with `-I -S` and fixed `os.rename`/directory-`fsync` code. It has no network or
 gateway, a read-only image filesystem, only the exact data volume, root UID with
 only `DAC_OVERRIDE`/`FOWNER`, and no shell. This adds no Python dependency to the
-Node worker. Failed installs/configuration are retained before each verified
+Node worker. Its working directory is `/`; every inherited image environment
+key is overridden, dynamic-loader/Python hooks are neutralized, image healthchecks
+are disabled, and the created helper's image/environment/argv/mounts are inspected
+before start. Failed installs/configuration are retained before each verified
 old root is restored; old start happens only after restoration and exact LP CAS.
 Partial moves, lost create/start acknowledgements and restored-name restarts
 are reconciled from server-owned receipts. An unprovable restore leaves the
@@ -142,10 +145,28 @@ release completion. LP/external binding drift refuses status rather than blessin
 a historical receipt. Volume receipts are protected from the bot UID and survive
 Redis acknowledgement loss; the initial validated receipt is saved in existing
 job metadata before stop. Full Redis durability and infrastructure loss are not
-proved by local fixtures. Receipt JSON currently uses a Docker tar overwrite;
-a torn daemon/host write can make it unreadable. That fails closed and requires
-manual evidence recovery; these fixtures prove completed process boundaries,
-not atomic receipt writes or host-power-loss recovery.
+proved by local fixtures.
+
+Receipt bytes are bounded to 64 KiB and sent through a helper's Docker stdin;
+they are never tar-uploaded through a path beneath the bot-owned volume root.
+The fixed publisher opens the volume root and operation stage with directory
+file descriptors and `O_NOFOLLOW`, checks root ownership/`0700` and the existing
+root-owned `0600` canonical receipt's operation ID, then creates a `0600` temporary
+file with `O_EXCL` relative to the held directory. It validates input hash/identity,
+fsyncs the file, atomically replaces the canonical receipt, fsyncs the stage and
+its parent, and checks the named stage still has the held device/inode before ACK.
+Stage creation is permitted only while the old runtime is stopped, no candidate
+exists, and no writers remain. Later private metadata publication can run while
+the exact candidate runs. Only exact operation temporary receipt files are cleaned.
+
+The bot can rename a root-owned child beneath its own parent; `0700` alone does
+not prevent that. Descriptor-relative writes prevent such a rename/symlink race
+from redirecting a root write or exposing retained archives. Stage substitution
+refuses success and may require restoring the expected directory name before
+recovery. Readers use only canonical root-owned receipt JSON with the exact
+operation ID, and refuse an unsafe or missing stage. Interrupted input or a lost
+publication ACK leaves the complete old or new canonical JSON. Real Docker and
+host-power-loss durability still require separate qualification.
 
 ## Scoped verification
 
@@ -163,7 +184,26 @@ node --test scripts/headmaster/branding.test.mjs
 The fixtures execute the maintained command/controller/state/worker paths with
 fake Docker/query adapters and real tar/filesystem archives. They include bounded
 64 MiB streaming and actual child-process death after stop, stage, create,
-mid-restore, old-name restoration and old start. Windows archive ownership is
+mid-restore, old-name restoration, old start, and before/after atomic receipt
+publication. Windows archive ownership is
 modelled, not an actual Linux UID proof. Real Docker, image packaging, s6 init,
 native/client readiness, admission drain, account binding finalization, full
 fleet publication and live rollback remain separate acceptance gates.
+
+For the fixed filesystem programs themselves, the optional local POSIX fixture
+uses the exact exported production program strings. On Linux with local root
+(only a synthetic temporary tree, no Docker/service/network):
+
+```sh
+cd workers/provisioner
+node --import tsx -e 'process.stdout.write(JSON.stringify(require("./protectedReleaseDocker").maintenancePrograms))' > /tmp/headmaster-release-programs.json
+python3 -I -S protectedReleasePython.fixture.py /tmp/headmaster-release-programs.json
+```
+
+It checks real root/UID10000 ownership, nofollow/hash/mode gates, Python startup
+isolation, rename/fsync, process exits immediately before/after the actual replace
+syscall leaving complete old/new canonical JSON, and a deterministic barrier where UID10000
+renames the stage and inserts an outside symlink after the helper holds its fd.
+The outside file remains unchanged, retained bytes stay unreadable to UID10000,
+and the named-inode check refuses ACK. The barrier is only in the test harness;
+the maintained helper exposes no test hook.
