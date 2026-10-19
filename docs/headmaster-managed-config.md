@@ -28,6 +28,14 @@ name allowlist includes the four names for this runtime family, including the
 Kubernetes reconciliation path. Other runtime families retain their existing
 allowlist.
 
+Every account identity, provider, saved-model, channel and integration lookup
+must succeed before replacing the managed environment. An unavailable source
+returns a failed sync and leaves the existing environment and runtime lifecycle
+untouched; it cannot acknowledge the desired revision. Retry re-reads the full
+candidate under the same provider lock. A successful empty source is still
+authoritative and removes revoked credentials. An apply failure after mutation
+retains the existing quarantine/recovery behavior.
+
 Application failure returns HTTP 200 with `deployment_status: "failed"` and an
 unacknowledged desired revision. A successful call must return an explicit
 non-staged sync result after readiness; an empty, skipped, failed or merely staged
