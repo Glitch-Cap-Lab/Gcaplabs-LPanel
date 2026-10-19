@@ -253,6 +253,7 @@ async function enqueueReplacementDeployment(
   const ownsLock = !provisionLock;
   let statusTransitioned = false;
   let deploymentInserted = false;
+  let protectedDeploymentId = null;
   let enqueueAttempted = false;
 
   try {
@@ -304,9 +305,14 @@ async function enqueueReplacementDeployment(
     }
     statusTransitioned = true;
 
-    await queryable.query("INSERT INTO deployments(agent_id, status) VALUES($1, 'queued')", [
-      agent.id,
-    ]);
+    if (jobData.protected_release) {
+      const inserted = await queryable.query("INSERT INTO deployments(agent_id, status) VALUES($1, 'queued') RETURNING id", [agent.id]);
+      if (!inserted.rows[0]?.id) throw new Error("Protected release deployment identity unavailable");
+      protectedDeploymentId = inserted.rows[0].id;
+      jobData = { ...jobData, protected_release: { ...jobData.protected_release, deployment_id: inserted.rows[0].id } };
+    } else {
+      await queryable.query("INSERT INTO deployments(agent_id, status) VALUES($1, 'queued')", [agent.id]);
+    }
     deploymentInserted = true;
 
     enqueueAttempted = true;
@@ -332,8 +338,8 @@ async function enqueueReplacementDeployment(
         ...(deploymentInserted
           ? [
               queryable.query(
-                "UPDATE deployments SET status = 'failed' WHERE agent_id = $1 AND status = 'queued'",
-                [agent.id],
+                `UPDATE deployments SET status = 'failed' WHERE agent_id = $1 AND status = 'queued'${protectedDeploymentId ? " AND id = $2" : ""}`,
+                protectedDeploymentId ? [agent.id, protectedDeploymentId] : [agent.id],
               ),
             ]
           : []),

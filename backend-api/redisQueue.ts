@@ -191,6 +191,8 @@ async function cancelDeploymentJobsForAgent(agentId) {
   for (const job of jobs) {
     if (!job || String(job.data?.id || "") !== normalizedAgentId) continue;
     const state = typeof job.getState === "function" ? await job.getState() : "unknown";
+    // Protected release failures are durable operation evidence, also used by exact status lookup.
+    if (state === "failed" && job.data?.protected_release) continue;
     if (state === "active") {
       // BullMQ cannot remove a locked job from another process. The provisioner
       // treats a missing agent row as cancellation before create, after create,

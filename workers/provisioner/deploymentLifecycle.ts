@@ -228,7 +228,7 @@ async function persistProvisionedRuntimeMetadata(
 
 async function finalizeProvisionedDeployment(
   queryable,
-  { agentId, containerId, name, backend, host } = {},
+  { agentId, containerId, name, backend, host, deploymentId = null } = {},
 ) {
   const ownsClient = typeof queryable?.connect === "function";
   const client = ownsClient ? await queryable.connect() : queryable;
@@ -258,8 +258,9 @@ async function finalizeProvisionedDeployment(
           SET status = 'completed'
         WHERE agent_id = $1
           AND status = 'deploying'
+          ${deploymentId ? "AND id = $2" : ""}
         RETURNING agent_id`,
-      [agentId],
+      deploymentId ? [agentId, deploymentId] : [agentId],
     );
     if (!deploymentUpdate.rows[0]) {
       throw new Error(`Deployment ${agentId} was not in deploying state during finalization`);

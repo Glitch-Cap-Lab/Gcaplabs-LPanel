@@ -109,6 +109,7 @@ const {
 } = require("../../agent-runtime/lib/hermesRuntimeBootstrap");
 const { waitForAgentReadiness } = require("./healthChecks");
 const { runDemoActivationCanary } = require("./demoActivationCanary");
+const { runProtectedReleaseJob } = require("./protectedReleaseJob");
 const {
   acquireDedicatedSessionLock,
   finalizeProvisionedDeployment,
@@ -4461,6 +4462,15 @@ const worker = new Worker(
       // safety barrier after owner validation. Refuse the job before parsing
       // a possibly stale desired target so malformed selection metadata cannot
       // mask the live/orphaned runtime that an operator must reconcile first.
+      // Explicit operator-produced protected jobs own their retained-container lifecycle.
+      // Branch before generic replacement destroys the old runtime. Existing jobs stay unchanged.
+      if (job.data.protected_release) {
+        try {
+          return await runProtectedReleaseJob(job, { db, agentRow, loadBackend, withProviderMutationLock });
+        } catch {
+          throw new UnrecoverableError("Protected runtime release requires receipt review or explicit recovery");
+        }
+      }
       if (agentRow.container_id && job.data.replace_existing_runtime !== true) {
         console.error(
           `[provisioner] Refusing to create a replacement runtime for agent ${id}; unresolved runtime ${agentRow.container_id} is still persisted`,
@@ -5399,6 +5409,17 @@ const worker = new Worker(
 );
 
 worker.on("failed", async (job, err) => {
+  if (job?.data?.protected_release) {
+    // This event runs after the agent lock is released. Never mutate another queued runtime.
+    const deploymentId = job.data.protected_release.deployment_id;
+    if (/^[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}$/.test(deploymentId || "")) {
+      try {
+        await db.query("UPDATE deployments SET status = 'failed' WHERE agent_id = $1 AND id = $2 AND status IN ('queued', 'deploying')", [job.data.id, deploymentId]);
+      } catch { console.error("Protected runtime release terminal receipt requires review"); }
+    }
+    console.error("Protected runtime release failed; use its retained receipt for explicit recovery");
+    return;
+  }
   const attempts = job?.attemptsMade || 0;
   const maxAttempts = job?.opts?.attempts || 1;
   const unrecoverable = isUnrecoverableDeploymentError(err);

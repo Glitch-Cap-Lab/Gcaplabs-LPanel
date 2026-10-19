@@ -1,0 +1,218 @@
+// @ts-nocheck
+const { Readable } = require("stream");
+const { readArchive, packArchive, packStream, inventory, archiveRoot, MAX_BYTES } = require("./protectedReleaseArchive");
+const fs = require("fs/promises");
+const os = require("os");
+const path = require("path");
+const { envFingerprint, digest, refuse } = require("./protectedReleaseManifest");
+const { demuxDockerExecStream } = require("./backends/dockerExecStream");
+const { createHash } = require("crypto");
+const ROOT = "/opt/data";
+const CONFIG_BYTES = 16 * 1024 * 1024;
+// Existing retained-image Python, not a worker dependency. No shell or caller-supplied program text.
+const MOVE_AND_SYNC = "import os,sys\nsrc,dst=sys.argv[1:]\nos.rename(src,dst)\nfor parent in sorted({os.path.dirname(src),os.path.dirname(dst)}):\n fd=os.open(parent,os.O_RDONLY|os.O_DIRECTORY)\n try: os.fsync(fd)\n finally: os.close(fd)";
+const networkIdentity = c => Object.fromEntries(Object.entries(c.NetworkSettings.Networks || {}).map(([name, v]) => [name, {
+  ipam: v.IPAMConfig || null, aliases: (v.Aliases || []).filter(x => x !== c.Id && x !== c.Id.slice(0, 12)).sort(),
+}]));
+
+class ProtectedReleaseDocker {
+  constructor(backend, { checkReadiness, stagingRoot = os.tmpdir(), probeTimeoutMs = 60000 } = {}) { this.backend = backend; this.docker = backend.docker; this.checkReadiness = checkReadiness; this.stagingRoot = stagingRoot; this.probeTimeoutMs = probeTimeoutMs; }
+  async optionalInspect(name) { try { return await this.docker.getContainer(name).inspect(); } catch (e) { if (e.statusCode === 404) return null; throw e; } }
+  async retained(t, n) { const row = await this.optionalInspect(n.old); if (row && (row.Id !== t.container_id || row.Name !== `/${n.old}` || row.Image !== t.image_id || row.State.Running)) throw refuse("PROTECTED_RELEASE_RETAINED_CHANGED"); return row; }
+  async candidate(t, releaseId) {
+    const rows = await this.docker.listContainers({ all: true, filters: JSON.stringify({ label: [`headmaster.release.id=${releaseId}`, `nora.agent.id=${t.agent_id}`] }) });
+    if (rows.length > 1) throw refuse("PROTECTED_RELEASE_CANDIDATE_AMBIGUOUS");
+    return rows.length ? this.docker.getContainer(rows[0].Id).inspect() : null;
+  }
+  async observe(t, candidate = null) {
+    const old = await this.docker.getContainer(t.container_id).inspect();
+    if (old.Id !== t.container_id || old.Image !== t.image_id || old.Config.Labels?.["nora.agent.id"] !== t.agent_id
+        || envFingerprint(old.Config.Env) !== t.env_sha256
+        || !old.Mounts.some(x => x.Name === t.volume && x.Destination === ROOT && x.Type === "volume" && x.RW)) throw refuse("PROTECTED_RELEASE_RUNTIME_CHANGED");
+    const project = c => ({ container_id: c.Id, container_name: c.Name.replace(/^\//, ""), image_id: c.Image, running: c.State.Running });
+    return { retained: project(old), candidate: candidate ? project(candidate) : null };
+  }
+  async verifyCandidate(c, m, id) {
+    const t = m.targets[0];
+    const old = await this.docker.getContainer(t.container_id).inspect();
+    const expected = new Map(old.Config.Env.map(item => { const p = item.indexOf("="); return [item.slice(0, p), item.slice(p + 1)]; }));
+    for (const [key, value] of Object.entries(m.env_delta.set)) expected.set(key, value);
+    if (c.Image !== m.image.id || c.Config.Labels?.["headmaster.release.id"] !== id
+        || c.Config.Labels?.["nora.agent.id"] !== t.agent_id || c.Config.Labels?.["headmaster.release.owner"] !== t.owner_id
+        || !c.Mounts.some(x => x.Name === t.volume && x.Destination === ROOT && x.RW)
+        || envFingerprint(c.Config.Env) !== envFingerprint([...expected].map(([key, value]) => `${key}=${value}`))
+        || digest(c.HostConfig) !== digest(old.HostConfig)
+        || digest(c.Mounts) !== digest(old.Mounts)
+        || digest(networkIdentity(c)) !== digest(networkIdentity(old))
+        || ["Entrypoint", "Cmd", "User", "WorkingDir"].some(key => digest(c.Config[key] ?? null) !== digest(old.Config[key] ?? null))) throw refuse("PROTECTED_RELEASE_CANDIDATE_CHANGED");
+  }
+  async exec(container, cmd, user = "10000:10000") {
+    const exec = await container.exec({ Cmd: cmd, User: user, AttachStdout: true, AttachStderr: true });
+    const raw = await exec.start({ hijack: true, stdin: false });
+    const stream = demuxDockerExecStream(this.docker, raw), chunks = []; let bytes = 0;
+    const timeout = setTimeout(() => stream.destroy(refuse("PROTECTED_RELEASE_PROBE_TIMEOUT")), this.probeTimeoutMs);
+    try { for await (const chunk of stream) { bytes += chunk.length; if (bytes > 65536) { stream.destroy(); throw refuse("PROTECTED_RELEASE_PROBE_FAILED"); } chunks.push(chunk); } }
+    finally { clearTimeout(timeout); }
+    if ((await exec.inspect()).ExitCode !== 0) throw refuse("PROTECTED_RELEASE_PROBE_FAILED");
+    return Buffer.concat(chunks).toString("utf8").trim();
+  }
+  async preflight(m, row, { dryRun }) {
+    const t = m.targets[0], old = await this.docker.getContainer(t.container_id).inspect();
+    const image = await this.docker.getImage(m.image.id).inspect(); // locally present exact ID only, never pull
+    if (image.Id !== m.image.id || old.Id !== t.container_id || old.Image !== t.image_id || old.Name !== `/${t.container_name}`
+        || old.Config.Labels?.["nora.agent.id"] !== t.agent_id || envFingerprint(old.Config.Env) !== t.env_sha256
+        || image.Config.Labels?.["org.opencontainers.image.revision"] !== m.sources.core
+        || image.Config.Labels?.["com.gcaplabs.webapp.revision"] !== m.sources.webapp
+        || !old.Mounts.some(x => x.Name === t.volume && x.Destination === ROOT && x.Type === "volume" && x.RW)) throw refuse("PROTECTED_RELEASE_RUNTIME_CHANGED");
+    const env = Object.fromEntries(old.Config.Env.map(x => { const p = x.indexOf("="); return [x.slice(0, p), x.slice(p + 1)]; }));
+    if (env.HEADMASTER_OWNER_ID !== t.account_id || env.HEADMASTER_WORKSPACE_ID !== t.workspace_id) throw refuse("PROTECTED_RELEASE_OWNER_CHANGED");
+    if (!old.State.Running) throw refuse("PROTECTED_RELEASE_RUNNING_REQUIRED");
+    const user = await this.backend._containerUserOwnership(this.docker.getContainer(t.container_id), "hermes");
+    if (user.uid !== 10000 || user.gid !== 10000) throw refuse("PROTECTED_RELEASE_UID_CHANGED");
+    const usage = await this.exec(this.docker.getContainer(t.container_id), ["du", "-sk", "/opt/data/installs"]);
+    const bytes = Number(usage.split(/\s/)[0]) * 1024;
+    const disk = await fs.statfs(this.stagingRoot);
+    if (!Number.isSafeInteger(bytes) || bytes < 0 || bytes > MAX_BYTES - 2 * CONFIG_BYTES || disk.bavail * disk.bsize < bytes * 2 + 1024 ** 3) throw refuse("PROTECTED_RELEASE_STAGING_CAPACITY");
+    // Application commands run as the bot user; archive work itself uses Node/tar-stream.
+    await this.exec(this.docker.getContainer(t.container_id), ["/opt/hermes/.venv/bin/python", "-c", "from gateway.drain_control import write_drain_request; print('ready')"]);
+    await this.assertNoWriters(t.volume, t.container_id);
+  }
+  async drain(t) {
+    await this.exec(this.docker.getContainer(t.container_id), ["/opt/hermes/.venv/bin/python", "-c", "from gateway.drain_control import write_drain_request; write_drain_request(principal='protected-runtime-release', suppress_notification=True)"]);
+  }
+  async stop(id) { const c = this.docker.getContainer(id); if ((await c.inspect()).State.Running) await c.stop({ t: 60 }); }
+  async start(id) { const c = this.docker.getContainer(id); if (!(await c.inspect()).State.Running) await c.start(); }
+  async assertNoWriters(volume, permitted = null) {
+    for (const row of await this.docker.listContainers()) {
+      if (row.Id === permitted) continue;
+      const info = await this.docker.getContainer(row.Id).inspect();
+      if (info.State.Running && info.Mounts.some(m => m.Name === volume && m.RW)) throw refuse("PROTECTED_RELEASE_ACTIVE_WRITER");
+    }
+  }
+  async old(t, n) { return this.docker.getContainer((await this.optionalInspect(n.old)) ? n.old : t.container_id); }
+  async writeReceipt(t, n, value) {
+    const text = Buffer.from(JSON.stringify(value));
+    await (await this.old(t, n)).putArchive(await packArchive([{ name: "receipt.json", type: "file", mode: 0o600, content: text }], { prefix: n.stage }), { path: ROOT });
+  }
+  async readReceipt(t, n) {
+    try {
+      await this.checkStageRoot(t, n);
+      const rows = await readArchive(await (await this.old(t, n)).getArchive({ path: `${ROOT}/${n.stage}/receipt.json` }), "receipt.json", { maxBytes: 65536 }); return JSON.parse(rows[0].content.toString());
+    }
+    catch (e) { if (e.statusCode === 404) return null; throw e; }
+  }
+  async checkStageRoot(t, n) {
+    const header = await archiveRoot(await (await this.old(t, n)).getArchive({ path: `${ROOT}/${n.stage}` }));
+    if (header.name.replace(/\/$/, "") !== n.stage || header.type !== "directory" || header.uid !== 0 || header.gid !== 0 || (header.mode & 0o7777) !== 0o700) throw refuse("PROTECTED_RELEASE_STAGE_OWNER_CHANGED");
+  }
+  async stage(t, n, image) {
+    const c = await this.old(t, n), items = [];
+    try { await c.getArchive({ path: `${ROOT}/${n.stage}/before` }); throw refuse("PROTECTED_RELEASE_STAGE_EXISTS"); }
+    catch (e) { if (e.statusCode !== 404) throw e; }
+    const spoolRoot = this.localStage(n);
+    await fs.mkdir(spoolRoot, { mode: 0o700 });
+    try { for (const root of ["installs", "config.yaml", ".env"]) {
+      try {
+        const spoolDirectory = path.join(spoolRoot, root); await fs.mkdir(spoolDirectory, { mode: 0o700 });
+        items.push(...await readArchive(await c.getArchive({ path: `${ROOT}/${root}` }), root, { maxBytes: root === "installs" ? MAX_BYTES - 2 * CONFIG_BYTES : CONFIG_BYTES, spoolDirectory }));
+      }
+      catch (e) { if (root === "installs" || e.statusCode !== 404) throw e; }
+    }
+    const result = { inventory_sha256: digest(inventory(items)), inventories: Object.fromEntries(["installs", "config.yaml", ".env"].map(root => [root, digest(inventory(items.filter(x => x.name === root || x.name.startsWith(root + "/"))))])), roots: [...new Set(items.map(x => x.name.split("/")[0]))] };
+    await c.putArchive(packStream(items, { prefix: `${n.stage}/before`, uid: image.uid, gid: image.gid }), { path: ROOT });
+    // Verify the actual staged archive before a candidate can start.
+    await this.verifyStage(t, n, result);
+    return result;
+    } finally { await this.cleanupStaging(n); }
+  }
+  localStage(n) {
+    if (!/^\.protected-release-[0-9a-f]{64}$/.test(n.stage)) throw refuse("PROTECTED_RELEASE_STAGE_INVALID");
+    const base = path.resolve(this.stagingRoot), result = path.resolve(base, n.stage);
+    if (path.dirname(result) !== base) throw refuse("PROTECTED_RELEASE_STAGE_INVALID");
+    return result;
+  }
+  async cleanupStaging(n) {
+    const local = this.localStage(n);
+    const stat = await fs.lstat(local).catch(error => { if (error.code === "ENOENT") return null; throw error; });
+    if (!stat) return;
+    if (!stat.isDirectory() || stat.isSymbolicLink()) throw refuse("PROTECTED_RELEASE_STAGE_INVALID");
+    await fs.rm(local, { recursive: true, force: false });
+  }
+  async verifyStage(t, n, expected) {
+    await this.checkStageRoot(t, n);
+    const c = await this.old(t, n), items = [];
+    for (const root of expected.roots) items.push(...await readArchive(await c.getArchive({ path: `${ROOT}/${n.stage}/before/${root}` }), root, { maxBytes: MAX_BYTES, hashOnly: true }));
+    if (items.some(x => x.uid !== 10000 || x.gid !== 10000) || digest(inventory(items)) !== expected.inventory_sha256) throw refuse("PROTECTED_RELEASE_STAGE_CHANGED");
+  }
+  async renameOld(t, n) { await this.docker.getContainer(t.container_id).rename({ name: n.old }); }
+  async create(m, n, id) {
+    const t = m.targets[0], old = await this.docker.getContainer(n.old).inspect();
+    const cfg = { ...old.Config, Image: m.image.id, name: t.container_name, HostConfig: { ...old.HostConfig },
+      Labels: { ...old.Config.Labels, "headmaster.release.id": id, "headmaster.release.owner": t.owner_id } };
+    const env = new Map(cfg.Env.map(item => { const p = item.indexOf("="); return [item.slice(0, p), item.slice(p + 1)]; }));
+    for (const [key, value] of Object.entries(m.env_delta.set)) env.set(key, value);
+    cfg.Env = [...env].map(([key, value]) => `${key}=${value}`);
+    cfg.NetworkingConfig = { EndpointsConfig: Object.fromEntries(Object.entries(old.NetworkSettings.Networks || {}).map(([name, v]) => [name, {
+      ...(v.IPAMConfig ? { IPAMConfig: v.IPAMConfig } : {}), Aliases: (v.Aliases || []).filter(x => x !== old.Id.slice(0, 12)),
+    }])) };
+    const result = await this.docker.createContainer(cfg); return result.inspect();
+  }
+  async checkImage(m, id) {
+    const info = await this.docker.getContainer(id).inspect(); await this.verifyCandidate(info, m, digest(m));
+    const user = await this.backend._containerUserOwnership(this.docker.getContainer(id), "hermes");
+    if (user.uid !== 10000 || user.gid !== 10000) throw refuse("PROTECTED_RELEASE_UID_CHANGED");
+    for (const [file, expected] of [["headmaster/contract/desktop-contract.json", m.image.contract_sha256], ["uv.lock", m.image.dependency_sha256]]) {
+      const root = file.split("/").at(-1);
+      const entries = await readArchive(await this.docker.getContainer(id).getArchive({ path: `/opt/hermes/${file}` }), root);
+      if (createHash("sha256").update(entries[0].content).digest("hex") !== expected) throw refuse("PROTECTED_RELEASE_IMAGE_CONTENT_CHANGED");
+    }
+  }
+  async check(m, id) {
+    await this.checkImage(m, id);
+    const info = await this.docker.getContainer(id).inspect();
+    const result = await this.checkReadiness(info);
+    if (!result?.ok) throw refuse("PROTECTED_RELEASE_UNHEALTHY");
+  }
+  async move(t, n, source, destination) {
+    await this.assertNoWriters(t.volume);
+    try { await (await this.old(t, n)).getArchive({ path: destination }); throw refuse("PROTECTED_RELEASE_RESTORE_DESTINATION_EXISTS"); }
+    catch (e) { if (e.statusCode !== 404) throw e; }
+    // A stopped container cannot exec. A one-shot retained-image filesystem process never starts its gateway.
+    const helper = await this.docker.createContainer({ Image: t.image_id, User: "0:0", Entrypoint: ["/opt/hermes/.venv/bin/python"],
+      Cmd: ["-c", MOVE_AND_SYNC, source, destination], NetworkDisabled: true, Labels: { "headmaster.release.maintenance": n.stage },
+      HostConfig: { NetworkMode: "none", ReadonlyRootfs: true, CapDrop: ["ALL"], CapAdd: ["DAC_OVERRIDE", "FOWNER"], SecurityOpt: ["no-new-privileges:true"],
+        Binds: [`${t.volume}:${ROOT}`], RestartPolicy: { Name: "no" } } });
+    await helper.start(); let timeout;
+    const result = await Promise.race([helper.wait(), new Promise((_, reject) => {
+      timeout = setTimeout(() => reject(refuse("PROTECTED_RELEASE_RESTORE_TIMEOUT")), this.probeTimeoutMs);
+    })]).catch(async error => { await helper.stop({ t: 5 }).catch(() => {}); throw error; }).finally(() => clearTimeout(timeout));
+    if (result.StatusCode !== 0) throw refuse("PROTECTED_RELEASE_RESTORE_FAILED");
+    // Retain maintenance containers too; cleanup is an independent owner action.
+  }
+  async restore(t, n, staged) {
+    await this.checkStageRoot(t, n);
+    const c = await this.old(t, n);
+    for (const root of ["installs", "config.yaml", ".env"]) {
+      let source;
+      if (staged.roots.includes(root)) {
+        try { source = await readArchive(await c.getArchive({ path: `${ROOT}/${n.stage}/before/${root}` }), root, { maxBytes: MAX_BYTES, hashOnly: true }); }
+        catch (e) {
+          if (e.statusCode !== 404) throw e;
+          const current = await readArchive(await c.getArchive({ path: `${ROOT}/${root}` }), root, { maxBytes: MAX_BYTES, hashOnly: true });
+          if (digest(inventory(current)) !== staged.inventories[root] || current.some(x => x.uid !== 10000 || x.gid !== 10000)) throw refuse("PROTECTED_RELEASE_RESTORE_FAILED");
+          continue; // Prior restore moved this exact verified root before losing its ACK.
+        }
+        if (digest(inventory(source)) !== staged.inventories[root] || source.some(x => x.uid !== 10000 || x.gid !== 10000)) throw refuse("PROTECTED_RELEASE_STAGE_CHANGED");
+      }
+      try { await c.getArchive({ path: `${ROOT}/${root}` }); await this.move(t, n, `${ROOT}/${root}`, `${ROOT}/${n.stage}/failed-${root}`); }
+      catch (e) { if (e.statusCode !== 404) throw e; }
+      if (staged.roots.includes(root)) await this.move(t, n, `${ROOT}/${n.stage}/before/${root}`, `${ROOT}/${root}`);
+    }
+    const restored = [];
+    for (const root of staged.roots) restored.push(...await readArchive(await c.getArchive({ path: `${ROOT}/${root}` }), root, { maxBytes: MAX_BYTES, hashOnly: true }));
+    if (digest(inventory(restored)) !== staged.inventory_sha256) throw refuse("PROTECTED_RELEASE_RESTORE_FAILED");
+  }
+  async retainFailed(id, n) { const c = this.docker.getContainer(id); if ((await c.inspect()).Name !== `/${n.old}-failed`) await c.rename({ name: `${n.old}-failed` }); }
+  async restoreName(t, n) { const old = await this.optionalInspect(n.old); if (old) await this.docker.getContainer(n.old).rename({ name: t.container_name }); }
+}
+module.exports = { ProtectedReleaseDocker };

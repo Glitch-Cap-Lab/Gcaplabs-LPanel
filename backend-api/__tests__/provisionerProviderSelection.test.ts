@@ -37,7 +37,10 @@ const mockContainerManager = {
   destroy: jest.fn(),
 };
 const mockWorkerOn = jest.fn();
+const mockRunProtectedReleaseJob = jest.fn();
 let mockDeploymentProcessor;
+let mockDeploymentFailed;
+jest.mock("../../workers/provisioner/protectedReleaseJob", () => ({ runProtectedReleaseJob: (...args) => mockRunProtectedReleaseJob(...args) }));
 
 jest.mock("../../workers/provisioner/node_modules/bullmq", () => ({
   UnrecoverableError: class UnrecoverableError extends Error {
@@ -49,7 +52,7 @@ jest.mock("../../workers/provisioner/node_modules/bullmq", () => ({
   Worker: jest.fn().mockImplementation((queueName, processor) => {
     if (queueName === "deployments") mockDeploymentProcessor = processor;
     return {
-      on: mockWorkerOn,
+      on: (name, callback) => { if (queueName === "deployments" && name === "failed") mockDeploymentFailed = callback; return mockWorkerOn(name, callback); },
       isRunning: jest.fn().mockReturnValue(true),
     };
   }),
@@ -150,6 +153,7 @@ const { DASHBOARD_PORT_PURPOSE, GATEWAY_PORT_PURPOSE } = require("../portAllocat
 beforeEach(() => {
   jest.clearAllMocks();
   mockWorkerDb.query.mockReset();
+  mockRunProtectedReleaseJob.mockReset();
   mockLockClient.connect.mockReset().mockResolvedValue(undefined);
   mockLockClient.query.mockReset().mockResolvedValue({ rows: [] });
   mockLockClient.end.mockReset().mockResolvedValue(undefined);
@@ -194,6 +198,26 @@ beforeEach(() => {
 });
 
 describe("provisioner deployment provider selection", () => {
+  it("dispatches only explicit protected releases before generic replacement can destroy a runtime", async () => {
+    const receipt = { phase: "external_metadata_pending", publication_blocked: true };
+    mockLockClient.query.mockResolvedValue({ rows: [{ locked: true }] });
+    mockWorkerDb.query.mockResolvedValue({ rows: [{ user_id: "owner-1", status: "queued", container_id: "old-runtime" }] });
+    mockRunProtectedReleaseJob.mockResolvedValue(receipt);
+    const job = { id: "protected-job", data: { id: "agent-1", userId: "owner-1", replace_existing_runtime: true, protected_release: { manifest: {} } } };
+    await expect(mockDeploymentProcessor(job)).resolves.toEqual(receipt);
+    expect(mockRunProtectedReleaseJob).toHaveBeenCalledWith(job, expect.objectContaining({ db: mockWorkerDb }));
+    expect(mockContainerManager.destroy).not.toHaveBeenCalled();
+    expect(mockHermesProvisioner.create).not.toHaveBeenCalled();
+    expect(mockLockClient.end).toHaveBeenCalledTimes(1);
+  });
+  it("limits the post-lock protected failed event to this deployment row", async () => {
+    mockWorkerDb.query.mockResolvedValue({ rows: [] });
+    const id = "00000000-0000-0000-0000-000000000010";
+    await mockDeploymentFailed({ id: "protected-job", data: { id: "agent-1", protected_release: { deployment_id: id } } }, new Error("synthetic failure"));
+    expect(mockWorkerDb.query).toHaveBeenCalledTimes(1);
+    expect(mockWorkerDb.query).toHaveBeenCalledWith(expect.stringMatching(/UPDATE deployments.*agent_id = \$1 AND id = \$2/), ["agent-1", id]);
+    expect(mockWorkerDb.query.mock.calls.some(([sql]) => /UPDATE agents/.test(sql))).toBe(false);
+  });
   it("extends readiness polling for Hermes only", () => {
     expect(readinessOptionsForRuntimeFamily("hermes")).toEqual({
       runtime: {

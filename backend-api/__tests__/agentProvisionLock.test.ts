@@ -212,3 +212,14 @@ it("keeps an existing provision lock across tuple CAS, deployment insert, and qu
   expect(addDeploymentJob).toHaveBeenCalledWith(job);
   expect(release).not.toHaveBeenCalled();
 });
+
+it("binds a protected release to the exact new deployment row without changing ordinary jobs", async () => {
+  const agent = { id: "agent-1", name: "Owned", user_id: "owner-1", status: "running", container_id: "old-id", container_name: "old-name", host: "old-host", backend_type: "docker", runtime_family: "hermes", deploy_target: "docker", execution_target_id: "docker", sandbox_profile: "standard" };
+  const job = buildReplacementDeploymentJob(agent, { extra: { protected_release: { release_id: "immutable-operation" } } });
+  const queryable = { query: jest.fn().mockResolvedValueOnce({ rows: [{ id: agent.id }], rowCount: 1 }).mockResolvedValueOnce({ rows: [{ id: "operation-deployment" }] }) };
+  const addDeploymentJob = jest.fn().mockResolvedValue({ id: "protected-job" });
+  await enqueueReplacementDeployment(agent, job, { queryable, addDeploymentJob, provisionLock: { release: jest.fn() }, skipCancellation: true });
+  expect(queryable.query).toHaveBeenNthCalledWith(2, expect.stringMatching(/INSERT INTO deployments.*RETURNING id/), [agent.id]);
+  expect(addDeploymentJob).toHaveBeenCalledWith(expect.objectContaining({ protected_release: { release_id: "immutable-operation", deployment_id: "operation-deployment" } }));
+  expect(job.protected_release).not.toHaveProperty("deployment_id");
+});
