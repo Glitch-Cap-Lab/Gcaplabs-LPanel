@@ -34,6 +34,11 @@ describe("admin account deletion route authority", () => {
     const res = await request(makeApp({ client: c })).post("/deletions").send({ ownerId: "owner", confirm: "DELETE" }).expect(409);
     expect(res.body.error).toMatch(/Wait for it to finish/);
   });
+  test("an unresolved runtime identity requires operator recovery before deletion", async () => {
+    const c = { ...client, deleteAccount: async () => { throw Object.assign(Error("deletion_targets_unresolved"), { statusCode: 409 }); } };
+    const res = await request(makeApp({ client: c })).post("/deletions").send({ ownerId: "owner", confirm: "DELETE" }).expect(409);
+    expect(res.body.error).toMatch(/runtime identity needs operator recovery/);
+  });
   test.each(["cleanup_targets_missing", "deletion_conflict"])("returns actionable conflict for %s", async (message) => {
     const c = { ...client, completeStep: async () => { throw Object.assign(Error(message), { statusCode: 409 }); } };
     const res = await request(makeApp({ client: c })).post("/deletions/r1/steps/cloud_runtime").expect(409);

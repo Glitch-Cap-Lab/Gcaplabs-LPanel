@@ -79,7 +79,7 @@ describe("durable account deletion", () => {
     if (kind !== "receipt") expect(f.ops.cloud_runtime).not.toHaveBeenCalled();
     expect(f.calls.some((c) => c.path.endsWith("/headmaster_runtime_bindings"))).toBe(false);
   });
-  test.each(["deletion_busy", "deletion_already_requested"])("atomic authority %s prevents cleanup without fallback", async (message) => {
+  test.each(["deletion_busy", "deletion_already_requested", "deletion_targets_unresolved"])("atomic authority %s prevents cleanup without fallback", async (message) => {
     const f = fixture({ intercept: ({ url }) => url.pathname.endsWith("/headmaster_begin_account_deletion") ? fail(400, { message }) : null });
     await expect(f.client.deleteAccount(OWNER, "ops")).rejects.toMatchObject({ message, statusCode: 409 });
     expect(f.calls).toHaveLength(1);

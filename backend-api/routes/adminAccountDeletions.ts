@@ -33,6 +33,7 @@ function buildRouter({ clientFactory = () => createDeletionClient() } = {}) {
     } catch (error) {
       const code = error?.statusCode || 503;
       const copy = error?.message === "deletion_busy" ? "A runtime operation is still running. Wait for it to finish, then retry account deletion."
+        : error?.message === "deletion_targets_unresolved" ? "A runtime identity needs operator recovery before account deletion can continue."
         : error?.message === "deletion_already_requested" ? "A deletion request already exists. Refresh and retry its remaining cleanup steps."
         : code === 400 ? "Enter the account's user id." : "The account could not be deleted.";
       res.status(code).json({ error: copy });

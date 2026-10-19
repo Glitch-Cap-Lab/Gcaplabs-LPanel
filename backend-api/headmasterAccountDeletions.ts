@@ -141,6 +141,7 @@ function createDeletionClient({ env = process.env, fetchImpl = globalThis.fetch,
     if (!created.ok) {
       const body = await created.json().catch(() => ({}));
       if (body.message === "deletion_busy") throw error("deletion_busy", 409);
+      if (body.message === "deletion_targets_unresolved") throw error("deletion_targets_unresolved", 409);
       if (body.message === "deletion_already_requested") throw error("deletion_already_requested", 409);
       throw error("deletion_record_failed");
     }
