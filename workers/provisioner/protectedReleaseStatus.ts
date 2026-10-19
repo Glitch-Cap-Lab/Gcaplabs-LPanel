@@ -11,10 +11,13 @@ async function readProtectedReleaseStatus({ manifest: input, adapter, state, job
   assertAgent(manifest, row, { candidateId: row?.image === manifest.image.binding ? row.container_id : null });
   await adapter.verifyImageBinding(manifest);
   const names = { old: `${target.container_name}-release-${releaseId.slice(0, 16)}`, stage: `.protected-release-${releaseId}` };
-  await adapter.retained(target, names);
-  const receipt = await adapter.readReceipt(target, names) || job?.data?.protected_release?.receipt || null;
+  const retained = await adapter.retained(target, names);
+  const canonical = await adapter.readReceipt(target, names), queuedReceipt = job?.data?.protected_release?.receipt || null;
+  if (!canonical && (retained || (queuedReceipt && queuedReceipt.phase !== "validated"))) throw refuse("PROTECTED_RELEASE_CANONICAL_RECEIPT_REQUIRED");
+  const receipt = canonical || queuedReceipt;
   if (receipt && receipt.release_id !== releaseId) throw refuse("PROTECTED_RELEASE_RECEIPT_MISMATCH");
   const candidate = await adapter.candidate(target, releaseId);
+  if (!canonical && candidate) throw refuse("PROTECTED_RELEASE_CANONICAL_RECEIPT_REQUIRED");
   if (candidate) await adapter.verifyCandidate(candidate, manifest, releaseId);
   assertAgent(manifest, row, { candidateId: candidate?.Id === row?.container_id ? candidate.Id : null });
   const runtime = await adapter.observe(target, candidate);

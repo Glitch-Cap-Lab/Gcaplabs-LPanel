@@ -124,6 +124,10 @@ Partial moves, lost create/start acknowledgements and restored-name restarts
 are reconciled from server-owned receipts. An unprovable restore leaves the
 old runtime stopped and requires explicit recovery. Maintenance containers are
 retained; cleanup requires a separate scoped owner action.
+Private helper image/create/inspect/attach/start/wait calls have deadlines and
+transport cancellation; uncertain wait cleanup has a separate maximum five-second
+stop budget. A nonresponsive helper cannot make its cleanup wait hold the caller
+indefinitely. The fixed receipt process also limits stdin waiting to 60 seconds.
 
 ## Status contract
 
@@ -164,7 +168,10 @@ not prevent that. Descriptor-relative writes prevent such a rename/symlink race
 from redirecting a root write or exposing retained archives. Stage substitution
 refuses success and may require restoring the expected directory name before
 recovery. Readers use only canonical root-owned receipt JSON with the exact
-operation ID, and refuse an unsafe or missing stage. Interrupted input or a lost
+operation ID, and refuse an unsafe or missing stage after any publication. Queue
+receipt fallback is permitted only for initial `validated` metadata before a
+retained container or candidate exists; published phases require the canonical
+volume receipt. Interrupted input or a lost
 publication ACK leaves the complete old or new canonical JSON. Real Docker and
 host-power-loss durability still require separate qualification.
 
