@@ -30,6 +30,7 @@ describe("workspace alert isolation", () => {
   let assignedWorkspaces;
   let ownershipUnavailable;
   let ruleExists;
+  let currentChannels;
   let fetchMock;
   let originalFetch;
   const flushAlerts = () => new Promise((resolve) => setImmediate(resolve));
@@ -38,6 +39,7 @@ describe("workspace alert isolation", () => {
     assignedWorkspaces = ["a"];
     ownershipUnavailable = false;
     ruleExists = true;
+    currentChannels = rule("a").channels;
     db.query.mockReset().mockImplementation(async (sql) => {
       if (sql.includes("FROM agent_budgets")) {
         return {
@@ -57,8 +59,8 @@ describe("workspace alert isolation", () => {
         if (ownershipUnavailable) throw new Error("synthetic store outage");
         return { rows: assignedWorkspaces.map((workspace_id) => ({ workspace_id })) };
       }
-      if (sql.startsWith("SELECT id FROM alert_rules")) {
-        return { rows: ruleExists ? [{ id: "rule-a" }] : [] };
+      if (sql.startsWith("SELECT id, channels FROM alert_rules")) {
+        return { rows: ruleExists ? [{ id: "rule-a", channels: currentChannels }] : [] };
       }
       // Deliberately return both tenants even for a scoped SQL request, so the
       // delivery assertions also catch a missing in-process scope check.
@@ -224,6 +226,18 @@ describe("workspace alert isolation", () => {
     ruleExists = true;
     await alertRules.runAlertDeliveryJob({ ...queuedJob(), metadata: {} });
     await alertRules.runAlertDeliveryJob({ ...queuedJob(), workspaceId: "b" });
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+
+  it("revokes queued webhook snapshots when the channel is removed or replaced", async () => {
+    currentChannels = [];
+    await alertRules.runAlertDeliveryJob(queuedJob());
+    currentChannels = [
+      { ...rule("a").channels[0], headers: { Authorization: "synthetic-new-value" } },
+    ];
+    await alertRules.runAlertDeliveryJob(queuedJob());
+    currentChannels = [{ type: "webhook", url: "https://hooks.example.com/replacement" }];
+    await alertRules.runAlertDeliveryJob(queuedJob());
     expect(fetchMock).not.toHaveBeenCalled();
   });
 

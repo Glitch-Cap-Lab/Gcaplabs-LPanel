@@ -6,7 +6,7 @@ Alert rules let a workspace listen for specific event types and forward each mat
 
 An explicit `metadata.workspace.id` or `metadata.workspaceId` limits delivery to that workspace. Agent events without an explicit workspace use the agent's current workspace assignments, including intentional sharing. When an event references multiple agents, a recipient workspace must have access to every referenced agent. Explicit workspace scope must also match those assignments.
 
-Events without a resolvable workspace or agent assignment do not trigger workspace channels. Conflicting scope, a deleted agent, or an ownership lookup failure also prevents delivery. System or administrator provenance does not grant access to workspace channels; unscoped platform events remain available through the existing administrator audit log. Queued webhooks recheck current workspace assignments and the enabled rule before sending.
+Events without a resolvable workspace or agent assignment do not trigger workspace channels. Conflicting scope, a deleted agent, or an ownership lookup failure also prevents delivery. System or administrator provenance does not grant access to workspace channels; unscoped platform events remain available through the existing administrator audit log. Queued webhooks recheck current workspace assignments and the enabled rule before sending. Removing a channel or changing its URL or headers also cancels delivery of its queued snapshots.
 
 ![Workspace alert rules — active rules with last-fired and last-error fields](/images/guides/alert-rules/alerts-list.png)
 

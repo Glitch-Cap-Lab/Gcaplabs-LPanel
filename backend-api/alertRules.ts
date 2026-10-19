@@ -8,6 +8,7 @@
 // rule's last_error.
 
 const { randomUUID } = require("crypto");
+const { isDeepStrictEqual } = require("node:util");
 const db = require("./db");
 const { assertSafeUrl, assertSafeUrlAsync } = require("./networkSafety");
 
@@ -516,10 +517,18 @@ async function runAlertDeliveryJob(jobData) {
   const workspaceIds = await resolveEventWorkspaces(metadata);
   if (!workspaceIds.includes(jobData.workspaceId)) return;
   const rule = await db.query(
-    "SELECT id FROM alert_rules WHERE id = $1 AND workspace_id = $2 AND enabled = true",
+    "SELECT id, channels FROM alert_rules WHERE id = $1 AND workspace_id = $2 AND enabled = true",
     [ruleId, jobData.workspaceId],
   );
-  if (!rule.rows.length) return;
+  const currentChannels = rule.rows[0]?.channels;
+  // A queued URL/header snapshot is no longer authorized after the operator
+  // removes or replaces that channel, even if the rule itself still exists.
+  if (
+    !Array.isArray(currentChannels) ||
+    !currentChannels.some((entry) => isDeepStrictEqual(entry, channel))
+  ) {
+    return;
+  }
   const payload = {
     eventType,
     message,

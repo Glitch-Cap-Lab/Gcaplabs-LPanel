@@ -378,7 +378,17 @@ describe("runAlertDeliveryJob", () => {
   let fetchMock;
 
   beforeEach(() => {
-    mockDb.query.mockReset().mockResolvedValue({ rows: [{ id: "r-1" }] });
+    mockDb.query.mockReset().mockResolvedValue({
+      rows: [
+        {
+          id: "r-1",
+          channels: [
+            { type: "webhook", url: "https://hooks/a" },
+            { type: "webhook", url: "https://hooks/x" },
+          ],
+        },
+      ],
+    });
     originalFetch = global.fetch;
     fetchMock = jest.fn().mockResolvedValue({ ok: true, status: 200 });
     global.fetch = fetchMock;
