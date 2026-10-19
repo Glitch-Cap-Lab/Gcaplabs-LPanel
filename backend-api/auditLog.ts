@@ -2,6 +2,7 @@
 const monitoring = require("./monitoring");
 const { buildAgentRuntimeFields } = require("./agentRuntimeFields");
 const { ensureAuditSourceMetadata, readRequestHeader, readRequestIp } = require("./auditSource");
+const { redactValue, redactForRequest, requestPath } = require("./lib/redaction");
 
 // Metadata normalization and request provenance
 
@@ -18,6 +19,7 @@ function isPlainObject(value) {
  * @returns {*} JSON-safe normalized value, or `undefined` when empty.
  */
 function normalizeAuditValue(value, depth = 0) {
+  if (depth === 0) value = redactValue(value);
   if (value == null || value === "") return undefined;
   if (depth > 8) return "[max-depth]";
 
@@ -71,57 +73,64 @@ function normalizeAuditValue(value, depth = 0) {
  * @returns {Object} JSON-safe audit metadata.
  */
 function buildAuditMetadata(req, context = {}) {
-  const { source, ...restContext } = context || {};
-  return (
-    normalizeAuditValue(
-      ensureAuditSourceMetadata(
-        {
-          actor: req?.user
-            ? {
-                userId: req.user.id,
-                email: req.user.email || null,
-                role: req.user.role || null,
-              }
-            : undefined,
-          request: req
-            ? {
-                method: req.method,
-                path: req.originalUrl || req.path || null,
-                correlationId: req.correlationId || null,
-                ip: readRequestIp(req) || null,
-                origin:
-                  readRequestHeader(req, "origin") || readRequestHeader(req, "referer") || null,
-                userAgent: readRequestHeader(req, "user-agent") || null,
-                params: req.params && Object.keys(req.params).length ? req.params : undefined,
-                query: req.query && Object.keys(req.query).length ? req.query : undefined,
-              }
-            : undefined,
-          source,
-          ...restContext,
-        },
-        req,
-      ),
-    ) || {}
-  );
+  try {
+    const { source, ...restContext } = context || {};
+    return (
+      normalizeAuditValue(
+        ensureAuditSourceMetadata(
+          {
+            actor: req?.user
+              ? {
+                  userId: req.user.id,
+                  email: req.user.email || null,
+                  role: req.user.role || null,
+                }
+              : undefined,
+            request: req
+              ? {
+                  method: req.method,
+                  path: requestPath(req),
+                  correlationId: req.correlationId || null,
+                  ip: readRequestIp(req) || null,
+                  origin:
+                    readRequestHeader(req, "origin") || readRequestHeader(req, "referer") || null,
+                  userAgent: readRequestHeader(req, "user-agent") || null,
+                  params: req.params && Object.keys(req.params).length ? req.params : undefined,
+                }
+              : undefined,
+            source,
+            ...restContext,
+          },
+          req,
+        ),
+      ) || {}
+    );
+  } catch {
+    return { redaction: "[redaction failed]" };
+  }
 }
 
 function buildErrorMetadata(error, context = {}) {
-  return normalizeAuditValue({
-    ...context,
-    error:
-      error instanceof Error
-        ? error
-        : {
-            name: error?.name || "Error",
-            message:
-              error?.message ||
-              error?.error ||
-              `Request failed with status ${error?.statusCode || error?.status || "unknown"}`,
-            code: error?.code || null,
-            status: error?.statusCode || error?.status || null,
-            stack: error?.stack || null,
-          },
-  });
+  try {
+    return normalizeAuditValue({
+      ...context,
+      error:
+        error instanceof Error
+          ? error
+          : {
+              name: error?.name || "Error",
+              message:
+                error?.message ||
+                error?.error ||
+                `Request failed with status ${error?.statusCode || error?.status || "unknown"}`,
+              code: error?.code || null,
+              status: error?.statusCode || error?.status || null,
+              stack: error?.stack || null,
+            },
+    });
+  } catch {
+    return { error: { name: "Error", message: "Error details unavailable" } };
+  }
 }
 
 // Resource context builders
@@ -289,40 +298,49 @@ function createMutationFailureAuditMiddleware(routeArea) {
     };
 
     res.on("finish", () => {
-      if (res.statusCode < 400 || res.locals?.skipAuditFailureLog) return;
+      try {
+        if (res.statusCode < 400 || res.locals?.skipAuditFailureLog) return;
 
-      const errorLike = res.locals?.auditError || {
-        name: responseBody?.code || "RequestError",
-        message:
-          responseBody?.error ||
-          responseBody?.message ||
-          `Request failed with status ${res.statusCode}`,
-        code: responseBody?.code || null,
-        statusCode: res.statusCode,
-      };
+        const errorLike = res.locals?.auditError || {
+          name: responseBody?.code || "RequestError",
+          message:
+            responseBody?.error ||
+            responseBody?.message ||
+            `Request failed with status ${res.statusCode}`,
+          code: responseBody?.code || null,
+          statusCode: res.statusCode,
+        };
 
-      const metadata = buildAuditMetadata(req, {
-        ...(res.locals?.auditContext || {}),
-        ...buildErrorMetadata(errorLike, {
-          context: {
-            area: routeArea,
-            severity: res.statusCode >= 500 ? "error" : "warning",
-          },
-          response: {
-            status: res.statusCode,
-          },
-        }),
-      });
+        const metadata = buildAuditMetadata(req, {
+          ...(res.locals?.auditContext || {}),
+          ...buildErrorMetadata(errorLike, {
+            context: {
+              area: routeArea,
+              severity: res.statusCode >= 500 ? "error" : "warning",
+            },
+            response: {
+              status: res.statusCode,
+            },
+          }),
+        });
 
-      Promise.resolve(
-        monitoring.logEvent(
-          `${routeArea}_action_failed`,
-          `${routeArea} action failed: ${req.method} ${req.originalUrl}`,
-          metadata,
-        ),
-      ).catch((error) => {
-        console.error("Failed to write audit failure event:", error.message);
-      });
+        Promise.resolve()
+          .then(() =>
+            monitoring.logEvent(
+              `${routeArea}_action_failed`,
+              redactForRequest(
+                `${routeArea} action failed: ${req.method} ${requestPath(req)}`,
+                req,
+              ),
+              metadata,
+            ),
+          )
+          .catch(() => {
+            console.error("Failed to write audit failure event");
+          });
+      } catch {
+        console.error("Failed to prepare audit failure event");
+      }
     });
 
     next();

@@ -6,6 +6,7 @@ const os = require("os");
 const path = require("path");
 const Docker = require("dockerode");
 const { buildAutoUpgrade, buildReleaseInfo } = require("./releaseInfo");
+const { redactText } = require("./lib/redaction");
 
 const DEFAULT_STATE_DIR = "/var/lib/nora-upgrade";
 const DEFAULT_STATE_VOLUME = "nora_upgrade_state";
@@ -354,37 +355,6 @@ function publicJob(job) {
     composeFiles: normalizeComposeFiles(job.composeFiles || []),
     command: job.command || null,
   };
-}
-
-/**
- * Best-effort redaction for known environment secrets and common credential
- * patterns. It reduces accidental disclosure but is not an exhaustive sanitizer.
- *
- * @param {string} input - Log or error text.
- * @param {Object} env - Environment containing values to redact.
- * @returns {string} Redacted text.
- */
-function redactText(input, env = process.env) {
-  let output = String(input || "");
-  const secretValues = [
-    env.JWT_SECRET,
-    env.ENCRYPTION_KEY,
-    env.DB_PASSWORD,
-    env.NORA_UPGRADE_REPO,
-    env.STRIPE_SECRET_KEY,
-    env.STRIPE_WEBHOOK_SECRET,
-    env.AWS_SECRET_ACCESS_KEY,
-  ]
-    .map(readString)
-    .filter((value) => value.length >= 8);
-
-  for (const secret of secretValues) {
-    output = output.split(secret).join("[redacted]");
-  }
-
-  return output
-    .replace(/(token|secret|password|key)=([^\s]+)/gi, "$1=[redacted]")
-    .replace(/(Bearer\s+)[A-Za-z0-9._~+/=-]+/g, "$1[redacted]");
 }
 
 async function ensureStateDir(env = process.env) {
