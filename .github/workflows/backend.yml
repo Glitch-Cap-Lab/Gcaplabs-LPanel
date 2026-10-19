@@ -3,8 +3,8 @@ name: Backend
 # Typecheck and unit tests for backend-api, plus typecheck and node:test unit tests
 # for workers/provisioner (including its shared backend adapters).
 # One Linux job, about 1 minute (billed as 1 minute). Skipped for draft PRs; runs
-# when a draft is marked ready. The inference relay and the dashboard/marketing
-# unit tests live in full-ci.yml (label a PR "full-ci" or run it by hand).
+# when a draft is marked ready. The relay has its own path-filtered workflow;
+# dashboard/marketing unit tests live in full-ci.yml (label or manual only).
 # No Docker, E2E, or deploys.
 
 on:

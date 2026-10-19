@@ -41,9 +41,9 @@ This repository has no pre-push hook yet; run the checks by hand, or install the
 
 ## 4. Tests
 
-GitHub Actions are not the gate (private repositories are out of minutes; workflows run manually until 1 November). Run the tests and lint for exactly what you changed, and paste the result in the pull request.
+Run the tests and lint for exactly what you changed, and paste the result in the pull request. Backend, admin-dashboard and inference-relay workflows select relevant ready PR changes and run on each new head. Dashboard/marketing tests remain label/manual-only in `full-ci.yml`. A workflow definition is not a passing hosted check: verify the accepted head's result separately, including any runner or billing restriction.
 
-`cd backend-api && npx jest path/to/file` for API changes; `cd admin-dashboard && npm run test:helpers && npm run typecheck` for the admin screens (the Remote Hosts copy lives in `lib/remoteHostTranslations.ts` and every key must exist in every non-English locale); `cd frontend-marketing && npm test`; `npm run contributor:check` to run the checks for the subsystems you changed.
+`cd backend-api && npx jest path/to/file` for API changes; `cd admin-dashboard && npm run test:helpers && npm run typecheck` for the admin screens (the Remote Hosts copy lives in `lib/remoteHostTranslations.ts` and every key must exist in every non-English locale); `cd services/headmaster-inference && npm test` for the deterministic relay suite; `cd frontend-marketing && npm test`; `npm run contributor:check` to run the checks for the subsystems you changed.
 
 Re-read your own diff before you push. Ask what would make a reviewer or a test reject it.
 
