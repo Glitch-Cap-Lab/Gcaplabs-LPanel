@@ -19,10 +19,10 @@ function createProtectedReleaseStatusHandler({ db, getJob, acquireLock, loadBack
         || req.headers["content-length"] !== undefined || req.headers["transfer-encoding"] !== undefined
         || (req.body && Object.keys(req.body).length)) return res.status(400).json({code:"invalid_request"});
     const read = async () => (await db.query("SELECT * FROM agents WHERE id = $1",[req.params.id])).rows[0];
-    const visible = await read();
-    if (!visible || visible.user_id !== req.user.id) return res.status(404).json({code:"release_not_found"});
     let lock;
     try {
+      const visible = await read();
+      if (!visible || visible.user_id !== req.user.id) return res.status(404).json({code:"release_not_found"});
       lock = await acquireLock(visible.id,{applicationName:"headmaster-protected-release-status"});
       const row = await read();
       if (!row || row.user_id !== req.user.id) return res.status(404).json({code:"release_not_found"});
@@ -31,8 +31,9 @@ function createProtectedReleaseStatusHandler({ db, getJob, acquireLock, loadBack
       const backend = await loadBackend(row);
       const status = await readStatus({manifest:job.data?.protected_release?.manifest,adapter:new Adapter(backend),state:{read},job});
       return res.json(status);
-    } catch {
-      return res.status(409).json({code:"release_status_unconfirmed",publication_blocked:true});
+    } catch (error) {
+      const status=(typeof error?.code === "string" && error.code.startsWith("PROTECTED_RELEASE_")) || error?.statusCode===409 ? 409 : 503;
+      return res.status(status).json({code:"release_status_unconfirmed",publication_blocked:true});
     } finally { if (lock) await lock.release(); }
   };
 }
