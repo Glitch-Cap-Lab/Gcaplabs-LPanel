@@ -5173,11 +5173,7 @@ describe("POST /agents/:id/integrations/headmaster/adopt", () => {
       request(app)
         .post("/agents/a-adopt/integrations/headmaster/adopt")
         .send({
-          external_identity: {
-            namespace: "headmaster",
-            external_id: EXTERNAL_ID,
-            owner_uuid: OWNER_UUID,
-          },
+          external_identity: { namespace: "headmaster", external_id: EXTERNAL_ID, owner_uuid: OWNER_UUID },
         }),
     );
     expect(res.status).toBe(403);
@@ -5187,19 +5183,13 @@ describe("POST /agents/:id/integrations/headmaster/adopt", () => {
   it("refuses API-key callers", async () => {
     authorizeWorkspaceApiKey();
     mockDb.query.mockResolvedValue({
-      rows: [
-        { id: "a-adopt", user_id: "user-1", workspace_id: "workspace-a", external_namespace: null },
-      ],
+      rows: [{ id: "a-adopt", user_id: "user-1", workspace_id: "workspace-a", external_namespace: null }],
     });
     const res = await workspaceApiKeyAuth(
       request(app)
         .post("/agents/a-adopt/integrations/headmaster/adopt")
         .send({
-          external_identity: {
-            namespace: "headmaster",
-            external_id: EXTERNAL_ID,
-            owner_uuid: OWNER_UUID,
-          },
+          external_identity: { namespace: "headmaster", external_id: EXTERNAL_ID, owner_uuid: OWNER_UUID },
         }),
     );
     expect(res.status).toBe(403);
@@ -5230,11 +5220,7 @@ describe("POST /agents/:id/integrations/headmaster/adopt", () => {
       request(app)
         .post("/agents/a-adopt/integrations/headmaster/adopt")
         .send({
-          external_identity: {
-            namespace: "headmaster",
-            external_id: EXTERNAL_ID,
-            owner_uuid: OWNER_UUID,
-          },
+          external_identity: { namespace: "headmaster", external_id: EXTERNAL_ID, owner_uuid: OWNER_UUID },
         }),
     );
 
@@ -5293,11 +5279,7 @@ describe("POST /agents/:id/integrations/headmaster/adopt", () => {
       request(app)
         .post("/agents/a-adopt-2/integrations/headmaster/adopt")
         .send({
-          external_identity: {
-            namespace: "headmaster",
-            external_id: EXTERNAL_ID,
-            owner_uuid: OWNER_UUID,
-          },
+          external_identity: { namespace: "headmaster", external_id: EXTERNAL_ID, owner_uuid: OWNER_UUID },
         }),
     );
 
@@ -5365,11 +5347,7 @@ describe("POST /agents/:id/integrations/headmaster/adopt", () => {
       request(app)
         .post("/agents/not-mine/integrations/headmaster/adopt")
         .send({
-          external_identity: {
-            namespace: "headmaster",
-            external_id: EXTERNAL_ID,
-            owner_uuid: OWNER_UUID,
-          },
+          external_identity: { namespace: "headmaster", external_id: EXTERNAL_ID, owner_uuid: OWNER_UUID },
         }),
     );
 
@@ -5403,11 +5381,7 @@ describe("POST /agents/:id/integrations/headmaster/adopt", () => {
       request(app)
         .post("/agents/a-adopt-5/integrations/headmaster/adopt")
         .send({
-          external_identity: {
-            namespace: "headmaster",
-            external_id: EXTERNAL_ID,
-            owner_uuid: OWNER_UUID,
-          },
+          external_identity: { namespace: "headmaster", external_id: EXTERNAL_ID, owner_uuid: OWNER_UUID },
           memory: { provider: "hindsight", bank: "hermes-u-bank-5" },
         }),
     );
@@ -5436,11 +5410,7 @@ describe("POST /agents/:id/integrations/headmaster/adopt", () => {
       request(app)
         .post("/agents/a-adopt-6/integrations/headmaster/adopt")
         .send({
-          external_identity: {
-            namespace: "headmaster",
-            external_id: EXTERNAL_ID,
-            owner_uuid: OWNER_UUID,
-          },
+          external_identity: { namespace: "headmaster", external_id: EXTERNAL_ID, owner_uuid: OWNER_UUID },
           memory: { provider: "mem0" },
         }),
     );
@@ -5475,11 +5445,7 @@ describe("POST /agents/:id/integrations/headmaster/adopt", () => {
       request(app)
         .post("/agents/a-adopt-7/integrations/headmaster/adopt")
         .send({
-          external_identity: {
-            namespace: "headmaster",
-            external_id: EXTERNAL_ID,
-            owner_uuid: OWNER_UUID,
-          },
+          external_identity: { namespace: "headmaster", external_id: EXTERNAL_ID, owner_uuid: OWNER_UUID },
           memory: { provider: "hindsight", bank: "hermes-u-bank-7" },
         }),
     );
@@ -5521,11 +5487,7 @@ describe("POST /agents/:id/integrations/headmaster/adopt model stamp", () => {
       request(app)
         .post(`/agents/${id}/integrations/headmaster/adopt`)
         .send({
-          external_identity: {
-            namespace: "headmaster",
-            external_id: EXTERNAL_ID,
-            owner_uuid: OWNER_UUID,
-          },
+          external_identity: { namespace: "headmaster", external_id: EXTERNAL_ID, owner_uuid: OWNER_UUID },
         }),
     );
   }
@@ -5539,11 +5501,7 @@ describe("POST /agents/:id/integrations/headmaster/adopt model stamp", () => {
       request(app)
         .post("/agents/a-storage-1/integrations/headmaster/adopt")
         .send({
-          external_identity: {
-            namespace: "headmaster",
-            external_id: EXTERNAL_ID,
-            owner_uuid: OWNER_UUID,
-          },
+          external_identity: { namespace: "headmaster", external_id: EXTERNAL_ID, owner_uuid: OWNER_UUID },
           storage: { allocation_bytes: 999 },
           disk_gb: 999,
           headmaster: { storage: { allocation_bytes: 999 } },
@@ -8374,10 +8332,7 @@ describe("POST /agents/:id/memory bot_screen", () => {
     );
     expect(res.status).toBe(200);
     expect(cm.setMemory).toHaveBeenCalledTimes(1);
-    expect(cm.setBotScreenGate).toHaveBeenCalledWith(
-      expect.objectContaining({ id: "a-mem" }),
-      true,
-    );
+    expect(cm.setBotScreenGate).toHaveBeenCalledWith(expect.objectContaining({ id: "a-mem" }), true);
     expect(cm.setMemory.mock.invocationCallOrder[0]).toBeLessThan(
       cm.setBotScreenGate.mock.invocationCallOrder[0],
     );
