@@ -50,7 +50,7 @@ function envFingerprint(env) {
   return digest([...env].sort());
 }
 
-function assertAgent(m, row, { candidateId = null, allowQueued = true } = {}) {
+function assertAgent(m, row, { candidateId = null, allowQueued = true, allowRefused = false } = {}) {
   const t = m.targets[0];
   if (!row || row.id !== t.agent_id || row.user_id !== t.owner_id
       || row.external_namespace !== "headmaster" || row.external_owner_uuid !== t.account_id || row.external_id !== t.workspace_id
@@ -58,7 +58,7 @@ function assertAgent(m, row, { candidateId = null, allowQueued = true } = {}) {
   const expected = candidateId ? { ...t.runtime, container_id: candidateId } : t.runtime;
   if (Object.entries(expected).some(([key, value]) => row[key] !== value)
       || row.image !== (candidateId ? m.image.binding : t.image_binding)
-      || !(allowQueued ? [candidateId ? "running" : t.status, "queued", "deploying"] : [t.status]).includes(row.status)) {
+      || !(allowQueued ? [candidateId ? "running" : t.status, "queued", "deploying", ...(allowRefused && !candidateId ? ["error"] : [])] : [t.status]).includes(row.status)) {
     throw refuse("PROTECTED_RELEASE_BINDING_CHANGED");
   }
 }

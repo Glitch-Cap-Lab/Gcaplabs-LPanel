@@ -41,6 +41,7 @@ async function acquireAgentProvisionLock(
   {
     applicationName = "nora-backend-agent-provision-lock",
     timeoutMs = normalizeLockTimeoutMs(process.env.AGENT_PROVISION_LOCK_TIMEOUT_MS),
+    signal = null,
   } = {},
 ) {
   if (agentId == null || String(agentId).trim() === "") {
@@ -50,6 +51,23 @@ async function acquireAgentProvisionLock(
   const client = createAgentProvisionLockClient(applicationName);
   const lockKey = advisoryLockKeyForAgent(agentId).toString();
   const deadline = Date.now() + normalizeLockTimeoutMs(timeoutMs);
+  if (signal) {
+    // Protected command only: the mutation queries use the same cancellable session as its lock.
+    return require(require("fs").existsSync(require("path").join(__dirname, "../workers/provisioner/deploymentLifecycle.ts"))
+      ? "../workers/provisioner/deploymentLifecycle" : "./protected-release/deploymentLifecycle").acquireDedicatedSessionLock({
+      createClient: () => client, signal, maxHoldMs: 1200000,
+      acquire: async session => {
+        while (true) {
+          signal.throwIfAborted();
+          const result = await session.query("SELECT pg_try_advisory_lock($1) AS locked", [lockKey]);
+          if (result.rows[0]?.locked) return result;
+          if (Date.now() >= deadline) throw Object.assign(new Error("Provision lock unavailable"), { code: "AGENT_PROVISION_LOCK_TIMEOUT" });
+          await require("node:timers/promises").setTimeout(100, undefined, { signal });
+        }
+      },
+      release: session => session.query("SELECT pg_advisory_unlock($1)", [lockKey]),
+    });
+  }
   let connected = false;
   try {
     await client.connect();
@@ -184,7 +202,7 @@ function replacementTupleFromJob(jobData = {}) {
 }
 
 function assertReplacementJobMatchesAgent(agent, jobData = {}) {
-  if (jobData.replace_existing_runtime !== true) {
+  if (jobData.replace_existing_runtime !== true && !(jobData.protected_release && jobData.replace_existing_runtime === false)) {
     const error = new Error("Replacement deployment marker is required");
     error.code = "AGENT_REPLACEMENT_MARKER_MISSING";
     error.statusCode = 409;

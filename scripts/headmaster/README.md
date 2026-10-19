@@ -46,6 +46,42 @@ than applying again. `--recover` is explicit, validates owner/current identity
 before enqueue, and creates a separate recovery job for the same immutable
 operation. It never replays the candidate's application execution.
 
+Roll out the protected consumer before activating this command: drain/upgrade
+older deployment workers and inspect existing queued work before operator use.
+Protected jobs deliberately carry `replace_existing_runtime: false`; they never
+grant an old generic worker permission to destroy a retained runtime. The typed
+new worker separately validates the exact prior runtime tuple. A pinned main
+worker receiving such a job refuses it before destroy/create and may leave the
+agent in `error`. Status reports this exact original job as
+`failed_before_receipt`, with publication blocked. Explicit `--recover` checks
+the immutable owner/runtime and fresh Docker state before enqueueing a recovery
+that resumes the exact old runtime; it does not apply the candidate again.
+
+Protected operations have a 15-minute total budget, shortened to leave two
+minutes before the existing agent lock's hold deadline. A shorter configured
+lease refuses the operation when that margin is unavailable. Docker RPCs and
+exec probes have 60-second bounds; archive transfer/parsing has a 15-minute
+bound also limited by the total budget. Cancellation aborts actual HTTP requests,
+destroys tar/exec/upload streams, and prevents further mutations. Lock loss
+aborts the operation; LP CAS and finalization use the same PostgreSQL session
+that owns the agent lock. It captures the actual owned `pg.Query` and sends the
+pinned client's PostgreSQL CancelRequest using that session's private PID/secret
+before closing the original socket. The auxiliary cancel socket is bounded to
+five seconds, uses no administrator SQL/role grant and never logs session secrets.
+Socket close alone is insufficient to stop a PostgreSQL statement. Cancellation
+cannot undo a statement that committed before it arrived; an uncertain result
+always requires fresh inspection/recovery. Private helper stop has a separate
+maximum five-second cleanup bound.
+An uncertain Docker mutation or journal ACK requires fresh explicit recovery,
+without automatic old start or a second candidate create.
+
+Queue journalling and the operator command reuse the existing BullMQ backend,
+queue and Lua/key contracts through operation-owned duplicate connections.
+Deadline cancellation disconnects only those sockets, with reconnect/offline
+queueing disabled; shared worker connections are never disconnected. Real Redis
+transport behavior remains unqualified here because the local fixture environment
+has no existing Redis server; no installation or shared instance was used.
+
 ## Immutable input
 
 The closed manifest format is `headmaster-protected-runtime-release/v1`.
@@ -99,6 +135,11 @@ A `repo@sha256:...` reference additionally requires that exact locally available
 RepoDigest. Tags and config IDs establish local resolution only. No pull, remote
 registry verification or binding-format conversion occurs. LP and account state
 persist the approved binding string verbatim; rollback restores the old string.
+
+The binding check runs through the same guarded Docker call path as every other
+probe, so the operation deadline, lock-loss abort and cancellation apply to it.
+The backend image ships `deploymentLifecycle.ts` beside the status modules so the
+status route's cancellable held-session lock loads from `/app/protected-release`.
 
 ## Safety and recovery
 
@@ -207,7 +248,7 @@ host-power-loss durability still require separate qualification.
 
 ```sh
 cd workers/provisioner
-node --import ./node_modules/tsx/dist/loader.mjs --test protectedRelease.test.js deploymentLifecycle.test.js
+node --import ./node_modules/tsx/dist/loader.mjs --test protectedRelease.test.js protectedReleaseTransport.test.js deploymentLifecycle.test.js
 npm run typecheck
 cd ../../backend-api
 npx jest __tests__/agentProvisionLock.test.ts __tests__/provisionerProviderSelection.test.ts --runInBand --forceExit
@@ -224,6 +265,32 @@ publication. Windows archive ownership is
 modelled, not an actual Linux UID proof. Real Docker, image packaging, s6 init,
 native/client readiness, admission drain, account binding finalization, full
 fleet publication and live rollback remain separate acceptance gates.
+
+The transport fixture additionally uses the actual pinned Dockerode/docker-modem
+against a synthetic loopback HTTP server, proving stalled inspect/create/exec,
+partial tar read and backpressured upload sockets close on cancellation. It opens
+no Docker socket and creates no runtime. The mixed-worker check loads the whole
+worker source from main commit `b022f0c66e253a4727e0944aa45504164b2eb747` under
+the existing Jest service mocks; this Git object must be available locally.
+
+For substantive PostgreSQL cancellation proof, the optional maintained fixture
+requires an already-installed PostgreSQL 17 and explicit **new** absolute cluster
+directory, unprivileged localhost port, and mode. It never reads the application's
+database configuration. Each invocation creates only its new synthetic cluster,
+checks transaction rollback or delayed autocommit cancellation, lock reacquisition
+and post-abort refusal, then verifies its private ownership marker and server
+`data_directory` before stopping that exact cluster. Data/logs are retained.
+Run from `workers/provisioner`, choosing fresh paths and unused ports:
+
+```sh
+node --import ./node_modules/tsx/dist/loader.mjs protectedReleasePostgres.fixture.mjs --cluster=C:/task-only/new-pg-transaction --port=55946 --mode=transaction
+node --import ./node_modules/tsx/dist/loader.mjs protectedReleasePostgres.fixture.mjs --cluster=C:/task-only/new-pg-autocommit --port=55947 --mode=autocommit
+```
+
+`--bin=ABSOLUTE_PATH` can select an existing PostgreSQL binary directory; the
+Windows default is `C:/Program Files/PostgreSQL/17/bin`. Nothing is installed.
+This fixture proves cancellation before a delayed write, not rollback of an
+already-committed statement or production proxy/TLS behavior.
 
 For the fixed filesystem programs themselves, the optional local POSIX fixture
 uses the exact exported production program strings. On Linux with local root

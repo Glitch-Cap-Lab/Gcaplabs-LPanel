@@ -247,12 +247,13 @@ async function acquireAgentProvisionLock(agentId) {
   });
 }
 
-async function withProviderMutationLock(userId, operation) {
+async function withProviderMutationLock(userId, operation, { signal = null } = {}) {
   if (!userId || typeof operation !== "function") {
     throw new Error("userId and operation are required for the provider mutation lock");
   }
   const lockKey = providerMutationLockKey(userId);
   const lock = await acquireDedicatedSessionLock({
+    signal,
     createClient: () => createProvisionerLockClient("provider-mutation-lock"),
     acquire: async (client) => {
       try {
@@ -279,7 +280,7 @@ async function withProviderMutationLock(userId, operation) {
       ),
   });
   try {
-    return await operation();
+    return await operation(lock);
   } finally {
     await lock.release();
   }
@@ -4466,7 +4467,7 @@ const worker = new Worker(
       // Branch before generic replacement destroys the old runtime. Existing jobs stay unchanged.
       if (job.data.protected_release) {
         try {
-          return await runProtectedReleaseJob(job, { db, agentRow, loadBackend, withProviderMutationLock });
+          return await runProtectedReleaseJob(job, { db, agentRow, loadBackend, withProviderMutationLock, provisionLock });
         } catch {
           throw new UnrecoverableError("Protected runtime release requires receipt review or explicit recovery");
         }

@@ -24,14 +24,19 @@ function archivePath(raw) {
 }
 
 /** Validate a real tar stream before any upload. Bounded snapshot payload is retained by the caller. */
-async function readArchive(input, root, { maxBytes = 16 * 1024 * 1024, maxEntries = 200000, spoolDirectory = null, hashOnly = false } = {}) {
+async function readArchive(input, root, { maxBytes = 16 * 1024 * 1024, maxEntries = 200000, spoolDirectory = null, hashOnly = false, signal = null } = {}) {
   const extract = tar.extract(), entries = [], seen = new Set();
+  const source = Buffer.isBuffer(input) ? Readable.from(input) : input, tasks = new Set();
+  const check = () => signal?.throwIfAborted(); check();
+  const abort = () => { const error = signal.reason || bad(); source.destroy(error); extract.destroy(error); };
+  signal?.addEventListener("abort", abort, { once: true });
   let total = 0;
   const done = new Promise((resolve, reject) => {
     extract.on("error", reject); extract.on("finish", resolve);
-    extract.on("entry", async (header, stream, next) => {
+    extract.on("entry", (header, stream, next) => { const task = (async () => {
       const chunks = []; let handle;
       try {
+        check();
         const name = archivePath(header.name);
         if ((name !== root && !name.startsWith(root + "/")) || seen.has(name) || entries.length >= maxEntries
             || !["file", "directory", "symlink", "link"].includes(header.type) || (header.mode & 0o7000)) throw bad();
@@ -45,20 +50,23 @@ async function readArchive(input, root, { maxBytes = 16 * 1024 * 1024, maxEntrie
           handle = await fsp.open(entry.contentPath, "wx", 0o600);
         }
         for await (const chunk of stream) {
+          check();
           total += chunk.length;
           if (total > maxBytes) throw bad();
           entry.bytes += chunk.length; digest.update(chunk);
-          if (handle) await handle.writeFile(chunk); else if (!hashOnly) chunks.push(Buffer.from(chunk));
+          if (handle) { await handle.writeFile(chunk); check(); } else if (!hashOnly) chunks.push(Buffer.from(chunk));
         }
         if (entry.bytes !== (header.type === "file" ? header.size : 0)) throw bad();
         if (handle) { await handle.sync(); await handle.close(); handle = null; }
         else if (!hashOnly) entry.content = Buffer.concat(chunks);
         entry.sha256 = digest.digest("hex"); next();
       } catch (error) { if (handle) await handle.close().catch(() => {}); stream.resume(); extract.destroy(error); }
-    });
+    })(); tasks.add(task); task.then(() => tasks.delete(task), () => tasks.delete(task)); });
   });
-  (Buffer.isBuffer(input) ? Readable.from(input) : input).on("error", error => extract.destroy(error)).pipe(extract);
-  await done;
+  source.on("error", error => extract.destroy(error)).pipe(extract);
+  try { await done; check(); }
+  catch (error) { source.destroy(); extract.destroy(); await Promise.allSettled([...tasks]); throw error; }
+  finally { signal?.removeEventListener("abort", abort); }
   const byName = new Map(entries.map(entry => [entry.name, entry]));
   for (const entry of entries) {
     for (let parent = path.posix.dirname(entry.name); parent !== "."; parent = path.posix.dirname(parent)) {
@@ -86,24 +94,28 @@ async function readArchive(input, root, { maxBytes = 16 * 1024 * 1024, maxEntrie
   return entries;
 }
 
-function packStream(entries, { prefix = "", uid = 10000, gid = 10000, preserveOwnership = false } = {}) {
+function packStream(entries, { prefix = "", uid = 10000, gid = 10000, preserveOwnership = false, signal = null } = {}) {
   const pack = tar.pack();
+  const abort = () => pack.destroy(signal.reason || bad());
+  signal?.addEventListener("abort", abort, { once: true });
   (async () => {
+    signal?.throwIfAborted();
     if (prefix) {
       const parts = prefix.split("/");
-      for (let i = 1; i <= parts.length; i++) await new Promise((resolve, reject) => pack.entry({ name: parts.slice(0, i).join("/"), type: "directory", uid: 0, gid: 0, mode: 0o700 }, error => error ? reject(error) : resolve()));
+      for (let i = 1; i <= parts.length; i++) await new Promise((resolve, reject) => pack.entry({ name: parts.slice(0, i).join("/"), type: "directory", uid: 0, gid: 0, mode: 0o700 }, error => error ? reject(error) : resolve()).on("error", reject));
     }
     for (const entry of entries) {
+      signal?.throwIfAborted();
       const name = prefix ? `${prefix}/${entry.name}` : entry.name;
       const linkname = entry.type === "link" && prefix ? `${prefix}/${entry.linkname}` : entry.linkname;
       const header = { name, linkname, type: entry.type, mode: entry.mode, uid: preserveOwnership ? entry.uid ?? uid : uid, gid: preserveOwnership ? entry.gid ?? gid : gid,
         size: entry.type === "file" ? (entry.bytes ?? entry.content.length) : 0 };
       if (entry.contentPath) {
-        await pipeline(fs.createReadStream(entry.contentPath), pack.entry(header));
-      } else await new Promise((resolve, reject) => pack.entry(header, entry.type === "file" ? entry.content : undefined, error => error ? reject(error) : resolve()));
+        await pipeline(fs.createReadStream(entry.contentPath), pack.entry(header), { signal: signal || undefined });
+      } else await new Promise((resolve, reject) => pack.entry(header, entry.type === "file" ? entry.content : undefined, error => error ? reject(error) : resolve()).on("error", reject));
     }
     pack.finalize();
-  })().catch(error => pack.destroy(error));
+  })().catch(error => pack.destroy(error)).finally(() => signal?.removeEventListener("abort", abort));
   return pack;
 }
 

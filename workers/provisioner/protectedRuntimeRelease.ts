@@ -30,7 +30,7 @@ async function runProtectedRuntimeRelease({ manifest: input, action = "apply", a
   if (action === "recover") {
     if (r.previous_status !== target.status) throw refuse("PROTECTED_RELEASE_RECEIPT_MISMATCH");
     if (onDisk?.phase === "rolled_back") { assertAgent(manifest, row); await state.rollback(manifest, null, onDisk.previous_status, onDisk); return onDisk; }
-    if (!r.previous_status || (!r.staged && (retained || !["validated", "stopped", "restored"].includes(r.phase)))) throw refuse("PROTECTED_RELEASE_RECOVERY_UNAVAILABLE");
+    if (!r.previous_status || (!r.staged && (retained || !["validated", "stopped", "restored", "recovery_required"].includes(r.phase)))) throw refuse("PROTECTED_RELEASE_RECOVERY_UNAVAILABLE");
     if (r.staged && (!onDisk || (!retained && !r.restored_before_old_start))) throw refuse("PROTECTED_RELEASE_RECOVERY_UNAVAILABLE");
   } else {
     assertAgent(manifest, row);
@@ -113,6 +113,12 @@ async function runProtectedRuntimeRelease({ manifest: input, action = "apply", a
     await record("external_metadata_pending", { lp_committed: true, lp_routing_tuple_preserved: true, external_binding_unchanged: null });
     return r;
   } catch (error) {
+    if (adapter.signal?.aborted || ["PROTECTED_RELEASE_DOCKER_TIMEOUT", "PROTECTED_RELEASE_JOURNAL_UNCERTAIN", "ABORT_ERR", "ECONNRESET", "EPIPE", "ETIMEDOUT"].includes(error?.code)) {
+      // A timed-out mutation may have reached Docker. Keep the old runtime stopped;
+      // only a later explicit recovery may inspect the authoritative result.
+      try { await record("recovery_required", { transport_uncertain: true, lp_committed: false }); } catch { /* last completed canonical boundary remains authoritative */ }
+      throw refuse("PROTECTED_RELEASE_RECOVERY_REQUIRED");
+    }
     // Extraction failure is before rename/create: old container can safely resume without a restore.
     if (stopped && !r.staged) {
       await recover();

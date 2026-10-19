@@ -92,6 +92,10 @@ test('shipped /app layout loads exact shared source with directly locked product
   const pkg=backendRequire('./package.json'),lock=backendRequire('./package-lock.json');
   for(const name of ['tar-stream','tsx']){assert.ok(pkg.dependencies[name]);assert.notEqual(lock.packages[`node_modules/${name}`].dev,true);}
   await fs.symlink(path.dirname(path.dirname(backendRequire.resolve('tar-stream'))),path.join(app,'node_modules'),process.platform==='win32'?'junction':'dir');
+  // The status route's cancellable held-session lock must also load from the shipped layout.
+  await fs.copyFile(path.join(__dirname,'deploymentLifecycle.ts'),path.join(shared,'deploymentLifecycle.ts'));
+  await fs.mkdir(path.join(app,'lib'));await fs.copyFile(path.resolve(__dirname,'../../backend-api/lib/advisoryLocks.ts'),path.join(app,'lib/advisoryLocks.ts'));
+  assert.equal(typeof require(path.join(shared,'deploymentLifecycle.ts')).acquireDedicatedSessionLock,'function');
   const packaged=require(path.join(app,'protectedReleaseStatusRoute.ts'));
   const read=packaged.loadShared('protectedReleaseStatus').readProtectedReleaseStatus;
   const Adapter=packaged.loadShared('protectedReleaseDocker').ProtectedReleaseDocker;
