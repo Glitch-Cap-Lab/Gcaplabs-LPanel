@@ -8,7 +8,8 @@ async function readProtectedReleaseStatus({ manifest: input, adapter, state, job
       || digest(job.data.protected_release.manifest) !== releaseId
       || String(job.data.id) !== target.agent_id)) throw refuse("PROTECTED_RELEASE_JOB_INVALID");
   const row = await state.read();
-  assertAgent(manifest, row, { candidateId: row?.image === manifest.image.id ? row.container_id : null });
+  assertAgent(manifest, row, { candidateId: row?.image === manifest.image.binding ? row.container_id : null });
+  await adapter.verifyImageBinding(manifest);
   const names = { old: `${target.container_name}-release-${releaseId.slice(0, 16)}`, stage: `.protected-release-${releaseId}` };
   await adapter.retained(target, names);
   const receipt = await adapter.readReceipt(target, names) || job?.data?.protected_release?.receipt || null;

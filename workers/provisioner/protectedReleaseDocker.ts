@@ -89,6 +89,7 @@ class ProtectedReleaseDocker {
     return { retained: project(old), candidate: candidate ? project(candidate) : null };
   }
   async verifyCandidate(c, m, id) {
+    await this.verifyImageBinding(m);
     const t = m.targets[0];
     const old = await this.docker.getContainer(t.container_id).inspect();
     const expected = new Map(old.Config.Env.map(item => { const p = item.indexOf("="); return [item.slice(0, p), item.slice(p + 1)]; }));
@@ -113,6 +114,7 @@ class ProtectedReleaseDocker {
     return Buffer.concat(chunks).toString("utf8").trim();
   }
   async preflight(m, row, { dryRun }) {
+    await this.verifyImageBinding(m);
     const t = m.targets[0], old = await this.docker.getContainer(t.container_id).inspect();
     const image = await this.docker.getImage(m.image.id).inspect(); // locally present exact ID only, never pull
     if (image.Id !== m.image.id || old.Id !== t.container_id || old.Image !== t.image_id || old.Name !== `/${t.container_name}`
@@ -132,6 +134,13 @@ class ProtectedReleaseDocker {
     // Application commands run as the bot user; archive work itself uses Node/tar-stream.
     await this.exec(this.docker.getContainer(t.container_id), ["/opt/hermes/.venv/bin/python", "-c", "from gateway.drain_control import write_drain_request; print('ready')"]);
     await this.assertNoWriters(t.volume, t.container_id);
+  }
+  // Binding strings are metadata references. Docker's Id is a distinct local
+  // config/content identity; no pull or published-registry claim is made here.
+  async verifyImageBinding(m) {
+    const image = await this.docker.getImage(m.image.binding).inspect();
+    if (image.Id !== m.image.id || (m.image.binding.includes("@sha256:") && !(image.RepoDigests || []).includes(m.image.binding))) throw refuse("PROTECTED_RELEASE_IMAGE_BINDING_CHANGED");
+    return { binding: m.image.binding, local_image_id: image.Id, kind: m.image.binding.includes("@sha256:") ? "local_repo_digest" : "local_reference" };
   }
   async drain(t) {
     await this.exec(this.docker.getContainer(t.container_id), ["/opt/hermes/.venv/bin/python", "-c", "from gateway.drain_control import write_drain_request; write_drain_request(principal='protected-runtime-release', suppress_notification=True)"]);

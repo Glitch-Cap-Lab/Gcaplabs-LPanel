@@ -37,8 +37,8 @@ async function fixture(t, options = {}) {
   const runtime = { container_id: "old", container_name: "hm-owned", host: "hm-owned", backend_type: "docker", runtime_family: "hermes", deploy_target: "docker", execution_target_id: "docker", sandbox_profile: "standard" };
   const env = [`HEADMASTER_OWNER_ID=${uuid(3)}`, `HEADMASTER_WORKSPACE_ID=${uuid(4)}`, "API_SERVER_KEY=synthetic-private-value"];
   const manifest = { format: "headmaster-protected-runtime-release/v1", sources: { core: "a".repeat(40), webapp: "b".repeat(40), lpanel: "c".repeat(40) },
-    image: { id: image(2), uid: 10000, gid: 10000, contract_sha256: sha(contract), dependency_sha256: sha(lock) },
-    targets: [{ agent_id: uuid(1), owner_id: uuid(2), account_id: uuid(3), workspace_id: uuid(4), container_id: "old", container_name: "hm-owned", image_id: image(1), image_binding: "old-tag", env_sha256: envFingerprint(env), volume: "owned-volume", runtime, status: "running" }], env_delta: { set: {} } };
+    image: { id: image(2), binding: "approved-tag", uid: 10000, gid: 10000, contract_sha256: sha(contract), dependency_sha256: sha(lock) },
+    targets: [{ agent_id: uuid(1), owner_id: uuid(2), account_id: uuid(3), workspace_id: uuid(4), container_id: "old", container_name: "hm-owned", image_id: image(1), image_binding: "old-tag", site_binding:{image_binding:"old-tag",deployment_generation:7,authorization_revision:1,revocation_generation:0}, env_sha256: envFingerprint(env), volume: "owned-volume", runtime, status: "running" }], env_delta: { set: {} } };
   let row = saved?.row || { id: uuid(1), user_id: uuid(2), external_namespace: "headmaster", external_owner_uuid: uuid(3), external_id: uuid(4), headmaster_owner_id: uuid(3), headmaster_workspace_id: uuid(4), ...runtime, status: "queued", image: "old-tag" };
   const persist = () => require("node:fs").writeFileSync(path.join(root, ".fake-docker.json"), JSON.stringify({ row, events, lastReceipt, containers: [...containers], metadata: [...metadata] }));
   const old = { Id: "old", Name: "/hm-owned", Image: image(1), State: { Running: true }, Config: { Env: env, Image: "old-tag", Labels: { "nora.agent.id": uuid(1) } },
@@ -61,7 +61,7 @@ async function fixture(t, options = {}) {
   }
   const docker = {
     modem: { demuxStream(raw, stdout) { raw.on("data", x => stdout.write(x)); } },
-    getImage(id) { return { async inspect() { return { Id: id, Config: { Env: ["PYTHONPATH=/opt/data", "LD_PRELOAD=/opt/data/private.so", "LD_AUDIT=/opt/data/audit.so"], Healthcheck: { Test: ["CMD-SHELL", "unsafe-image-default"] }, Labels: { "org.opencontainers.image.revision": manifest.sources.core, "com.gcaplabs.webapp.revision": manifest.sources.webapp } } }; } }; },
+    getImage(id) { return { async inspect() { return { Id: id === manifest.image.binding ? manifest.image.id : id, RepoDigests: [], Config: { Env: ["PYTHONPATH=/opt/data", "LD_PRELOAD=/opt/data/private.so", "LD_AUDIT=/opt/data/audit.so"], Healthcheck: { Test: ["CMD-SHELL", "unsafe-image-default"] }, Labels: { "org.opencontainers.image.revision": manifest.sources.core, "com.gcaplabs.webapp.revision": manifest.sources.webapp } } }; } }; },
     async listContainers(options = {}) { return [...containers.values()].filter(c => options.all || c.State.Running).filter(c => !options.filters || (c.Config.Labels?.["headmaster.release.id"] === digest(manifest))).map(c => ({ Id: c.Id })); },
     getContainer(name) {
       const get = () => { const c = resolve(name); if (!c) throw missing(); return c; };
@@ -162,7 +162,7 @@ async function fixture(t, options = {}) {
     },
   };
   const state = { async read() { return clone(row); }, async assertRecoverable() { if (faults.binding) throw new Error("changed"); },
-    async commit(m, id) { events.push("commit"); row.container_id = id; row.image = m.image.id; row.status = "running"; persist(); if (faults.commit) throw new Error("database outage after CAS"); },
+    async commit(m, id) { events.push("commit"); row.container_id = id; row.image = m.image.binding; row.status = "running"; persist(); if (faults.commit) throw new Error("database outage after CAS"); },
     async rollback() { events.push("rollback-row"); row = { ...row, ...runtime, image: "old-tag", status: "running" }; persist(); } };
   const backend = { docker, _containerUserOwnership: async container => ({ uid: faults.uid || (faults.candidateUid && (await container.inspect()).Id === "candidate") ? 10001 : 10000, gid: 10000 }) };
   const adapter = new ProtectedReleaseDocker(backend, { stagingRoot: path.join(root, ".worker-tmp"), checkReadiness: async () => { if (faults.health) throw new Error("health failed"); return { ok: true }; } });
@@ -259,7 +259,7 @@ test("real worker preflight rejection compensates exact queued state without run
 
 test("maintained recovery command rejects wrong external owner before enqueue or DB mutation", async t => {
   const f = await fixture(t); f.manifest.targets[0].account_id = uuid(9); let enqueued = 0;
-  const db = database(f), deps = { db, readFile: async () => JSON.stringify(f.manifest), acquireLock: async () => ({ release: async () => {} }),
+  const db = database(f), deps = { owner:{status:async()=>({release_id:digest(f.manifest),phase:"prepared",metadata_finalized:false})},db, readFile: async () => JSON.stringify(f.manifest), acquireLock: async () => ({ release: async () => {} }),
     loadBackend: async () => f.backend, enqueue: async () => { enqueued++; }, getJob: async () => null };
   await assert.rejects(command(["--manifest", "local.json", "--recover"], deps), /OWNER_CHANGED/);
   assert.equal(enqueued, 0); assert.ok(db.queries.every(x => x.sql.startsWith("SELECT")));
@@ -388,7 +388,7 @@ test("maintained command validates dry run and enqueues one explicit protected j
   const f = await fixture(t); const row = f.row(); row.status = "running";
   const { buildReplacementDeploymentJob } = require("../../backend-api/agentProvisionLock");
   let queued;
-  const deps = { readFile: async () => JSON.stringify(f.manifest), db: { query: async () => ({ rows: [row] }) }, acquireLock: async () => ({ release: async () => {} }),
+  const deps = { owner:{prepare:async()=>({release_id:digest(f.manifest),phase:"prepared",metadata_finalized:false}),finalize:async()=>({release_id:digest(f.manifest),phase:"binding_pending",metadata_finalized:false})},readFile: async () => JSON.stringify(f.manifest), db: { query: async () => ({ rows: [row] }) }, acquireLock: async () => ({ release: async () => {} }),
     loadBackend: async () => f.backend, buildReplacementDeploymentJob,
     enqueue: async (agent, data, options) => { queued = data; return options.addDeploymentJob(data); }, addJob: async () => ({ id: "existing-queue-job" }), cancelJobs: async () => ({ active: 0 }) };
   assert.equal((await command(["--manifest", "local.json", "--dry-run"], deps)).phase, "dry_run");
@@ -420,3 +420,4 @@ for (const boundary of ["stop", "stage", "create", "restore", "restoreName", "ol
   assert.deepEqual(await fs.readdir(path.join(root, ".worker-tmp")), []);
 });
 }
+
