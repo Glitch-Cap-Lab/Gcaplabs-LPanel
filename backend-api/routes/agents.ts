@@ -2128,8 +2128,14 @@ router.post("/activate-demo", requireSession, async (req, res) => {
 });
 
 router.post("/deploy", async (req, res) => {
+  let managedIdentityLock = null;
+  let managedAgentLock = null;
   try {
     const requestBody = req.body || {};
+    if ((requestBody.external_identity?.namespace === "headmaster" || requestBody.headmaster_integration_config) &&
+        (req.apiKey || req.user?.role !== "admin")) {
+      return res.status(403).json({ error: "Managed runtime deployment requires an admin login session", code: "session_required" });
+    }
     const clawhubSkills = normalizeClawhubSkills(requestBody.clawhub_skills);
     const requestedHermesSkills = normalizeHermesSkills(requestBody.hermes_skills);
     let migrationDraft = null;
@@ -2176,6 +2182,19 @@ router.post("/deploy", async (req, res) => {
     if (!requireSessionForRemoteDockerPlacement(req, res, runtimeFields)) return;
     // Enforce billing only after authorization has rejected session-only
     // Remote Docker placement for workspace API keys.
+    const headmaster = require("../headmasterConfig").deploymentConfig(requestBody, runtimeFields.runtime_family);
+    if (headmaster) {
+      const { identityLockKey, findReusableManagedAgent, conflict } = require("../headmasterIdentityLock");
+      const identity = { namespace: "headmaster", ownerUuid: headmaster[0], externalId: headmaster[1] };
+      managedIdentityLock = await acquireAgentProvisionLock(identityLockKey(identity), { applicationName: "headmaster-managed-identity" });
+      const existing = await findReusableManagedAgent(db, identity, { userId: req.user.id, config: headmaster, runtimeFields });
+      if (existing) {
+        managedAgentLock = await acquireAgentProvisionLock(existing.id, { applicationName: "headmaster-managed-reuse" });
+        const current = await findReusableManagedAgent(db, identity, { userId: req.user.id, config: headmaster, runtimeFields });
+        if (!current || current.id !== existing.id) throw conflict();
+        return res.json({ ...serializeAgent(current), reused: true, identity_proof: "immutable_owner_workspace" });
+      }
+    }
     const limits = await billing.enforceLimits(req.user.id);
     if (!limits.allowed)
       return res.status(402).json({ error: limits.error, subscription: limits.subscription });
@@ -2247,10 +2266,6 @@ router.post("/deploy", async (req, res) => {
             }),
     );
 
-    const headmaster = require("../headmasterConfig").deploymentConfig(
-      requestBody,
-      runtimeFields.runtime_family,
-    );
     const result = await insertAgentForRequest(
       req,
       `INSERT INTO agents(
@@ -2357,6 +2372,9 @@ router.post("/deploy", async (req, res) => {
     res.json(serializeAgent(agent));
   } catch (e) {
     res.status(e.statusCode || 500).json({ error: e.message });
+  } finally {
+    try { if (managedAgentLock) await managedAgentLock.release(); }
+    finally { if (managedIdentityLock) await managedIdentityLock.release(); }
   }
 });
 
