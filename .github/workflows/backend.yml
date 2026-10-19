@@ -30,6 +30,20 @@ jobs:
     if: github.event_name != 'pull_request' || github.event.pull_request.draft == false
     runs-on: ubuntu-latest
     timeout-minutes: 10
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: nora_test
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
     steps:
       - uses: actions/checkout@v4
         with:
@@ -49,7 +63,22 @@ jobs:
         working-directory: backend-api
       - run: npx jest --forceExit
         working-directory: backend-api
+        env:
+          # Enables __tests__/migrationPostgres.test.ts (skipped when unset; fails if unreachable).
+          TEST_POSTGRES_URL: postgres://postgres:postgres@127.0.0.1:5432/nora_test
       - run: npm run typecheck
         working-directory: workers/provisioner
       - run: npm test
         working-directory: workers/provisioner
+      # Real-PostgreSQL cancellation proof. Assumes ubuntu-latest ships PostgreSQL 16
+      # binaries at /usr/lib/postgresql/16/bin; the fixture creates its own new cluster.
+      - name: protected release PostgreSQL fixture
+        working-directory: workers/provisioner
+        run: |
+          set -eu
+          for mode in transaction autocommit; do
+            port=$([ "$mode" = transaction ] && echo 55946 || echo 55947)
+            node --import ./node_modules/tsx/dist/loader.mjs protectedReleasePostgres.fixture.mjs \
+              --cluster="$RUNNER_TEMP/pg-$mode" --port=$port --mode=$mode \
+              --bin=/usr/lib/postgresql/16/bin
+          done

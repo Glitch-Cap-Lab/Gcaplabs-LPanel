@@ -19,8 +19,15 @@ describeWithPostgres("PostgreSQL legacy migration gate", () => {
 
   beforeAll(async () => {
     schemaName = `nora_migration_${process.pid}_${Date.now()}`;
-    adminClient = new Client({ connectionString: TEST_POSTGRES_URL });
-    await adminClient.connect();
+    adminClient = new Client({ connectionString: TEST_POSTGRES_URL, connectionTimeoutMillis: 10_000 });
+    try {
+      await adminClient.connect();
+    } catch (error) {
+      // TEST_POSTGRES_URL is set, so this suite must run. Fail loudly rather than skip.
+      throw new Error(
+        `TEST_POSTGRES_URL is set but PostgreSQL is unreachable: ${error && error.message}`,
+      );
+    }
     adminConnected = true;
     await adminClient.query(`CREATE SCHEMA ${schemaName}`);
 
