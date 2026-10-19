@@ -151,7 +151,7 @@ function createDeletionClient({ env = process.env, fetchImpl = globalThis.fetch,
     // local memory before the first destructive operation.
     validateCleanupTargets(row.cleanup_targets, ownerId);
     if (row.owner_id !== ownerId || row.status !== "running" ||
-        !row.steps || typeof row.steps !== "object" || Array.isArray(row.steps) ||
+        !row.steps || typeof row.steps !== "object" || Array.isArray(row.steps) || row.steps.revoke_sessions !== "done" ||
         !row.cleanup_results || typeof row.cleanup_results !== "object" || Array.isArray(row.cleanup_results)) throw error("deletion_record_failed");
     return run(row, DELETION_STEPS, actor);
   }

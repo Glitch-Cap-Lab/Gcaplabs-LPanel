@@ -64,12 +64,13 @@ describe("durable account deletion", () => {
     expect(f.calls.some((c) => c.path.endsWith("/headmaster_runtime_bindings"))).toBe(false);
     expect(row.completed_by).toBe("ops");
   });
-  test.each(["rpc", "snapshot", "results", "receipt"])("%s persistence failure stops Auth deletion", async (kind) => {
+  test.each(["rpc", "snapshot", "results", "revocation", "receipt"])("%s persistence failure stops Auth deletion", async (kind) => {
     const f = fixture({ intercept: ({ url, method, body }) => {
       if (url.pathname.endsWith("/headmaster_begin_account_deletion")) {
         if (kind === "rpc") return fail();
         if (kind === "snapshot") return ok([receiptRow({ status: "running", cleanup_targets: undefined })]);
         if (kind === "results") return ok([receiptRow({ status: "running", cleanup_results: undefined })]);
+        if (kind === "revocation") return ok([receiptRow({ status: "running", steps: {} })]);
       }
       if (kind === "receipt" && method === "PATCH" && body.cleanup_results) return fail();
     } });
