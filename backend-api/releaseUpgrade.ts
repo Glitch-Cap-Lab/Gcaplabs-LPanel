@@ -414,7 +414,28 @@ async function readLogTail(logFile, env = process.env) {
 
   try {
     const payload = await fsp.readFile(logFile, "utf8");
-    const lines = redactText(payload, env)
+    // Keep a bounded tail at complete-line boundaries before redaction, so a
+    // long build log does not discard its recent diagnostics. Track PEM state
+    // across the cut: a private-key continuation must never become plain text.
+    let start = Math.max(0, payload.length - 12288);
+    if (start > 0) {
+      const newline = payload.indexOf("\n", start - 1);
+      if (newline < 0) return ["[redacted: oversized log line]"];
+      start = newline + 1;
+    }
+    let tail = payload.slice(start);
+    let inPrivateKey = false;
+    const boundaries = /-----([A-Z]+) [A-Z0-9 ]{0,80}PRIVATE KEY-----/g;
+    for (const boundary of payload.matchAll(boundaries)) {
+      if (boundary.index >= start) break;
+      if (boundary[1] === "BEGIN") inPrivateKey = true;
+      else if (boundary[1] === "END") inPrivateKey = false;
+    }
+    if (inPrivateKey) {
+      const end = /-----END [A-Z0-9 ]{0,80}PRIVATE KEY-----/.exec(tail);
+      tail = end ? `[redacted]\n${tail.slice(end.index + end[0].length)}` : "[redacted]";
+    }
+    const lines = redactText(tail, env)
       .split(/\r?\n/)
       .map((line) => line.trimEnd())
       .filter(Boolean);

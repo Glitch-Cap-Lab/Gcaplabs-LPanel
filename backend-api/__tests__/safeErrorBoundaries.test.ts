@@ -177,6 +177,13 @@ describe("safe HTTP and audit boundaries", () => {
     });
     containsNone(output, canaries);
     expect(output.includes("[redacted]")).toBe(true);
+    containsNone(
+      upgradeRedactText(`Failure ${canaries[0]} ${canaries[1]}`, {
+        JWT_SECRET: `  ${canaries[0]}  `,
+        ENCRYPTION_KEY: `${canaries[1]} # fixture comment`,
+      }),
+      canaries,
+    );
   });
 
   it("redacts private-key blocks and full payment-card data at HTTP, storage and notification boundaries", async () => {
@@ -202,6 +209,11 @@ describe("safe HTTP and audit boundaries", () => {
         card_security_code: cvv,
         last4: pan.slice(-4),
       },
+      card: { number: Number(pan), last4: pan.slice(-4) },
+      rounded: {
+        card: { number: Number("4" + "0".repeat(17) + "6"), last4: "0006", brand: "visa" },
+      },
+      bigint: { card: { number: BigInt(pan), last4: pan.slice(-4) } },
       error: new Error(message),
     });
     containsNone(
@@ -209,6 +221,16 @@ describe("safe HTTP and audit boundaries", () => {
       [pan, formattedPan, privateBody],
     );
     const payment = JSON.parse(mockDb.query.mock.calls[0][1][2]).payment;
+    expect(JSON.parse(mockDb.query.mock.calls[0][1][2]).card).toEqual({
+      number: "[redacted]",
+      last4: pan.slice(-4),
+    });
+    const stored = JSON.parse(mockDb.query.mock.calls[0][1][2]);
+    expect(stored.rounded.card.number === "[redacted]").toBe(true);
+    expect(stored.rounded.card.last4).toBe("0006");
+    expect(stored.rounded.card.brand).toBe("visa");
+    expect(stored.bigint.card).toEqual({ number: "[redacted]", last4: pan.slice(-4) });
+    expect(mockDeliver.mock.calls[0][2].rounded).toEqual(stored.rounded);
     expect(payment).toEqual({
       card_number: "[redacted]",
       pan: "[redacted]",

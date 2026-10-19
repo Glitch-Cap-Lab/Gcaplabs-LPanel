@@ -50,7 +50,13 @@ function addSecret(values, value) {
 function environmentSecrets(env) {
   const values = new Set();
   for (const [name, value] of Object.entries(env)) {
-    if (isCredentialName(name) || name === "NORA_UPGRADE_REPO") addSecret(values, value);
+    if (isCredentialName(name) || name === "NORA_UPGRADE_REPO") {
+      addSecret(values, value);
+      if (typeof value === "string") {
+        addSecret(values, value.trim());
+        if (name === "ENCRYPTION_KEY") addSecret(values, value.split("#")[0].trim());
+      }
+    }
     if (typeof value === "string" && /(?:url|dsn)$/i.test(name) && value.includes("://")) {
       let password;
       try {
@@ -113,7 +119,7 @@ function redactValue(value, { env = process.env, secrets = [] } = {}) {
   let nodes = 0;
   let textSize = 0;
   const seen = new WeakSet();
-  function visit(entry, depth) {
+  function visit(entry, depth, cardContext = false) {
     if (++nodes > MAX_NODES) throw new Error("Redaction limit");
     if (depth > 8) return "[max-depth]";
     if (typeof entry === "string") {
@@ -121,8 +127,10 @@ function redactValue(value, { env = process.env, secrets = [] } = {}) {
       if (textSize > 65536) throw new Error("Redaction limit");
       return redactText(entry, env, secrets);
     }
-    if (entry == null || typeof entry === "number" || typeof entry === "boolean") return entry;
-    if (typeof entry === "bigint") return entry.toString();
+    if (typeof entry === "number")
+      return Number.isInteger(entry) && isPaymentCardNumber(String(entry)) ? REDACTED : entry;
+    if (entry == null || typeof entry === "boolean") return entry;
+    if (typeof entry === "bigint") return visit(entry.toString(), depth + 1);
     if (typeof entry !== "object") return "[unsupported]";
     if (seen.has(entry)) return "[circular]";
     seen.add(entry);
@@ -148,7 +156,7 @@ function redactValue(value, { env = process.env, secrets = [] } = {}) {
         : entry;
     const entries = Object.entries(source);
     if (entries.length > MAX_ENTRIES) return "[redacted: oversized object]";
-    if (Array.isArray(source)) return source.map((child) => visit(child, depth + 1));
+    if (Array.isArray(source)) return source.map((child) => visit(child, depth + 1, cardContext));
     const output = {};
     for (const [key, child] of entries) {
       const safeKey = redactText(key, env, secrets);
@@ -162,7 +170,11 @@ function redactValue(value, { env = process.env, secrets = [] } = {}) {
             safeChild = REDACTED;
           }
         }
-      } else safeChild = isCredentialName(key) ? REDACTED : visit(child, depth + 1);
+      } else
+        safeChild =
+          isCredentialName(key) || (cardContext && key.toLowerCase() === "number")
+            ? REDACTED
+            : visit(child, depth + 1, /^(?:card|payment_card|paymentCard)$/i.test(key));
       Object.defineProperty(output, safeKey, {
         value: safeChild,
         enumerable: true,
