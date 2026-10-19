@@ -60,15 +60,26 @@ async function fixture(t, options = {}) {
     await visit(start, path.basename(start)); return packArchive(rows, { preserveOwnership: true });
   }
   const docker = {
-    modem: { demuxStream(raw, stdout) { raw.on("data", x => stdout.write(x)); } },
+    modem: { demuxStream(raw, stdout) { raw.on("data", x => stdout.write(x)); }, dial(opts, callback) {
+      if (faults.helperImage) { opts.abortSignal.addEventListener("abort", () => events.push("abort:helper-image")); return; }
+      assert.match(opts.path, /^\/images\/sha256:[0-9a-f]{64}\/json$/);
+      docker.getImage(opts.path.slice(8, -5)).inspect().then(value => callback(null, value), callback);
+    } },
     getImage(id) { return { async inspect() { return { Id: id, Config: { Env: ["PYTHONPATH=/opt/data", "LD_PRELOAD=/opt/data/private.so", "LD_AUDIT=/opt/data/audit.so"], Healthcheck: { Test: ["CMD-SHELL", "unsafe-image-default"] }, Labels: { "org.opencontainers.image.revision": manifest.sources.core, "com.gcaplabs.webapp.revision": manifest.sources.webapp } } }; } }; },
     async listContainers(options = {}) { return [...containers.values()].filter(c => options.all || c.State.Running).filter(c => !options.filters || (c.Config.Labels?.["headmaster.release.id"] === digest(manifest))).map(c => ({ Id: c.Id })); },
     getContainer(name) {
       const get = () => { const c = resolve(name); if (!c) throw missing(); return c; };
       return {
-        async inspect() { return clone(get()); },
-        async stop() { events.push(`stop:${get().Id}`); get().State.Running = false; persist(); if (options.killAfterStop && get().Id === "old") process.exit(25); },
-        async start() {
+        async inspect(opts = {}) {
+          if (faults.helperInspect && get().Config.Labels?.["headmaster.release.maintenance"]) { opts.abortSignal.addEventListener("abort", () => events.push("abort:helper-inspect")); return new Promise(() => {}); }
+          return clone(get());
+        },
+        async stop(opts = {}) {
+          if (faults.helperStop && get().Config.Labels?.["headmaster.release.maintenance"]) { opts.abortSignal.addEventListener("abort", () => events.push("abort:cleanup-stop")); return new Promise(() => {}); }
+          events.push(`stop:${get().Id}`); get().State.Running = false; persist(); if (options.killAfterStop && get().Id === "old") process.exit(25);
+        },
+        async start(opts = {}) {
+          if (faults.helperStart && get().Config.Labels?.["headmaster.release.maintenance"]) { opts.abortSignal.addEventListener("abort", () => events.push("abort:helper-start")); return new Promise(() => {}); }
           const c = get(); events.push(`start:${c.Id}`); c.State.Running = true;
           if (c.Config.Labels?.["headmaster.release.maintenance"]) {
             const execute = async () => {
@@ -120,12 +131,16 @@ async function fixture(t, options = {}) {
           persist();
           if (options.killAfterOldStart && c.Id === "old") process.exit(28);
         },
-        async attach() {
+        async attach(opts = {}) {
+          if (faults.helperAttach) { opts.abortSignal.addEventListener("abort", () => events.push("abort:helper-attach")); return new Promise(() => {}); }
           const c = get(), chunks = []; let complete;
           attachedInputs.set(c.Id, new Promise(resolve => { complete = resolve; }));
           return new (require("node:stream").Writable)({ write(chunk, _, callback) { chunks.push(Buffer.from(chunk)); callback(); }, final(callback) { complete(Buffer.concat(chunks)); callback(); } });
         },
-        async wait() { await maintenanceTasks.get(get().Id); return { StatusCode: get().exit || 0 }; },
+        async wait(opts = {}) {
+          if (faults.helperWait) { opts.abortSignal.addEventListener("abort", () => events.push("abort:helper-wait")); return new Promise(() => {}); }
+          await maintenanceTasks.get(get().Id); return { StatusCode: get().exit || 0 };
+        },
         async rename({ name }) { const c = get(); events.push(`rename:${c.Id}`); c.Name = `/${name}`; persist(); if (options.killAfterRestoreName && c.Id === "old" && name === "hm-owned") process.exit(27); },
         async getArchive({ path: p }) { if (faults.stage && p === "/opt/data/installs") throw new Error("archive failure"); return require("node:stream").Readable.from(await archive(p)); },
         async putArchive(buffer) {
@@ -154,6 +169,7 @@ async function fixture(t, options = {}) {
       };
     },
     async createContainer(cfg) {
+      if (faults.helperCreate && cfg.Labels?.["headmaster.release.maintenance"]) { cfg.abortSignal.addEventListener("abort", () => events.push("abort:helper-create")); return new Promise(() => {}); }
       const id = cfg.Labels?.["headmaster.release.maintenance"] ? `helper-${containers.size}` : "candidate";
       const c = { ...clone(old), Id: id, Name: `/${cfg.name || id}`, Image: cfg.Image, Config: clone(cfg), HostConfig: clone(cfg.HostConfig), State: { Running: false } };
       containers.set(id, c); events.push(`create:${id}`); persist();
@@ -304,6 +320,37 @@ test("atomic receipt keeps canonical old or new JSON across interrupted upload a
   assert.deepEqual(await f.adapter.readReceipt(target, names), next);
   assert.ok(!(await fs.readdir(path.join(f.root, names.stage))).some(name => name.startsWith(".receipt-")));
   assert.ok(!f.events.slice(before).includes("stop:old"), "private metadata publication does not stop a healthy runtime");
+});
+
+test("unresponsive helper wait and cleanup stop settle within the bounded budget and cancel transport", async t => {
+  const f = await fixture(t), releaseId = digest(f.manifest), target = f.manifest.targets[0];
+  await f.adapter.stop(target.container_id);
+  f.adapter.probeTimeoutMs = 50; f.faults.helperWait = true; f.faults.helperStop = true;
+  const start = Date.now();
+  await assert.rejects(f.adapter.writeReceipt(target, { old: `hm-owned-release-${releaseId.slice(0, 16)}`, stage: `.protected-release-${releaseId}` }, { release_id: releaseId, phase: "stopped" }), /DOCKER_TIMEOUT/);
+  assert.ok(Date.now() - start < 1500, "neither ignored transport promise can hold the caller indefinitely");
+  assert.ok(f.events.includes("abort:helper-wait")); assert.ok(f.events.includes("abort:cleanup-stop"));
+});
+
+test("unresponsive private helper image/create/inspect/attach/start calls cancel without starting a writer", async t => {
+  for (const phase of ["Image", "Create", "Inspect", "Attach", "Start"]) {
+    const f = await fixture(t), releaseId = digest(f.manifest), target = f.manifest.targets[0];
+    await f.adapter.stop(target.container_id); f.adapter.probeTimeoutMs = 50; f.faults[`helper${phase}`] = true;
+    const start = Date.now();
+    await assert.rejects(f.adapter.writeReceipt(target, { old: `hm-owned-release-${releaseId.slice(0, 16)}`, stage: `.protected-release-${releaseId}` }, { release_id: releaseId, phase: "stopped" }), /DOCKER_TIMEOUT/);
+    assert.ok(Date.now() - start < 1500); assert.ok(f.events.includes(`abort:helper-${phase.toLowerCase()}`));
+    assert.ok(!f.events.some(x => /^start:helper-/.test(x)));
+  }
+});
+
+test("published status requires the canonical volume receipt instead of blessing a queue copy", async t => {
+  const f = await fixture(t), receipt = await f.run(), releaseId = digest(f.manifest);
+  const job = { id: `protected-release-${releaseId}`, data: { id: uuid(1), protected_release: { manifest: f.manifest, release_id: releaseId, receipt } }, async getState() { return "completed"; } };
+  const stage = path.join(f.root, `.protected-release-${releaseId}`), hidden = stage + ".renamed";
+  await fs.rename(stage, hidden);
+  await assert.rejects(readProtectedReleaseStatus({ manifest: f.manifest, adapter: f.adapter, state: f.state, job }), /CANONICAL_RECEIPT_REQUIRED/);
+  await fs.rename(hidden, stage);
+  assert.equal((await readProtectedReleaseStatus({ manifest: f.manifest, adapter: f.adapter, state: f.state, job })).phase, "external_metadata_pending");
 });
 
 test("large real tar spools to private disk and repacks with bounded streaming memory", async t => {
