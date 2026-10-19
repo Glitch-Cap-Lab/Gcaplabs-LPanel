@@ -1840,6 +1840,62 @@ describe("Hermes WebUI routes", () => {
     );
   });
 
+  it.each([
+    [409, "admission_conflict", "Refresh it before sending again.", {}],
+    [409, "unknown_execution", "Check the conversation before sending it again.", {}],
+    [409, "session_busy", "Wait for it to finish before trying again.", {}],
+    [503, "runtime_draining", "try again after it reconnects.", { "retry-after": "1" }],
+    [503, "storage_unavailable", "try again shortly.", { "retry-after": "1" }],
+    [503, "admission_queued", "Do not send it again.", { "x-should-retry": "false" }],
+  ])(
+    "keeps chat authority outcome %s %s without retrying the message",
+    async (status, code, message, headers) => {
+      mockDb.query.mockResolvedValueOnce({
+        rows: [
+          {
+            id: "a-hermes-chat",
+            user_id: "user-1",
+            status: "running",
+            runtime_family: "hermes",
+            backend_type: "docker",
+            container_id: "hermes-container",
+            runtime_host: "10.0.0.41",
+            runtime_port: 8642,
+            gateway_token: "hermes-token",
+          },
+        ],
+      });
+      global.fetch = jest.fn().mockResolvedValueOnce(
+        createMockFetchResponse({
+          ok: false,
+          status,
+          headers,
+          body: { error: { code, message: "Private runtime diagnostic" } },
+        }),
+      );
+
+      const res = await auth(
+        request(app)
+          .post("/agents/a-hermes-chat/hermes-ui/chat")
+          .send({
+            sessionId: "api-opaque-owner-session",
+            messages: [{ role: "user", content: "Inspect the workspace" }],
+          }),
+      );
+
+      expect(res.status).toBe(status);
+      expect(res.body.code).toBe(code);
+      expect(res.body.error).toContain(message);
+      expect(res.body.error).not.toContain("Private runtime diagnostic");
+      expect(global.fetch).toHaveBeenCalledTimes(1);
+      expect(global.fetch.mock.calls[0][1].headers["X-Hermes-Session-Id"]).toBe(
+        "api-opaque-owner-session",
+      );
+      expect(res.headers["retry-after"]).toBe(headers["retry-after"]);
+      expect(res.headers["x-should-retry"]).toBe(headers["x-should-retry"]);
+    },
+  );
+
   it("rejects Hermes cron routes for non-Hermes agents", async () => {
     mockDb.query.mockResolvedValueOnce({
       rows: [
@@ -8375,67 +8431,236 @@ describe("POST /agents/:id/memory bot_screen", () => {
 });
 
 describe("operator chat recovery HTTP", () => {
-  const identity = { ownerId: "user-1", requestId: "c7427a31-cef5-4d6c-8041-6f943733a91e", sessionId: "9e563d2c-0ff7-486d-aa77-cb9e24bb8b2d", profile: null };
-  const agent = { id: "chat-recovery", user_id: "user-1", status: "running", runtime_family: "hermes", backend_type: "docker", container_id: "container", runtime_host: "10.0.0.41", runtime_port: 8642, gateway_token: "hermes-token" };
-  const receipt = { admission_id: "admission-7", ref: { profile_id: "root-profile", session_id: identity.sessionId }, sequence: 1, authority_epoch: 3, execution_generation: 4, status: "unknown", outcome: null };
-  const run = (changes = {}) => ({ object: "hermes.run", run_id: "opaque-server-run", session_id: identity.sessionId, admission_id: receipt.admission_id, execution_generation: 4, status: "unknown", output: "", receipt, ...changes });
-  function allowed() { mockDb.query.mockResolvedValueOnce({ rows: [agent] }); }
-  function get(overrides = {}) { return auth(request(app).get("/agents/chat-recovery/hermes-ui/chat").query({ ...identity, profile: undefined, ...overrides })); }
-  function resolve(overrides = {}) { return auth(request(app).post("/agents/chat-recovery/hermes-ui/chat/resolve").send({ ...identity, receipt, confirm: true, ...overrides })); }
+  const identity = {
+    ownerId: "user-1",
+    requestId: "c7427a31-cef5-4d6c-8041-6f943733a91e",
+    sessionId: "9e563d2c-0ff7-486d-aa77-cb9e24bb8b2d",
+    profile: null,
+  };
+  const agent = {
+    id: "chat-recovery",
+    user_id: "user-1",
+    status: "running",
+    runtime_family: "hermes",
+    backend_type: "docker",
+    container_id: "container",
+    runtime_host: "10.0.0.41",
+    runtime_port: 8642,
+    gateway_token: "hermes-token",
+  };
+  const receipt = {
+    admission_id: "admission-7",
+    ref: { profile_id: "root-profile", session_id: identity.sessionId },
+    sequence: 1,
+    authority_epoch: 3,
+    execution_generation: 4,
+    status: "unknown",
+    outcome: null,
+  };
+  const run = (changes = {}) => ({
+    object: "hermes.run",
+    run_id: "opaque-server-run",
+    session_id: identity.sessionId,
+    admission_id: receipt.admission_id,
+    execution_generation: 4,
+    status: "unknown",
+    output: "",
+    receipt,
+    ...changes,
+  });
+  function allowed() {
+    mockDb.query.mockResolvedValueOnce({ rows: [agent] });
+  }
+  function get(overrides = {}) {
+    return auth(
+      request(app)
+        .get("/agents/chat-recovery/hermes-ui/chat")
+        .query({ ...identity, profile: undefined, ...overrides }),
+    );
+  }
+  function resolve(overrides = {}) {
+    return auth(
+      request(app)
+        .post("/agents/chat-recovery/hermes-ui/chat/resolve")
+        .send({ ...identity, receipt, confirm: true, ...overrides }),
+    );
+  }
   it("forwards the original checkpointed request and session IDs exactly once", async () => {
-    allowed(); global.fetch = jest.fn().mockResolvedValue(createMockFetchResponse({ body: { choices: [{ message: { content: "done" } }] } }));
-    const res = await auth(request(app).post("/agents/chat-recovery/hermes-ui/chat").send({ ...identity, messages: [{ role: "user", content: "once" }] }));
-    expect(res.status).toBe(200); expect(global.fetch).toHaveBeenCalledTimes(1);
-    expect(global.fetch.mock.calls[0][1].headers).toMatchObject({ "Idempotency-Key": identity.requestId, "X-Hermes-Session-Id": identity.sessionId, Authorization: "Bearer hermes-token" });
+    allowed();
+    global.fetch = jest
+      .fn()
+      .mockResolvedValue(
+        createMockFetchResponse({ body: { choices: [{ message: { content: "done" } }] } }),
+      );
+    const res = await auth(
+      request(app)
+        .post("/agents/chat-recovery/hermes-ui/chat")
+        .send({ ...identity, messages: [{ role: "user", content: "once" }] }),
+    );
+    expect(res.status).toBe(200);
+    expect(global.fetch).toHaveBeenCalledTimes(1);
+    expect(global.fetch.mock.calls[0][1].headers).toMatchObject({
+      "Idempotency-Key": identity.requestId,
+      "X-Hermes-Session-Id": identity.sessionId,
+      Authorization: "Bearer hermes-token",
+    });
   });
   it("uses authenticated original-key GET without a body, then canonical session history", async () => {
-    allowed(); global.fetch = jest.fn().mockResolvedValueOnce(createMockFetchResponse({ body: run() })).mockResolvedValueOnce(createMockFetchResponse({ body: { object: "list", session_id: identity.sessionId, data: [{ role: "user", content: "once" }] } }));
-    const res = await get(); expect(res.status).toBe(200); expect(res.body.receipt).toEqual(receipt); expect(res.body.historyAvailable).toBe(true);
-    const [url, options] = global.fetch.mock.calls[0]; expect(url).toBe(`http://10.0.0.41:8642/v1/runs/${identity.requestId}?source=chat`); expect(options.method).toBe("GET"); expect(options.body).toBeUndefined();
-    expect(options.headers).toEqual({ Accept: "application/json", Authorization: "Bearer hermes-token", "X-Hermes-Session-Id": identity.sessionId });
-    expect(global.fetch.mock.calls[1][0]).toBe(`http://10.0.0.41:8642/api/sessions/${identity.sessionId}/messages?limit=100&order=latest`);
+    allowed();
+    global.fetch = jest
+      .fn()
+      .mockResolvedValueOnce(createMockFetchResponse({ body: run() }))
+      .mockResolvedValueOnce(
+        createMockFetchResponse({
+          body: {
+            object: "list",
+            session_id: identity.sessionId,
+            data: [{ role: "user", content: "once" }],
+          },
+        }),
+      );
+    const res = await get();
+    expect(res.status).toBe(200);
+    expect(res.body.receipt).toEqual(receipt);
+    expect(res.body.historyAvailable).toBe(true);
+    const [url, options] = global.fetch.mock.calls[0];
+    expect(url).toBe(`http://10.0.0.41:8642/v1/runs/${identity.requestId}?source=chat`);
+    expect(options.method).toBe("GET");
+    expect(options.body).toBeUndefined();
+    expect(options.headers).toEqual({
+      Accept: "application/json",
+      Authorization: "Bearer hermes-token",
+      "X-Hermes-Session-Id": identity.sessionId,
+    });
+    expect(global.fetch.mock.calls[1][0]).toBe(
+      `http://10.0.0.41:8642/api/sessions/${identity.sessionId}/messages?limit=100&order=latest`,
+    );
   });
   it("resolves only the fresh server run ID and exact admission generation", async () => {
-    allowed(); global.fetch = jest.fn().mockResolvedValueOnce(createMockFetchResponse({ body: run() })).mockResolvedValueOnce(createMockFetchResponse({ body: { run_id: "opaque-server-run", ...receipt, status: "terminal", outcome: "interrupted" } }));
-    const res = await resolve({ runId: "untrusted-input" }); expect(res.status).toBe(200); expect(res.body.receipt.status).toBe("terminal");
-    expect(global.fetch.mock.calls[1][0]).toBe("http://10.0.0.41:8642/v1/runs/opaque-server-run/resolve-unknown");
-    expect(JSON.parse(global.fetch.mock.calls[1][1].body)).toEqual({ admission_id: receipt.admission_id, execution_generation: 4 });
+    allowed();
+    global.fetch = jest
+      .fn()
+      .mockResolvedValueOnce(createMockFetchResponse({ body: run() }))
+      .mockResolvedValueOnce(
+        createMockFetchResponse({
+          body: {
+            run_id: "opaque-server-run",
+            ...receipt,
+            status: "terminal",
+            outcome: "interrupted",
+          },
+        }),
+      );
+    const res = await resolve({ runId: "untrusted-input" });
+    expect(res.status).toBe(200);
+    expect(res.body.receipt.status).toBe("terminal");
+    expect(global.fetch.mock.calls[1][0]).toBe(
+      "http://10.0.0.41:8642/v1/runs/opaque-server-run/resolve-unknown",
+    );
+    expect(JSON.parse(global.fetch.mock.calls[1][1].body)).toEqual({
+      admission_id: receipt.admission_id,
+      execution_generation: 4,
+    });
     expect(global.fetch.mock.calls.every(([url]) => !url.includes("completions"))).toBe(true);
   });
   it("recovers a lost resolution ACK from terminal receipt without another POST", async () => {
-    allowed(); global.fetch = jest.fn().mockResolvedValue(createMockFetchResponse({ body: run({ status: "cancelled", receipt: { ...receipt, status: "terminal", outcome: "interrupted" } }) }));
-    expect((await resolve()).status).toBe(200); expect(global.fetch).toHaveBeenCalledTimes(1);
+    allowed();
+    global.fetch = jest
+      .fn()
+      .mockResolvedValue(
+        createMockFetchResponse({
+          body: run({
+            status: "cancelled",
+            receipt: { ...receipt, status: "terminal", outcome: "interrupted" },
+          }),
+        }),
+      );
+    expect((await resolve()).status).toBe(200);
+    expect(global.fetch).toHaveBeenCalledTimes(1);
   });
   it.each(["queued", "started"])("never resolves %s work", async (status) => {
-    allowed(); global.fetch = jest.fn().mockResolvedValue(createMockFetchResponse({ body: run({ status: status === "started" ? "running" : "queued", receipt: { ...receipt, status } }) }));
-    expect((await resolve()).status).toBe(409); expect(global.fetch).toHaveBeenCalledTimes(1);
+    allowed();
+    global.fetch = jest
+      .fn()
+      .mockResolvedValue(
+        createMockFetchResponse({
+          body: run({
+            status: status === "started" ? "running" : "queued",
+            receipt: { ...receipt, status },
+          }),
+        }),
+      );
+    expect((await resolve()).status).toBe(409);
+    expect(global.fetch).toHaveBeenCalledTimes(1);
   });
   it("rejects stale generation without destructive POST", async () => {
-    allowed(); global.fetch = jest.fn().mockResolvedValue(createMockFetchResponse({ body: run({ execution_generation: 5, receipt: { ...receipt, execution_generation: 5 } }) }));
-    expect((await resolve()).status).toBe(409); expect(global.fetch).toHaveBeenCalledTimes(1);
+    allowed();
+    global.fetch = jest
+      .fn()
+      .mockResolvedValue(
+        createMockFetchResponse({
+          body: run({ execution_generation: 5, receipt: { ...receipt, execution_generation: 5 } }),
+        }),
+      );
+    expect((await resolve()).status).toBe(409);
+    expect(global.fetch).toHaveBeenCalledTimes(1);
   });
-  it.each([null, {}, { object: "hermes.run", run_id: "legacy-cache" }])("fails closed for noncanonical receipt %p", async (body) => {
-    allowed(); global.fetch = jest.fn().mockResolvedValue(createMockFetchResponse({ body })); expect((await get()).status).toBe(409); expect(global.fetch).toHaveBeenCalledTimes(1);
-  });
-  it.each([400, 401, 403, 404, 409, 503])("does not resend input for lookup refusal %s", async (status) => {
-    allowed(); global.fetch = jest.fn().mockResolvedValue(createMockFetchResponse({ ok: false, status })); expect([409, 503]).toContain((await get()).status); expect(global.fetch).toHaveBeenCalledTimes(1);
-  });
+  it.each([null, {}, { object: "hermes.run", run_id: "legacy-cache" }])(
+    "fails closed for noncanonical receipt %p",
+    async (body) => {
+      allowed();
+      global.fetch = jest.fn().mockResolvedValue(createMockFetchResponse({ body }));
+      expect((await get()).status).toBe(409);
+      expect(global.fetch).toHaveBeenCalledTimes(1);
+    },
+  );
+  it.each([400, 401, 403, 404, 409, 503])(
+    "does not resend input for lookup refusal %s",
+    async (status) => {
+      allowed();
+      global.fetch = jest.fn().mockResolvedValue(createMockFetchResponse({ ok: false, status }));
+      expect([409, 503]).toContain((await get()).status);
+      expect(global.fetch).toHaveBeenCalledTimes(1);
+    },
+  );
   it("rejects foreign owner and named profile before runtime traffic", async () => {
-    allowed(); global.fetch = jest.fn(); expect((await get({ ownerId: "foreign" })).status).toBe(403);
-    allowed(); expect((await get({ profile: "foreign" })).status).toBe(400); expect(global.fetch).not.toHaveBeenCalled();
+    allowed();
+    global.fetch = jest.fn();
+    expect((await get({ ownerId: "foreign" })).status).toBe(403);
+    allowed();
+    expect((await get({ profile: "foreign" })).status).toBe(400);
+    expect(global.fetch).not.toHaveBeenCalled();
   });
   it("requires explicit confirmation before lookup or resolution", async () => {
-    allowed(); global.fetch = jest.fn(); expect((await resolve({ confirm: false })).status).toBe(400); expect(global.fetch).not.toHaveBeenCalled();
+    allowed();
+    global.fetch = jest.fn();
+    expect((await resolve({ confirm: false })).status).toBe(400);
+    expect(global.fetch).not.toHaveBeenCalled();
   });
   it("requires an operator session and denies workspace keys", async () => {
     expect((await request(app).get("/agents/chat-recovery/hermes-ui/chat")).status).toBe(401);
     authorizeWorkspaceApiKey({ scopes: ["agents:read", "agents:write"] });
     mockDb.query.mockResolvedValueOnce({ rows: [{ id: agent.id, workspace_id: "workspace-a" }] });
-    expect((await workspaceApiKeyAuth(request(app).post("/agents/chat-recovery/hermes-ui/chat/resolve").send({ ...identity, receipt, confirm: true }))).status).toBe(403);
+    expect(
+      (
+        await workspaceApiKeyAuth(
+          request(app)
+            .post("/agents/chat-recovery/hermes-ui/chat/resolve")
+            .send({ ...identity, receipt, confirm: true }),
+        )
+      ).status,
+    ).toBe(403);
     expect(global.fetch).toBeUndefined();
   });
   it("keeps status when history is unavailable", async () => {
-    allowed(); global.fetch = jest.fn().mockResolvedValueOnce(createMockFetchResponse({ body: run() })).mockRejectedValueOnce(new Error("history timeout"));
-    const res = await get(); expect(res.status).toBe(200); expect(res.body.history).toBeNull(); expect(res.body.receipt.status).toBe("unknown");
+    allowed();
+    global.fetch = jest
+      .fn()
+      .mockResolvedValueOnce(createMockFetchResponse({ body: run() }))
+      .mockRejectedValueOnce(new Error("history timeout"));
+    const res = await get();
+    expect(res.status).toBe(200);
+    expect(res.body.history).toBeNull();
+    expect(res.body.receipt.status).toBe("unknown");
   });
 });
