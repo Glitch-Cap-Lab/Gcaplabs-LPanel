@@ -251,12 +251,9 @@ describe("auth sync", () => {
     expect(rotated).not.toHaveProperty("OPENAI_BASE_URL");
     expect(mockGetProviderKeys).not.toHaveBeenCalled();
     mockGetIntegrationEnvVars.mockRejectedValue(new Error("unavailable"));
-    const degraded = await buildHermesManagedEnvForAgent("user", "agent");
-    expect(degraded).toMatchObject({
-      HEADMASTER_OWNER_ID: "owner",
-      HEADMASTER_INFERENCE_KEY: expected.HEADMASTER_INFERENCE_KEY,
+    await expect(buildHermesManagedEnvForAgent("user", "agent")).rejects.toMatchObject({
+      code: "managed_env_source_unavailable",
     });
-    expect(degraded).not.toHaveProperty("OPENAI_API_KEY");
   });
 
   it.each([10, undefined, 0, 1.5])(
@@ -282,10 +279,409 @@ describe("auth sync", () => {
 
   it("fails closed on Headmaster persistence read failure before any runtime write", async () => {
     mockDb.query.mockRejectedValue(new Error("database unavailable"));
-    await expect(buildHermesManagedEnvForAgent("user", "agent")).rejects.toThrow(
-      "database unavailable",
-    );
+    await expect(buildHermesManagedEnvForAgent("user", "agent")).rejects.toMatchObject({
+      code: "managed_env_source_unavailable",
+      message: "Managed configuration source unavailable: account identity",
+    });
     expect(mockUpdateEnv).not.toHaveBeenCalled();
+  });
+
+  describe("complete managed configuration preflight", () => {
+    const owner = "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa";
+    const workspace = "bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb";
+    const request = {
+      expected_revision: 0,
+      owner_uuid: owner,
+      workspace_uuid: workspace,
+      memory_bank_id: `hermes-u-${owner.replace(/-/g, "_")}`,
+      memory_gateway_url: "http://memory:8888",
+    };
+    let row;
+    let runtimeEnv;
+    let unavailableSource;
+    let stateReads;
+
+    beforeEach(() => {
+      row = {
+        id: "complete-env-agent",
+        user_id: "operator",
+        runtime_family: "hermes",
+        backend_type: "k8s",
+        container_id: "complete-env-runtime",
+        status: "running",
+        external_namespace: "headmaster",
+        external_owner_uuid: owner,
+        external_id: workspace,
+        headmaster_integration_desired_revision: 0,
+        headmaster_integration_applied_revision: 0,
+      };
+      runtimeEnv = { TELEGRAM_BOT_TOKEN: "saved-channel", GITHUB_TOKEN: "saved-integration" };
+      unavailableSource = null;
+      stateReads = 0;
+      mockExec.mockImplementation(async () => execResult());
+      mockGetIntegrationEnvVars.mockImplementation(async () => {
+        if (unavailableSource === "integrations") throw new Error("private-read-detail");
+        return { GITHUB_TOKEN: "saved-integration" };
+      });
+      mockDb.query.mockImplementation(async (sql, params) => {
+        if (sql.includes("WITH prior AS")) {
+          const prior = { ...row };
+          row.status = params[1];
+          row.paused_reason = params[2];
+          return {
+            rows: [
+              {
+                ...row,
+                provider_auth_previous_status: prior.status,
+                provider_auth_previous_paused_reason: prior.paused_reason,
+              },
+            ],
+          };
+        }
+        if (sql.includes("AND status = $4 AND paused_reason = $5")) {
+          if (
+            row.status !== params[3] ||
+            row.paused_reason !== params[4] ||
+            row.user_id !== params[5]
+          )
+            return { rows: [] };
+          row.status = params[1];
+          row.paused_reason = params[2];
+          return { rows: [{ ...row }] };
+        }
+        if (
+          sql.includes("SET status = 'stopped', paused_reason = $2") ||
+          sql.includes("SET status = 'error', paused_reason = $2")
+        ) {
+          row.status = sql.includes("SET status = 'stopped'") ? "stopped" : "error";
+          row.paused_reason = params[1];
+          return { rows: [{ ...row }] };
+        }
+        if (sql.includes("SET status = 'running'")) {
+          row.status = "running";
+          row.paused_reason = null;
+          return { rows: [{ ...row }] };
+        }
+        if (sql.includes("FROM llm_providers")) {
+          if (unavailableSource === "default model") throw new Error("private-read-detail");
+          return { rows: [] };
+        }
+        if (
+          unavailableSource === "runtime inventory" &&
+          sql.includes("container_id, container_name")
+        )
+          throw new Error("private-read-detail");
+        if (sql.includes("FROM hermes_runtime_state")) {
+          stateReads++;
+          if (
+            (unavailableSource === "saved model" && stateReads % 2 === 1) ||
+            (unavailableSource === "channels" && stateReads % 2 === 0)
+          )
+            throw new Error("private-read-detail");
+          return {
+            rows: [
+              {
+                model_config: {},
+                channel_configs: { telegram: { TELEGRAM_BOT_TOKEN: "saved-channel" } },
+              },
+            ],
+          };
+        }
+        if (sql.includes("SET headmaster_owner_id")) {
+          [
+            row.headmaster_owner_id,
+            row.headmaster_workspace_id,
+            row.headmaster_memory_bank_id,
+            row.headmaster_memory_gateway_url,
+          ] = params;
+          row.headmaster_integration_desired_revision++;
+          row.headmaster_integration_deployment_status = "pending";
+        } else if (sql.includes("SET headmaster_integration_applied_revision")) {
+          if (params[2]) row.headmaster_integration_applied_revision = params[1];
+          row.headmaster_integration_deployment_status = params[3];
+        } else if (
+          unavailableSource === "account identity" &&
+          sql.includes("SELECT headmaster_owner_id")
+        ) {
+          throw new Error("private-read-detail");
+        }
+        return { rows: [{ ...row }] };
+      });
+      mockUpdateEnv.mockImplementation(async (_agent, env) => {
+        runtimeEnv = { ...env };
+      });
+    });
+
+    it.each(
+      ["restart", "start"].flatMap((action) =>
+        [
+          "channels",
+          "saved model",
+          "integrations",
+          "default model",
+          ...(action === "restart" ? ["runtime inventory"] : []),
+        ].map((source) => [action, source]),
+      ),
+    )(
+      "restores prior lifecycle state after %s preflight cannot read %s",
+      async (action, source) => {
+        row.status = action === "start" ? "stopped" : "running";
+        row.paused_reason = action === "start" ? "manual_stop" : null;
+        const prior = { status: row.status, paused_reason: row.paused_reason };
+        unavailableSource = source;
+        await expect(resumeAgentWithProviderAuth(row, action)).rejects.toMatchObject({
+          code: "AGENT_AUTH_RECONCILIATION_FAILED",
+          failureCode: "managed_env_source_unavailable",
+          runtimeMutationStarted: false,
+          reconciliationPhase:
+            action === "start"
+              ? "offline_stage"
+              : ["default model", "runtime inventory"].includes(source)
+                ? "auth_sync"
+                : "preflight",
+        });
+        expect(row).toMatchObject(prior);
+        for (const operation of [
+          mockUpdateEnv,
+          mockExec,
+          mockStart,
+          mockRestart,
+          mockStop,
+          mockEvictConnection,
+          mockWaitForAgentReadiness,
+        ])
+          expect(operation).not.toHaveBeenCalled();
+        expect(mockWithProviderStateLock).toHaveBeenCalledTimes(1);
+        expect(
+          mockDb.query.mock.calls.some(([sql]) =>
+            sql.includes("AND status = $4 AND paused_reason = $5"),
+          ),
+        ).toBe(true);
+      },
+    );
+
+    it("restores the durable prior state rather than a stale caller snapshot", async () => {
+      row.paused_reason = null;
+      const staleAgent = { ...row, status: "warning", paused_reason: "outdated" };
+      unavailableSource = "channels";
+      await expect(resumeAgentWithProviderAuth(staleAgent, "restart")).rejects.toMatchObject({
+        failureCode: "managed_env_source_unavailable",
+        runtimeMutationStarted: false,
+      });
+      expect(row).toMatchObject({ status: "running", paused_reason: null });
+      expect(staleAgent).toMatchObject({ status: "running", paused_reason: null });
+      expect(mockStop).not.toHaveBeenCalled();
+    });
+
+    it("does not overwrite a newer lifecycle state when preflight restoration loses its fence", async () => {
+      mockGetIntegrationEnvVars.mockImplementation(async () => {
+        row.status = "stopped";
+        row.paused_reason = "account_disabled";
+        throw new Error("unavailable");
+      });
+      await expect(resumeAgentWithProviderAuth(row, "restart")).rejects.toMatchObject({
+        failureCode: "managed_env_source_unavailable",
+        runtimeMutationStarted: false,
+        statusCode: 500,
+        restoreError: { code: "AGENT_AUTH_STATE_CHANGED" },
+      });
+      expect(row).toMatchObject({ status: "stopped", paused_reason: "account_disabled" });
+      expect(mockUpdateEnv).not.toHaveBeenCalled();
+      expect(mockStop).not.toHaveBeenCalled();
+    });
+
+    it("contains a write failure even when its error uses the source-unavailable code", async () => {
+      const failure = new Error("write failed after mutation began");
+      failure.code = "managed_env_source_unavailable";
+      mockUpdateEnv.mockRejectedValue(failure);
+      await expect(resumeAgentWithProviderAuth(row, "restart")).rejects.toMatchObject({
+        failureCode: "managed_env_source_unavailable",
+        runtimeMutationStarted: true,
+        reconciliationPhase: "apply",
+      });
+      expect(mockUpdateEnv).toHaveBeenCalledTimes(1);
+      expect(mockStop).toHaveBeenCalledTimes(1);
+      expect(row).toMatchObject({
+        status: "stopped",
+        paused_reason: "provider_auth_reconciliation_failed",
+      });
+      expect(
+        mockDb.query.mock.calls.some(([sql]) =>
+          sql.includes("AND status = $4 AND paused_reason = $5"),
+        ),
+      ).toBe(false);
+    });
+
+    it("contains a physical start failure after successful offline environment staging", async () => {
+      row.status = "stopped";
+      mockStart.mockRejectedValue(new Error("fixture start failure"));
+      await expect(resumeAgentWithProviderAuth(row, "start")).rejects.toMatchObject({
+        message: "fixture start failure",
+        runtimeMutationStarted: true,
+        reconciliationPhase: "physical_start",
+      });
+      expect(mockUpdateEnv).toHaveBeenCalledTimes(1);
+      expect(mockStart).toHaveBeenCalledTimes(1);
+      expect(mockStop).toHaveBeenCalledTimes(1);
+      expect(row).toMatchObject({
+        status: "stopped",
+        paused_reason: "provider_auth_reconciliation_failed",
+      });
+    });
+
+    it("contains a source read failure after the physical start has already happened", async () => {
+      row.status = "stopped";
+      const query = mockDb.query.getMockImplementation();
+      let defaultReads = 0;
+      mockDb.query.mockImplementation(async (sql, params) => {
+        if (sql.includes("FROM llm_providers") && ++defaultReads === 2)
+          throw new Error("private-read-detail");
+        return query(sql, params);
+      });
+      await expect(resumeAgentWithProviderAuth(row, "start")).rejects.toMatchObject({
+        failureCode: "managed_env_source_unavailable",
+        runtimeMutationStarted: true,
+        reconciliationPhase: "auth_sync",
+      });
+      expect(mockUpdateEnv).toHaveBeenCalledTimes(1);
+      expect(mockStart).toHaveBeenCalledTimes(1);
+      expect(mockStop).toHaveBeenCalledTimes(1);
+      expect(row).toMatchObject({
+        status: "stopped",
+        paused_reason: "provider_auth_reconciliation_failed",
+      });
+    });
+
+    it.each(
+      ["docker", "k8s"].flatMap((backend) =>
+        ["integrations", "saved model", "channels", "account identity"].map((source) => [
+          backend,
+          source,
+        ]),
+      ),
+    )(
+      "retains %s credentials and the unapplied revision on unavailable %s, then retries the same desired revision",
+      async (backend, source) => {
+        row.backend_type = backend;
+        const { updateManagedConfig } = require("../headmasterConfig");
+        unavailableSource = source;
+        expect(await updateManagedConfig(row, request)).toMatchObject({
+          desired_revision: 1,
+          applied_revision: 0,
+          deployment_status: "failed",
+        });
+        expect(runtimeEnv).toEqual({
+          TELEGRAM_BOT_TOKEN: "saved-channel",
+          GITHUB_TOKEN: "saved-integration",
+        });
+        for (const operation of [
+          mockUpdateEnv,
+          mockExec,
+          mockStart,
+          mockRestart,
+          mockStop,
+          mockEvictConnection,
+          mockWaitForAgentReadiness,
+        ])
+          expect(operation).not.toHaveBeenCalled();
+        expect(consoleWarnSpy.mock.calls.flat().join(" ")).not.toContain("private-read-detail");
+
+        unavailableSource = null;
+        stateReads = 0;
+        expect(await updateManagedConfig(row, null, { retry: true })).toMatchObject({
+          desired_revision: 1,
+          applied_revision: 1,
+          deployment_status: "applied",
+        });
+        expect(runtimeEnv).toMatchObject({
+          TELEGRAM_BOT_TOKEN: "saved-channel",
+          GITHUB_TOKEN: "saved-integration",
+        });
+        expect(mockRestart).toHaveBeenCalledTimes(1);
+        expect(mockWaitForAgentReadiness).toHaveBeenCalledTimes(1);
+        expect(mockStart).not.toHaveBeenCalled();
+      },
+    );
+
+    it.each(
+      ["docker", "k8s"].flatMap((backend) =>
+        ["integrations", "saved model", "channels"].map((source) => [backend, source]),
+      ),
+    )("leaves a stopped %s runtime stopped when %s is unavailable", async (backend, source) => {
+      row.backend_type = backend;
+      row.status = "stopped";
+      unavailableSource = source;
+      expect(await syncAuthToUserAgents(row.user_id, row.id)).toEqual([
+        expect.objectContaining({ status: "failed", code: "managed_env_source_unavailable" }),
+      ]);
+      for (const operation of [mockUpdateEnv, mockExec, mockStart, mockRestart, mockStop])
+        expect(operation).not.toHaveBeenCalled();
+      expect(row.status).toBe("stopped");
+    });
+
+    it("does not acknowledge a healthy offline stage or start a user-stopped runtime", async () => {
+      row.status = "stopped";
+      const { updateManagedConfig } = require("../headmasterConfig");
+      expect(await updateManagedConfig(row, request)).toMatchObject({
+        desired_revision: 1,
+        applied_revision: 0,
+        deployment_status: "failed",
+      });
+      expect(mockUpdateEnv).toHaveBeenCalledTimes(1);
+      for (const operation of [mockStart, mockRestart, mockWaitForAgentReadiness])
+        expect(operation).not.toHaveBeenCalled();
+    });
+
+    it("does not acknowledge a complete replacement when readiness fails", async () => {
+      mockWaitForAgentReadiness.mockResolvedValue({ ok: false, runtime: { error: "unreachable" } });
+      const { updateManagedConfig } = require("../headmasterConfig");
+      expect(await updateManagedConfig(row, request)).toMatchObject({
+        desired_revision: 1,
+        applied_revision: 0,
+        deployment_status: "failed",
+      });
+      expect(mockUpdateEnv).toHaveBeenCalledTimes(1);
+      expect(mockRestart).toHaveBeenCalledTimes(1);
+      expect(mockStop).toHaveBeenCalledTimes(1);
+    });
+
+    it("applies an authoritative empty integration set to revoke a saved credential", async () => {
+      mockGetIntegrationEnvVars.mockResolvedValue({});
+      const { updateManagedConfig } = require("../headmasterConfig");
+      expect(await updateManagedConfig(row, request)).toMatchObject({
+        desired_revision: 1,
+        applied_revision: 1,
+        deployment_status: "applied",
+      });
+      expect(runtimeEnv).not.toHaveProperty("GITHUB_TOKEN");
+      expect(runtimeEnv.TELEGRAM_BOT_TOKEN).toBe("saved-channel");
+      expect(mockUpdateEnv).toHaveBeenCalledTimes(1);
+      expect(mockRestart).toHaveBeenCalledTimes(1);
+    });
+
+    it.each(["provider keys", "provider endpoints"])(
+      "aborts an ordinary runtime replacement on unreadable %s",
+      async (source) => {
+        row.external_namespace = null;
+        const lookup = source === "provider keys" ? mockGetProviderKeys : mockGetProviderEndpoints;
+        lookup.mockRejectedValue(new Error("private-read-detail"));
+        expect(await syncAuthToUserAgents(row.user_id, row.id)).toEqual([
+          expect.objectContaining({ status: "failed", code: "managed_env_source_unavailable" }),
+        ]);
+        for (const operation of [mockUpdateEnv, mockExec, mockStart, mockRestart, mockStop])
+          expect(operation).not.toHaveBeenCalled();
+      },
+    );
+
+    it("does not replace OpenClaw auth profiles with partial integration state", async () => {
+      row.runtime_family = "openclaw";
+      unavailableSource = "integrations";
+      expect(await syncAuthToUserAgents(row.user_id, row.id)).toEqual([
+        expect.objectContaining({ status: "failed", code: "managed_env_source_unavailable" }),
+      ]);
+      for (const operation of [mockUpdateEnv, mockExec, mockStart, mockRestart, mockStop])
+        expect(operation).not.toHaveBeenCalled();
+    });
   });
 
   it("does not accept reserved Headmaster variables from generic integrations", async () => {

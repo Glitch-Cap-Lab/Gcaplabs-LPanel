@@ -261,8 +261,22 @@ function hasMeaningfulHermesModelConfig(modelConfig = {}) {
 
 // Managed auth and environment material
 
-async function getIntegrationLlmEnvVars(agentId) {
+// A failed lookup is not an authoritative empty credential set. Keep this
+// failure distinct from an apply failure: no runtime state needs quarantine
+// when the complete replacement candidate could not even be read.
+async function readManagedEnvSource(source, load) {
   try {
+    return await load();
+  } catch (error) {
+    if (error?.code === "managed_env_source_unavailable") throw error;
+    const failure = new Error(`Managed configuration source unavailable: ${source}`);
+    failure.code = "managed_env_source_unavailable";
+    throw failure;
+  }
+}
+
+async function getIntegrationLlmEnvVars(agentId) {
+  return readManagedEnvSource("integrations", async () => {
     const { getIntegrationEnvVars } = require("./integrations");
     const integrationEnvVars = await getIntegrationEnvVars(agentId);
     const integrationLlmKeys = {};
@@ -272,14 +286,12 @@ async function getIntegrationLlmEnvVars(agentId) {
       }
     }
     return integrationLlmKeys;
-  } catch {
-    return {};
-  }
+  });
 }
 
 /**
  * Build OpenClaw auth profiles from user provider keys and any matching
- * integration tokens available through a best-effort per-agent lookup.
+ * integration tokens available through an authoritative per-agent lookup.
  * Explicit provider keys take precedence.
  *
  * @param {string} userId - User whose saved provider credentials should be loaded.
@@ -319,8 +331,7 @@ async function getEnabledMcpRuntimeState(agentId) {
  * Build a set of OpenClaw managed environment variables from current providers,
  * endpoints, integrations, MCP-server, and model sources for runtime recreation.
  *
- * Integration lookup is best effort; its failure omits integration environment
- * values, while failures from the other credential sources still propagate.
+ * Every lookup must succeed before the complete replacement can be applied.
  *
  * On Kubernetes a restart is a rollout: the replacement pod gets a fresh
  * filesystem and re-seeds auth-profiles.json + the SQLite auth store from the
@@ -358,13 +369,10 @@ async function buildOpenClawManagedEnvForAgent(
     typeof llmProviders.buildDeploymentEnvVars === "function"
       ? llmProviders.buildDeploymentEnvVars(overrides.deploymentByEnvVar || {})
       : {};
-  let integrationEnvVars = {};
-  try {
+  const integrationEnvVars = await readManagedEnvSource("integrations", async () => {
     const { getIntegrationEnvVars } = require("./integrations");
-    integrationEnvVars = await getIntegrationEnvVars(agentId);
-  } catch {
-    integrationEnvVars = {};
-  }
+    return getIntegrationEnvVars(agentId);
+  });
   const resolvedMcpRuntimeState = mcpRuntimeState || (await getEnabledMcpRuntimeState(agentId));
   const fullModel = buildDefaultOpenClawModel(defaultProvider);
 
@@ -412,8 +420,8 @@ function headmasterInferenceEnvFor(row = {}) {
 
 /**
  * Build Hermes managed environment variables from provider, endpoint,
- * persisted-channel, and integration sources. Channel and integration lookups
- * are best effort and may independently leave the result partial.
+ * persisted-channel, and integration sources. Every lookup must succeed before
+ * the complete replacement can be applied; successful empty sets revoke keys.
  *
  * @param {string} userId - User whose provider credentials should be loaded.
  * @param {string} agentId - Agent whose channel and integration values should be included.
@@ -422,12 +430,14 @@ function headmasterInferenceEnvFor(row = {}) {
 async function buildHermesManagedEnvForAgent(userId, agentId) {
   // Fail closed on a database error: dropping this state from the full managed
   // environment would silently remove the runtime's account/memory identity.
-  const headmaster = await db.query(
-    `SELECT headmaster_owner_id, headmaster_workspace_id,
+  const headmaster = await readManagedEnvSource("account identity", () =>
+    db.query(
+      `SELECT headmaster_owner_id, headmaster_workspace_id,
             headmaster_memory_bank_id, headmaster_memory_gateway_url,
             external_namespace, gateway_token, disk_gb
        FROM agents WHERE id = $1 AND user_id = $2`,
-    [agentId, userId],
+      [agentId, userId],
+    ),
   );
   const headmasterConfig = require("./headmasterConfig");
   const headmasterEnvVars = headmasterConfig.headmasterEnv(headmaster.rows[0]);
@@ -438,11 +448,15 @@ async function buildHermesManagedEnvForAgent(userId, agentId) {
   const headmasterInferenceEnvVars = headmasterManaged
     ? headmasterInferenceEnvFor(headmaster.rows[0])
     : {};
-  const llmKeys = headmasterManaged ? {} : await llmProviders.getProviderKeys(userId);
+  const llmKeys = headmasterManaged
+    ? {}
+    : await readManagedEnvSource("provider keys", () => llmProviders.getProviderKeys(userId));
   const overrides = headmasterManaged
     ? { byEnvVar: {}, byProvider: {}, apiVersionByEnvVar: {}, apiVersionByProvider: {} }
     : typeof llmProviders.getProviderEndpoints === "function"
-      ? await llmProviders.getProviderEndpoints(userId)
+      ? await readManagedEnvSource("provider endpoints", () =>
+          llmProviders.getProviderEndpoints(userId),
+        )
       : { byEnvVar: {}, byProvider: {}, apiVersionByEnvVar: {}, apiVersionByProvider: {} };
   const baseUrlEnvVars =
     !headmasterManaged && typeof llmProviders.buildBaseUrlEnvVars === "function"
@@ -456,15 +470,12 @@ async function buildHermesManagedEnvForAgent(userId, agentId) {
   // The managed .env block is replaced wholesale on every write, so persisted
   // channel env must ride along or an LLM key save silently drops every
   // configured Hermes channel.
-  let channelEnvVars = {};
-  try {
+  const channelEnvVars = await readManagedEnvSource("channels", async () => {
     const { buildHermesChannelEnvForAgent } = require("./hermesUi");
-    channelEnvVars = await buildHermesChannelEnvForAgent(agentId);
-  } catch {
-    channelEnvVars = {};
-  }
+    return buildHermesChannelEnvForAgent(agentId);
+  });
 
-  try {
+  return readManagedEnvSource("integrations", async () => {
     const { getIntegrationEnvVars } = require("./integrations");
     const rawIntegrationEnvVars = await getIntegrationEnvVars(agentId);
     // A managed runtime never carries a provider key or endpoint override,
@@ -488,18 +499,17 @@ async function buildHermesManagedEnvForAgent(userId, agentId) {
         ...headmasterInferenceEnvVars,
       }).filter(([key, value]) => key && value != null && String(value) !== ""),
     );
-  } catch {
-    return Object.fromEntries(
-      Object.entries({
-        ...channelEnvVars,
-        ...llmKeys,
-        ...baseUrlEnvVars,
-        ...apiVersionEnvVars,
-        ...headmasterEnvVars,
-        ...headmasterInferenceEnvVars,
-      }).filter(([key, value]) => key && value != null && String(value) !== ""),
-    );
-  }
+  });
+}
+
+async function getHermesPersistedModelConfig(agentId) {
+  return readManagedEnvSource("saved model", async () => {
+    const { getPersistedHermesState } = require("./hermesUi");
+    const persistedState = await getPersistedHermesState(agentId);
+    return hasMeaningfulHermesModelConfig(persistedState?.modelConfig)
+      ? persistedState.modelConfig
+      : null;
+  });
 }
 
 // Runtime write command construction
@@ -1123,30 +1133,25 @@ async function stageProviderAuthForStoppedAgent(userId, agent, options = {}) {
   }
 
   await assertRemoteHostAgentUse(agent, { includeProfile: false });
-  const defaultRow = await db.query(
-    "SELECT id, provider, model, config FROM llm_providers WHERE user_id = $1 AND is_default = true LIMIT 1",
-    [userId],
+  const defaultRow = await readManagedEnvSource("default model", () =>
+    db.query(
+      "SELECT id, provider, model, config FROM llm_providers WHERE user_id = $1 AND is_default = true LIMIT 1",
+      [userId],
+    ),
   );
   const defaultProvider = defaultRow.rows[0] || null;
   const runtimeFamily = resolveAgentRuntimeFamily(agent);
 
   if (runtimeFamily === "hermes") {
-    let persistedModelConfig = null;
-    try {
-      const { getPersistedHermesState } = require("./hermesUi");
-      const persistedState = await getPersistedHermesState(agent.id);
-      if (hasMeaningfulHermesModelConfig(persistedState?.modelConfig)) {
-        persistedModelConfig = persistedState.modelConfig;
-      }
-    } catch {
-      persistedModelConfig = null;
-    }
+    const persistedModelConfig = await getHermesPersistedModelConfig(agent.id);
 
-    const envVars = await buildHermesManagedEnvForAgent(userId, agent.id);
+    const envVars = await readManagedEnvSource("runtime environment", () =>
+      buildHermesManagedEnvForAgent(userId, agent.id),
+    );
     // A Headmaster-managed runtime takes the relay model, whatever the operator
     // account's default provider or an older stored model block says.
-    const headmasterManaged = await require("./headmasterConfig").agentIsHeadmasterManaged(
-      agent.id,
+    const headmasterManaged = await readManagedEnvSource("account identity", () =>
+      require("./headmasterConfig").agentIsHeadmasterManaged(agent.id),
     );
     const generatedModelConfig = headmasterManaged
       ? buildHeadmasterModelConfig()
@@ -1158,6 +1163,7 @@ async function stageProviderAuthForStoppedAgent(userId, agent, options = {}) {
           ? attachHermesCustomApiKey(persistedModelConfig, defaultProvider, envVars)
           : generatedModelConfig
         : null;
+    options.beforeRuntimeMutation?.();
     await reconcileManagedRuntimeEnv(
       agent,
       {
@@ -1173,10 +1179,13 @@ async function stageProviderAuthForStoppedAgent(userId, agent, options = {}) {
     return { runtimeFamily, defaultProvider, modelConfig: selectedModelConfig };
   }
 
-  const mcpRuntimeState = await getEnabledMcpRuntimeState(agent.id);
-  const managedEnv = await buildOpenClawManagedEnvForAgent(userId, agent.id, defaultProvider, {
-    mcpRuntimeState,
-  });
+  const mcpRuntimeState = await readManagedEnvSource("MCP configuration", () =>
+    getEnabledMcpRuntimeState(agent.id),
+  );
+  const managedEnv = await readManagedEnvSource("runtime environment", () =>
+    buildOpenClawManagedEnvForAgent(userId, agent.id, defaultProvider, { mcpRuntimeState }),
+  );
+  options.beforeRuntimeMutation?.();
   await reconcileManagedRuntimeEnv(agent, managedEnv, "openclaw", {
     extraManagedEnvNames: [
       ...(options.extraManagedEnvNames || []),
@@ -1248,12 +1257,18 @@ function createProviderAuthLifecycleError(agent, cause = null) {
 async function markProviderAuthPending(agent, action) {
   const pendingStatus = action === "start" ? "stopped" : "error";
   const updated = await db.query(
-    `UPDATE agents
+    `WITH prior AS (
+       SELECT id, status, paused_reason FROM agents
+        WHERE id = $1 AND user_id = $4 FOR UPDATE
+     )
+     UPDATE agents
         SET status = $2,
             paused_reason = $3
-      WHERE id = $1
-      RETURNING *`,
-    [agent.id, pendingStatus, PROVIDER_AUTH_PENDING_REASON],
+       FROM prior
+      WHERE agents.id = prior.id
+      RETURNING agents.*, prior.status AS provider_auth_previous_status,
+                prior.paused_reason AS provider_auth_previous_paused_reason`,
+    [agent.id, pendingStatus, PROVIDER_AUTH_PENDING_REASON, agent.user_id],
   );
   if (!updated.rows[0]) {
     const error = new Error(`Agent ${agent.id} no longer exists`);
@@ -1261,8 +1276,39 @@ async function markProviderAuthPending(agent, action) {
     error.code = "AGENT_NOT_FOUND";
     throw error;
   }
-  Object.assign(agent, updated.rows[0]);
-  return agent;
+  const {
+    provider_auth_previous_status: status,
+    provider_auth_previous_paused_reason: pausedReason,
+    ...pendingAgent
+  } = updated.rows[0];
+  Object.assign(agent, pendingAgent);
+  return { status, pausedReason, pendingStatus };
+}
+
+async function restoreProviderAuthPreflightState(agent, prior) {
+  const restored = await db.query(
+    `UPDATE agents
+        SET status = $2, paused_reason = $3
+      WHERE id = $1 AND user_id = $6
+        AND status = $4 AND paused_reason = $5
+      RETURNING *`,
+    [
+      agent.id,
+      prior.status,
+      prior.pausedReason,
+      prior.pendingStatus,
+      PROVIDER_AUTH_PENDING_REASON,
+      agent.user_id,
+    ],
+  );
+  if (!restored.rows[0]) {
+    const error = new Error(
+      `Agent ${agent.id} lifecycle state changed during configuration preflight`,
+    );
+    error.code = "AGENT_AUTH_STATE_CHANGED";
+    throw error;
+  }
+  Object.assign(agent, restored.rows[0]);
 }
 
 async function publishProviderAuthReady(agent) {
@@ -1305,15 +1351,21 @@ async function resumeAgentWithProviderAuth(agent, action, options = {}) {
     );
   }
 
-  await markProviderAuthPending(agent, action);
+  const priorState = await markProviderAuthPending(agent, action);
   let lifecycleResult = null;
   let syncFailureContained = false;
   let phase = action === "start" ? "offline_stage" : "auth_sync";
+  let runtimeMutationStarted = false;
+  const beforeRuntimeMutation = () => {
+    runtimeMutationStarted = true;
+    phase = phase === "offline_stage" ? "offline_apply" : "auth_apply";
+  };
 
   try {
     if (action === "start") {
       await stageProviderAuthForStoppedAgent(agent.user_id, agent, {
         providerLockHeld: true,
+        beforeRuntimeMutation,
       });
       phase = "physical_start";
       lifecycleResult = await containerManager.start(agent);
@@ -1326,6 +1378,7 @@ async function resumeAgentWithProviderAuth(agent, action, options = {}) {
       providerLockHeld: true,
       includeProviderAuthPending: true,
       startupStateStaged: action === "start",
+      beforeRuntimeMutation,
     });
     const result = Array.isArray(results)
       ? results.find((entry) => entry?.agentId === agent.id)
@@ -1334,7 +1387,13 @@ async function resumeAgentWithProviderAuth(agent, action, options = {}) {
       syncFailureContained = Boolean(
         result?.runtimeStopped && result?.statusPersisted && result?.quarantinePersisted,
       );
-      throw createProviderAuthLifecycleError(agent, result?.error || result?.status || null);
+      const error = createProviderAuthLifecycleError(
+        agent,
+        result?.error || result?.status || null,
+      );
+      error.failureCode = result?.code || null;
+      error.reconciliationPhase = result?.phase || phase;
+      throw error;
     }
 
     phase = "final_status";
@@ -1347,6 +1406,21 @@ async function resumeAgentWithProviderAuth(agent, action, options = {}) {
         : phase === "physical_start"
           ? candidate
           : createProviderAuthLifecycleError(agent, candidate);
+    error.failureCode = candidate?.failureCode || candidate?.code || null;
+    error.reconciliationPhase = candidate?.reconciliationPhase || phase;
+    error.runtimeMutationStarted = runtimeMutationStarted;
+    if (error.failureCode === "managed_env_source_unavailable" && !runtimeMutationStarted) {
+      // Only a proven preflight failure may undo our temporary pending marker.
+      // A concurrent lifecycle/owner change wins; never quarantine or overwrite
+      // it merely because restoring the marker failed.
+      try {
+        await restoreProviderAuthPreflightState(agent, priorState);
+      } catch (restoreError) {
+        error.statusCode = 500;
+        error.restoreError = restoreError;
+      }
+      throw error;
+    }
     if (!syncFailureContained) {
       const stopped = await stopAgentAfterAuthSyncFailure(agent);
       if (stopped.stopError || stopped.quarantineError || !stopped.statusPersisted) {
@@ -1416,9 +1490,11 @@ async function syncAuthToUserAgents(userId, agentId = null, options = {}) {
   const extraManagedEnvNames = Array.isArray(options?.extraManagedEnvNames)
     ? options.extraManagedEnvNames
     : [];
-  const defaultRow = await db.query(
-    "SELECT id, provider, model, config FROM llm_providers WHERE user_id = $1 AND is_default = true LIMIT 1",
-    [userId],
+  const defaultRow = await readManagedEnvSource("default model", () =>
+    db.query(
+      "SELECT id, provider, model, config FROM llm_providers WHERE user_id = $1 AND is_default = true LIMIT 1",
+      [userId],
+    ),
   );
   const defaultProvider = defaultRow.rows[0] || null;
   const modelCommand = buildDefaultModelCommand(defaultProvider);
@@ -1478,7 +1554,9 @@ async function syncAuthToUserAgents(userId, agentId = null, options = {}) {
   const agentParams = agentId
     ? [agentId, userId, includeProviderAuthPending, PROVIDER_AUTH_PENDING_REASON, apiKeyWorkspaceId]
     : [userId];
-  const agents = await db.query(agentQuery, agentParams);
+  const agents = await readManagedEnvSource("runtime inventory", () =>
+    db.query(agentQuery, agentParams),
+  );
   if (apiKeyWorkspaceId && agents.rows.some((agent) => isRemoteDockerAgent(agent))) {
     const error = new Error("Remote Docker agent operations require session authentication");
     error.statusCode = 403;
@@ -1496,21 +1574,23 @@ async function syncAuthToUserAgents(userId, agentId = null, options = {}) {
 
   const results = [];
   for (const agent of agents.rows) {
+    let phase = "preflight";
+    const beforeRuntimeMutation = () => {
+      phase = "apply";
+      options.beforeRuntimeMutation?.();
+    };
     try {
       const runtimeFamily = resolveAgentRuntimeFamily(agent);
       // Fail closed before the first runtime mutation. Adapter-level guards are
       // still required, but this prevents even an attempted managed-env write
       // after a Remote Docker grant has been revoked.
       await assertRemoteHostAgentUse(agent, { includeProfile: false });
-      // Evict the cached WS connection before restarting so the proxy
-      // creates a fresh one on the next request instead of hitting the circuit breaker
-      if (evictConnection) {
-        evictConnection(agent);
-      }
       if (startupStateStaged) {
         if (agent.paused_reason !== PROVIDER_AUTH_PENDING_REASON) {
           throw new Error("Offline provider authentication staging is no longer pending");
         }
+        beforeRuntimeMutation();
+        if (evictConnection) evictConnection(agent);
         await refreshDockerRuntimeAddress(agent);
         const readiness = await waitForAgentReadiness(
           {
@@ -1538,26 +1618,21 @@ async function syncAuthToUserAgents(userId, agentId = null, options = {}) {
         await stageProviderAuthForStoppedAgent(userId, agent, {
           providerLockHeld: true,
           extraManagedEnvNames,
+          beforeRuntimeMutation,
         });
+        if (evictConnection) evictConnection(agent);
         await clearProviderAuthQuarantine(agent.id);
         results.push({ agentId: agent.id, status: "synced", staged: true });
         continue;
       }
       if (runtimeFamily === "hermes") {
-        let persistedModelConfig = null;
-        try {
-          const { getPersistedHermesState } = require("./hermesUi");
-          const persistedState = await getPersistedHermesState(agent.id);
-          if (hasMeaningfulHermesModelConfig(persistedState?.modelConfig)) {
-            persistedModelConfig = persistedState.modelConfig;
-          }
-        } catch {
-          persistedModelConfig = null;
-        }
+        const persistedModelConfig = await getHermesPersistedModelConfig(agent.id);
 
-        const envVars = await buildHermesManagedEnvForAgent(userId, agent.id);
-        const headmasterManaged = await require("./headmasterConfig").agentIsHeadmasterManaged(
-          agent.id,
+        const envVars = await readManagedEnvSource("runtime environment", () =>
+          buildHermesManagedEnvForAgent(userId, agent.id),
+        );
+        const headmasterManaged = await readManagedEnvSource("account identity", () =>
+          require("./headmasterConfig").agentIsHeadmasterManaged(agent.id),
         );
         if (!headmasterManaged && !persistedModelConfig && !hasHermesModelConfig) {
           hermesModelConfig = buildHermesModelConfig(defaultProvider, envVars);
@@ -1586,6 +1661,8 @@ async function syncAuthToUserAgents(userId, agentId = null, options = {}) {
             modelConfig: selectedHermesModelConfig,
           }),
         };
+        beforeRuntimeMutation();
+        if (evictConnection) evictConnection(agent);
         await reconcileManagedRuntimeEnv(agent, managedHermesEnv, "hermes", {
           extraManagedEnvNames,
         });
@@ -1628,16 +1705,22 @@ async function syncAuthToUserAgents(userId, agentId = null, options = {}) {
         continue;
       }
 
-      const authProfiles = await buildAuthProfilesForAgent(userId, agent.id);
+      const authProfiles = await readManagedEnvSource("provider profiles", () =>
+        buildAuthProfilesForAgent(userId, agent.id),
+      );
       if (onlyIfAuthPresent && Object.keys(authProfiles).length === 0 && !modelCommand) {
         results.push({ agentId: agent.id, status: "skipped" });
         continue;
       }
 
-      const mcpRuntimeState = await getEnabledMcpRuntimeState(agent.id);
-      const managedEnv = await buildOpenClawManagedEnvForAgent(userId, agent.id, defaultProvider, {
-        mcpRuntimeState,
-      });
+      const mcpRuntimeState = await readManagedEnvSource("MCP configuration", () =>
+        getEnabledMcpRuntimeState(agent.id),
+      );
+      const managedEnv = await readManagedEnvSource("runtime environment", () =>
+        buildOpenClawManagedEnvForAgent(userId, agent.id, defaultProvider, { mcpRuntimeState }),
+      );
+      beforeRuntimeMutation();
+      if (evictConnection) evictConnection(agent);
       await reconcileManagedRuntimeEnv(agent, managedEnv, "openclaw", {
         extraManagedEnvNames: [
           ...extraManagedEnvNames,
@@ -1740,6 +1823,20 @@ async function syncAuthToUserAgents(userId, agentId = null, options = {}) {
       results.push({ agentId: agent.id, status: "synced" });
     } catch (e) {
       console.warn(`[authSync] Failed for agent ${agent.id}:`, e.message);
+      if (e.code === "managed_env_source_unavailable" && phase === "preflight") {
+        results.push({
+          agentId: agent.id,
+          status: "failed",
+          error: e.message,
+          code: e.code,
+          phase,
+          runtimeMutationStarted: false,
+          runtimeStopped: false,
+          statusPersisted: false,
+          quarantinePersisted: false,
+        });
+        continue;
+      }
       const stopped = await stopAgentAfterAuthSyncFailure(agent);
       if (stopped.stopError) {
         console.error(
@@ -1752,6 +1849,8 @@ async function syncAuthToUserAgents(userId, agentId = null, options = {}) {
         status: "failed",
         error: e.message,
         code: e.code || null,
+        phase,
+        runtimeMutationStarted: true,
         runtimeStopped: stopped.runtimeStopped,
         statusPersisted: stopped.statusPersisted,
         quarantinePersisted: stopped.quarantinePersisted,
