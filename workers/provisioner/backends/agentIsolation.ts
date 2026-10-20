@@ -57,6 +57,14 @@ function agentNetworkPeers(env = process.env) {
     .filter((name) => /^[A-Za-z0-9][A-Za-z0-9_.-]*$/.test(name));
 }
 
+// Seconds between re-attach passes; 0 turns the timer off (start-up pass only).
+function networkReconcileIntervalMs(env = process.env) {
+  const raw = String(env.NORA_AGENT_NETWORK_RECONCILE_SECONDS ?? "60").trim();
+  const seconds = Number(raw);
+  if (!Number.isFinite(seconds)) return 60000;
+  return seconds > 0 ? Math.max(10, seconds) * 1000 : 0;
+}
+
 function volumeQuotaOptions(diskGb, env = process.env) {
   if (!volumeQuotaEnabled(env)) return null;
   const gb = Number.parseInt(diskGb, 10);
@@ -69,6 +77,8 @@ function isAlreadyDone(error) {
   return status === 409 || status === 403 || /already (exists|connected)|endpoint with name .* already exists/i.test(error?.message || "");
 }
 
+const warnedAttach = new Set();
+
 async function connectPeers(docker, networkName, peers) {
   const network = docker.getNetwork(networkName);
   for (const peer of peers) {
@@ -77,6 +87,10 @@ async function connectPeers(docker, networkName, peers) {
     } catch (error) {
       if (isAlreadyDone(error)) continue;
       // A missing peer (for example admission not deployed here) must not fail a deploy.
+      // Reconcile repeats, so say it once per peer and network.
+      const key = `${networkName}/${peer}`;
+      if (warnedAttach.has(key)) continue;
+      warnedAttach.add(key);
       console.warn(`[isolation] Could not attach ${peer} to ${networkName}: ${error.message}`);
     }
   }
@@ -98,8 +112,8 @@ async function ensureAgentNetwork(docker, agentId, peers = agentNetworkPeers()) 
   return name;
 }
 
-// A recreated peer (compose up) loses networks that were attached by hand, so
-// the worker re-attaches peers to every runtime network on start.
+// A recreated peer (compose up) loses its runtime networks, so the worker
+// re-attaches peers to every runtime network on start and on a timer.
 async function reconcileAgentNetworks(docker, peers = agentNetworkPeers()) {
   const networks = await docker.listNetworks({
     filters: JSON.stringify({ label: [`${NETWORK_LABEL}=true`] }),
@@ -132,6 +146,7 @@ module.exports = {
   findOverQuotaVolumes,
   perRuntimeNetworkName,
   agentNetworkPeers,
+  networkReconcileIntervalMs,
   volumeQuotaOptions,
   ensureAgentNetwork,
   reconcileAgentNetworks,
