@@ -310,7 +310,7 @@ Local Docker Hermes runtimes can be isolated from each other. Both settings are 
 | ------------------------------ | -------- | ------- | ----------- |
 | `NORA_AGENT_NETWORK_ISOLATION` | No       | unset   | `per-agent` gives every runtime its own Docker network (and keeps it off the default bridge). The worker attaches `NORA_AGENT_NETWORK_PEERS` to each one and re-attaches them when it starts. |
 | `NORA_AGENT_NETWORK_PEERS`     | No       | unset   | Comma-separated container names that must reach every runtime (API, worker, and any service that calls a runtime by name). A missing peer is skipped with a warning. |
-| `NORA_AGENT_VOLUME_QUOTA`      | No       | unset   | `enforce` creates each new runtime home volume with `size=<disk_gb>g`. Requires `/var/lib/docker` on XFS mounted with `pquota`; otherwise volume creation fails. Existing volumes are not resized. |
+| `NORA_AGENT_VOLUME_QUOTA`      | No       | unset   | `monitor` logs (every 10 minutes, read-only) each runtime home volume that is over its agent's `disk_gb`; use it on hosts without filesystem quotas such as ext4. `enforce` creates each new runtime home volume with `size=<disk_gb>g`. Requires `/var/lib/docker` on XFS mounted with `pquota`; otherwise volume creation fails. Existing volumes are not resized. |
 
 ## Kubernetes registry and Compose mount helpers
 

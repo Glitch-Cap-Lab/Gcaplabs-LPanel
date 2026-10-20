@@ -100,4 +100,23 @@ describe("Cloud runtime isolation (opt-in)", () => {
     expect(isolation.volumeQuotaOptions(undefined)).toBeNull();
     expect(isolation.volumeQuotaOptions(0)).toBeNull();
   });
+
+  it("monitor mode reports volumes over their disk_gb and ignores unknown or unmeasured ones", async () => {
+    const GB = 1024 ** 3;
+    const docker = {
+      df: jest.fn().mockResolvedValue({
+        Volumes: [
+          { Name: "nora_hermes_home_1", UsageData: { Size: 6 * GB } },
+          { Name: "nora_hermes_home_2", UsageData: { Size: 1 * GB } },
+          { Name: "nora_hermes_home_3", UsageData: { Size: -1 } },
+          { Name: "nora_hermes_home_9", UsageData: { Size: 99 * GB } },
+          { Name: "other", UsageData: { Size: 99 * GB } },
+        ],
+      }),
+    };
+    const over = await isolation.findOverQuotaVolumes(docker, { 1: 5, 2: 5, 3: 5 });
+    expect(over).toEqual([{ agentId: "1", usedBytes: 6 * GB, limitBytes: 5 * GB }]);
+    process.env.NORA_AGENT_VOLUME_QUOTA = "monitor";
+    expect(isolation.volumeQuotaOptions(5)).toBeNull(); // monitor never changes volume creation
+  });
 });

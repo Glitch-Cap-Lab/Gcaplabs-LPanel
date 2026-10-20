@@ -5742,6 +5742,30 @@ if (process.env.NORA_AGENT_NETWORK_ISOLATION === "per-agent") {
     .catch((error) => console.warn(`[isolation] Reconcile failed: ${error.message}`));
 }
 
+// NORA_AGENT_VOLUME_QUOTA=monitor: hosts without filesystem quotas (ext4) cannot
+// cap a volume, so log every runtime home volume that is over its agent's
+// disk_gb. Read-only; nothing is stopped or deleted.
+if (process.env.NORA_AGENT_VOLUME_QUOTA === "monitor") {
+  const QUOTA_CHECK_MS = 10 * 60 * 1000;
+  const checkVolumeQuota = async () => {
+    try {
+      const { findOverQuotaVolumes } = require("./backends/agentIsolation");
+      const rows = (await db.query("SELECT id, disk_gb FROM agents WHERE disk_gb IS NOT NULL")).rows;
+      const limits = Object.fromEntries(rows.map((row) => [String(row.id), row.disk_gb]));
+      const over = await findOverQuotaVolumes(new (require("./backends/hermes"))().docker, limits);
+      for (const item of over) {
+        console.warn(
+          `[quota] agent ${item.agentId} uses ${(item.usedBytes / 1024 ** 3).toFixed(2)} GB, over its ${(item.limitBytes / 1024 ** 3).toFixed(0)} GB limit`,
+        );
+      }
+    } catch (error) {
+      console.warn(`[quota] check failed: ${error.message}`);
+    }
+  };
+  setInterval(checkVolumeQuota, QUOTA_CHECK_MS).unref();
+  checkVolumeQuota();
+}
+
 module.exports = {
   allocateAvailableLocalDockerGatewayPort,
   assertProvisionerRuntimeSelection,

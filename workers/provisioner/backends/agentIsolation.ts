@@ -19,8 +19,29 @@ function perAgentNetworkEnabled(env = process.env) {
   return String(env.NORA_AGENT_NETWORK_ISOLATION || "").trim().toLowerCase() === "per-agent";
 }
 
+function volumeQuotaMode(env = process.env) {
+  const mode = String(env.NORA_AGENT_VOLUME_QUOTA || "").trim().toLowerCase();
+  return mode === "enforce" || mode === "monitor" ? mode : "";
+}
+
 function volumeQuotaEnabled(env = process.env) {
-  return String(env.NORA_AGENT_VOLUME_QUOTA || "").trim().toLowerCase() === "enforce";
+  return volumeQuotaMode(env) === "enforce";
+}
+
+// For hosts without filesystem quotas (ext4): compare each runtime home volume's
+// real size with its agent's disk_gb. Read-only; the caller decides what to do.
+async function findOverQuotaVolumes(docker, diskGbByAgentId) {
+  const df = await docker.df();
+  const over = [];
+  for (const volume of df?.Volumes || []) {
+    const match = /^nora_hermes_home_(.+)$/.exec(volume.Name || "");
+    const limitGb = match ? Number(diskGbByAgentId[match[1]]) : NaN;
+    const used = volume.UsageData?.Size;
+    if (!Number.isFinite(limitGb) || limitGb < 1 || !(used >= 0)) continue;
+    const limitBytes = limitGb * 1024 ** 3;
+    if (used > limitBytes) over.push({ agentId: match[1], usedBytes: used, limitBytes });
+  }
+  return over;
 }
 
 function perAgentNetworkName(agentId) {
@@ -107,6 +128,8 @@ async function removeAgentNetwork(docker, agentId, peers = agentNetworkPeers()) 
 module.exports = {
   perAgentNetworkEnabled,
   volumeQuotaEnabled,
+  volumeQuotaMode,
+  findOverQuotaVolumes,
   perAgentNetworkName,
   agentNetworkPeers,
   volumeQuotaOptions,
