@@ -1374,6 +1374,127 @@ describe("Hermes WebUI routes", () => {
     expect(mockDockerInspect).not.toHaveBeenCalled();
   });
 
+  it("returns the Hermes connect block for an owner API key with the agents:connect scope", async () => {
+    authorizeWorkspaceApiKey({ scopes: ["agents:read", "agents:connect"], userId: "agent-owner" });
+    const agent = {
+      id: "a-hermes-api-key-connect",
+      user_id: "agent-owner",
+      status: "running",
+      runtime_family: "hermes",
+      backend_type: "docker",
+      container_id: "hermes-container",
+      runtime_host: "10.0.0.43",
+      runtime_port: 8642,
+      gateway_token: "hermes-token",
+    };
+    mockDb.query
+      .mockResolvedValueOnce({
+        rows: [
+          {
+            id: agent.id,
+            backend_type: agent.backend_type,
+            deploy_target: agent.deploy_target,
+            execution_target_id: agent.execution_target_id,
+          },
+        ],
+      })
+      .mockResolvedValueOnce({ rows: [agent] });
+    global.fetch = jest
+      .fn()
+      .mockResolvedValueOnce(
+        createMockFetchResponse({ body: { status: "ok", platform: "hermes-agent" } }),
+      )
+      .mockResolvedValueOnce(
+        createMockFetchResponse({
+          body: { object: "list", data: [{ id: "desk-bot", object: "model" }] },
+        }),
+      )
+      .mockResolvedValueOnce(
+        createMockFetchResponse({
+          body: { version: "1.0.0", gateway_running: true, gateway_state: "running" },
+        }),
+      );
+    mockDockerInspect.mockResolvedValueOnce({
+      NetworkSettings: {
+        Ports: {
+          "8642/tcp": [{ HostIp: "100.71.115.105", HostPort: "19500" }],
+          "9119/tcp": [{ HostIp: "100.71.115.105", HostPort: "19044" }],
+        },
+      },
+    });
+
+    const res = await workspaceApiKeyAuth(
+      request(app)
+        .get("/agents/a-hermes-api-key-connect/hermes-ui")
+        .set("X-Forwarded-Host", "100.71.115.105"),
+    );
+
+    expect(res.status).toBe(200);
+    expect(res.body.connect).toMatchObject({
+      runtimeApiUrl: "http://100.71.115.105:19500",
+      apiKey: "hermes-token",
+    });
+  });
+
+  it("omits the Hermes connect block when the agents:connect key was issued to a non-owner", async () => {
+    authorizeWorkspaceApiKey({ scopes: ["agents:read", "agents:connect"], userId: "someone-else" });
+    const agent = {
+      id: "a-hermes-api-key-nonowner",
+      user_id: "agent-owner",
+      status: "running",
+      runtime_family: "hermes",
+      backend_type: "docker",
+      container_id: "hermes-container",
+      runtime_host: "10.0.0.43",
+      runtime_port: 8642,
+      gateway_token: "hermes-token",
+    };
+    mockDb.query
+      .mockResolvedValueOnce({
+        rows: [
+          {
+            id: agent.id,
+            backend_type: agent.backend_type,
+            deploy_target: agent.deploy_target,
+            execution_target_id: agent.execution_target_id,
+          },
+        ],
+      })
+      .mockResolvedValueOnce({ rows: [agent] });
+    global.fetch = jest
+      .fn()
+      .mockResolvedValueOnce(
+        createMockFetchResponse({ body: { status: "ok", platform: "hermes-agent" } }),
+      )
+      .mockResolvedValueOnce(
+        createMockFetchResponse({
+          body: { object: "list", data: [{ id: "desk-bot", object: "model" }] },
+        }),
+      )
+      .mockResolvedValueOnce(
+        createMockFetchResponse({
+          body: { version: "1.0.0", gateway_running: true, gateway_state: "running" },
+        }),
+      );
+    mockDockerInspect.mockResolvedValueOnce({
+      NetworkSettings: {
+        Ports: {
+          "8642/tcp": [{ HostIp: "100.71.115.105", HostPort: "19500" }],
+          "9119/tcp": [{ HostIp: "100.71.115.105", HostPort: "19044" }],
+        },
+      },
+    });
+
+    const res = await workspaceApiKeyAuth(
+      request(app)
+        .get("/agents/a-hermes-api-key-nonowner/hermes-ui")
+        .set("X-Forwarded-Host", "100.71.115.105"),
+    );
+
+    expect(res.status).toBe(200);
+    expect(res.body.connect).toBeUndefined();
+  });
+
   it("uses the routable published HostIp as the connect host, not the browsing host", async () => {
     mockReadHermesRuntimeSnapshot.mockResolvedValueOnce({
       runtimeStatus: { gateway_state: "running", active_agents: 1, updated_at: "t", platforms: {} },

@@ -22,6 +22,11 @@ const KEY_STATUS_REVOKED = "revoked";
 const SCOPE_DEFINITIONS = [
   { value: "agents:read", description: "Read agents in the workspace" },
   { value: "agents:write", description: "Create, update, and operate agents" },
+  {
+    value: "agents:connect",
+    description:
+      "Read agent connection details, including the runtime API key, as the issuing owner; issue only to trusted control-plane callers",
+  },
   { value: "workspaces:read", description: "Read workspace metadata and members" },
   { value: "monitoring:read", description: "Read monitoring metrics and events" },
   { value: "integrations:read", description: "Read integration configurations" },
