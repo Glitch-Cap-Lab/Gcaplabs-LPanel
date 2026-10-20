@@ -12,6 +12,7 @@ function mockBackend() {
     connect: jest.fn().mockResolvedValue({}),
     disconnect: jest.fn().mockResolvedValue({}),
     remove: jest.fn().mockResolvedValue({}),
+    inspect: jest.fn().mockResolvedValue({ Containers: {} }),
   };
   const container = {
     id: "c1",
@@ -78,6 +79,22 @@ describe("Cloud runtime isolation (opt-in)", () => {
     await backend.destroy("nora-hermes-x", { agentId: "7", preserveState: true });
     expect(network.disconnect).toHaveBeenCalledWith({ Container: "admission", Force: true });
     expect(network.remove).toHaveBeenCalled();
+  });
+
+  it("removes the runtime network on delete even where the isolation settings are not set", async () => {
+    const { backend, network } = mockBackend();
+    network.inspect.mockResolvedValue({ Containers: { a: { Name: "nora-backend-api-1" }, b: { Name: "admission" } } });
+    await backend.destroy("nora-hermes-x", { agentId: "7" });
+    expect(network.disconnect.mock.calls.map(([c]) => c.Container).sort()).toEqual(["admission", "nora-backend-api-1"]);
+    expect(network.remove).toHaveBeenCalled();
+  });
+
+  it("does nothing on delete when the agent never had a runtime network", async () => {
+    const { backend, network } = mockBackend();
+    network.inspect.mockRejectedValue(Object.assign(new Error("no such network"), { statusCode: 404 }));
+    await backend.destroy("nora-hermes-x", { agentId: "7" });
+    expect(network.disconnect).not.toHaveBeenCalled();
+    expect(network.remove).not.toHaveBeenCalled();
   });
 
   it("reconcile re-attaches peers to every labelled runtime network", async () => {

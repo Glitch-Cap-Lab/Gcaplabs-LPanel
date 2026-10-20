@@ -460,7 +460,8 @@ class HermesBackend extends DockerBackend {
     // cleanup is a harmless no-op for Hermes).
     const result = await super.destroy(containerId, opts);
     const { agentId } = opts;
-    if (agentId && perRuntimeNetworkEnabled()) await removeAgentNetwork(this.docker, agentId);
+    // Not gated on the isolation settings: the API destroys runtimes on account deletion and does not carry them.
+    if (agentId) await removeAgentNetwork(this.docker, agentId);
     // Keep the home volume on a redeploy (preserveState) so data survives the
     // destroy→create replacement; remove it only on a true delete. Preserving is
     // the default so an omitted flag leaks a volume instead of destroying the
