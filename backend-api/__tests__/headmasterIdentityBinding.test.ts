@@ -1,5 +1,6 @@
 // @ts-nocheck
 const { bindExternalIdentity } = require("../headmasterIdentityBinding");
+jest.mock("../agentProvisionLock", () => ({ acquireAgentProvisionLock: jest.fn(async () => ({ release: async () => {} })) }));
 
 // Fake agents table whose UPDATE honours the `external_namespace IS NULL`
 // guard atomically, like Postgres row locking does.
@@ -10,6 +11,9 @@ function fakeDb(rows) {
     query: jest.fn(async (sql, params) => {
       // Yield so concurrent callers genuinely interleave.
       await new Promise((r) => setImmediate(r));
+      if (sql.includes("external_namespace = 'headmaster'")) {
+        return { rows: [...agents.values()].filter((r) => r.external_namespace === "headmaster" && r.external_owner_uuid === params[0] && r.external_id === params[1]).map((r) => ({ ...r })) };
+      }
       if (/^UPDATE agents/.test(sql.trim())) {
         const [ns, ext, owner, id] = params;
         const row = agents.get(id);

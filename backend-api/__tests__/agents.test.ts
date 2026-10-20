@@ -4090,11 +4090,12 @@ describe("POST /agents/deploy", () => {
     const workspace = "22222222-2222-4222-8222-222222222222";
     const bank = "hermes-u-" + owner.replaceAll("-", "_");
     mockDb.query
+      .mockResolvedValueOnce({ rows: [] })
       .mockResolvedValueOnce({
         rows: [{ id: "a-managed", name: "Managed", status: "queued", user_id: "user-1" }],
       })
       .mockResolvedValueOnce({ rows: [] });
-    const res = await auth(
+    const res = await adminAuth(
       request(app)
         .post("/agents/deploy")
         .send({
@@ -5203,6 +5204,7 @@ describe("POST /agents/:id/integrations/headmaster/adopt", () => {
           { id: "a-adopt", name: "Hermes-Agent", user_id: "user-1", external_namespace: null },
         ],
       })
+      .mockResolvedValueOnce({ rows: [] })
       .mockResolvedValueOnce({
         rows: [
           {
@@ -5233,7 +5235,7 @@ describe("POST /agents/:id/integrations/headmaster/adopt", () => {
       external_owner_uuid: OWNER_UUID,
     });
     expect(mockDb.query).toHaveBeenNthCalledWith(
-      2,
+      3,
       expect.stringContaining("WHERE id = $4 AND external_namespace IS NULL"),
       ["headmaster", EXTERNAL_ID, OWNER_UUID, "a-adopt"],
     );
@@ -5260,6 +5262,7 @@ describe("POST /agents/:id/integrations/headmaster/adopt", () => {
           },
         ],
       })
+      .mockResolvedValueOnce({ rows: [{ id: "a-adopt-2", external_namespace: "headmaster", external_id: EXTERNAL_ID, external_owner_uuid: OWNER_UUID }] })
       // The guarded bind UPDATE matches nothing: the agent is already bound.
       .mockResolvedValueOnce({ rows: [] })
       .mockResolvedValueOnce({
@@ -5362,6 +5365,7 @@ describe("POST /agents/:id/integrations/headmaster/adopt", () => {
           { id: "a-adopt-5", name: "Hermes-Agent", user_id: "user-1", external_namespace: null },
         ],
       })
+      .mockResolvedValueOnce({ rows: [] })
       .mockResolvedValueOnce({
         rows: [
           {
@@ -5428,6 +5432,7 @@ describe("POST /agents/:id/integrations/headmaster/adopt", () => {
           { id: "a-adopt-7", name: "Hermes-Agent", user_id: "user-1", external_namespace: null },
         ],
       })
+      .mockResolvedValueOnce({ rows: [] })
       .mockResolvedValueOnce({
         rows: [
           {
@@ -5496,7 +5501,7 @@ describe("POST /agents/:id/integrations/headmaster/adopt model stamp", () => {
     mockPersistHermesStorageAllocation.mockClear();
     const [first, second] = adoptRows("a-storage-1", "hermes");
     second.rows[0].disk_gb = 10;
-    mockDb.query.mockResolvedValueOnce(first).mockResolvedValueOnce(second);
+    mockDb.query.mockResolvedValueOnce(first).mockResolvedValueOnce({ rows: [] }).mockResolvedValueOnce(second);
     const res = await adminAuth(
       request(app)
         .post("/agents/a-storage-1/integrations/headmaster/adopt")
@@ -5517,7 +5522,7 @@ describe("POST /agents/:id/integrations/headmaster/adopt model stamp", () => {
   it("stamps the relay model block on an adopted Hermes runtime", async () => {
     mockPersistHermesModelConfig.mockClear();
     const [first, second] = adoptRows("a-model-1", "hermes");
-    mockDb.query.mockResolvedValueOnce(first).mockResolvedValueOnce(second);
+    mockDb.query.mockResolvedValueOnce(first).mockResolvedValueOnce({ rows: [] }).mockResolvedValueOnce(second);
 
     const res = await adopt("a-model-1");
 
@@ -5533,7 +5538,7 @@ describe("POST /agents/:id/integrations/headmaster/adopt model stamp", () => {
     mockPersistHermesModelConfig.mockClear();
     mockPersistHermesModelConfig.mockRejectedValueOnce(new Error("runtime unreachable"));
     const [first, second] = adoptRows("a-model-2", "hermes");
-    mockDb.query.mockResolvedValueOnce(first).mockResolvedValueOnce(second);
+    mockDb.query.mockResolvedValueOnce(first).mockResolvedValueOnce({ rows: [] }).mockResolvedValueOnce(second);
 
     const res = await adopt("a-model-2");
 
@@ -5547,7 +5552,7 @@ describe("POST /agents/:id/integrations/headmaster/adopt model stamp", () => {
   it("leaves a non-Hermes runtime alone", async () => {
     mockPersistHermesModelConfig.mockClear();
     const [first, second] = adoptRows("a-model-3", "openclaw");
-    mockDb.query.mockResolvedValueOnce(first).mockResolvedValueOnce(second);
+    mockDb.query.mockResolvedValueOnce(first).mockResolvedValueOnce({ rows: [] }).mockResolvedValueOnce(second);
 
     const res = await adopt("a-model-3");
 
@@ -8371,6 +8376,88 @@ describe("POST /agents/:id/memory bot_screen", () => {
     expect(res.status).toBe(409);
     expect(cm.setMemory).not.toHaveBeenCalled();
     expect(cm.setBotScreenGate).not.toHaveBeenCalled();
+  });
+});
+
+
+describe("managed identity deploy coordination", () => {
+  const OWNER = "11111111-1111-4111-8111-111111111111", WORKSPACE = "22222222-2222-4222-8222-222222222222";
+  const AGENT = "33333333-3333-4333-8333-333333333333", JOB = "44444444-4444-4444-8444-444444444444";
+  const body = () => ({ name: "Managed", runtime_family: "hermes", idempotency_key: `headmaster-provision-${JOB}`,
+    external_identity: { namespace: "headmaster", external_id: WORKSPACE, owner_uuid: OWNER },
+    headmaster_integration_config: { owner_uuid: OWNER, workspace_uuid: WORKSPACE, memory_bank_id: `hermes-u-${OWNER.replaceAll("-", "_")}`, memory_gateway_url: "http://headmaster-memory-gateway:8791" } });
+  const defer = () => { let resolve; const promise = new Promise((r) => { resolve = r; }); return { promise, resolve }; };
+  function runtime() {
+    return { id: AGENT, name: "Managed", user_id: "user-1", status: "queued", runtime_family: "hermes", deploy_target: "docker", sandbox_profile: "standard", execution_target_id: "docker",
+      external_namespace: "headmaster", external_id: WORKSPACE, external_owner_uuid: OWNER,
+      headmaster_owner_id: OWNER, headmaster_workspace_id: WORKSPACE, headmaster_memory_bank_id: body().headmaster_integration_config.memory_bank_id, headmaster_memory_gateway_url: "http://headmaster-memory-gateway:8791" };
+  }
+  function store(initial = [], pauseInsert = null) {
+    const agents = [...initial], tails = new Map(); let inserts = 0;
+    mockAcquireAgentProvisionLock.mockImplementation(async (key) => {
+      const previous = tails.get(key) || Promise.resolve(), held = defer(); tails.set(key, previous.then(() => held.promise));
+      await previous; return { release: async () => held.resolve() };
+    });
+    mockDb.query.mockImplementation(async (sql) => {
+      if (sql.includes("external_namespace = 'headmaster'")) return { rows: [...agents] };
+      if (sql.includes("INSERT INTO agents")) {
+        inserts += 1; if (pauseInsert) { pauseInsert.entered.resolve(); await pauseInsert.release.promise; }
+        const row = runtime(); agents.push(row); return { rows: [row] };
+      }
+      if (sql.includes("INSERT INTO deployments")) return { rows: [] };
+      throw Error("unexpected managed-deploy query");
+    });
+    return { agents, get inserts() { return inserts; } };
+  }
+  beforeEach(() => { process.env.ENABLED_RUNTIME_FAMILIES = "openclaw,hermes"; process.env.ENABLED_BACKENDS = "docker"; });
+  test("non-admin sessions cannot supply a managed owner identity", async () => {
+    await auth(request(app).post("/agents/deploy").send(body())).expect(403);
+    expect(mockDb.query).not.toHaveBeenCalled(); expect(mockAddDeploymentJob).not.toHaveBeenCalled();
+  });
+  test("API keys cannot supply a managed owner identity", async () => {
+    authorizeWorkspaceApiKey(); await workspaceApiKeyAuth(request(app).post("/agents/deploy").send(body())).expect(403);
+    expect(mockAddDeploymentJob).not.toHaveBeenCalled();
+  });
+  test("concurrent deploy requests reuse one exact runtime after a real insert barrier", async () => {
+    const pause = { entered: defer(), release: defer() }, state = store([], pause);
+    const first = adminAuth(request(app).post("/agents/deploy").send(body())).then((r) => r);
+    await pause.entered.promise;
+    const second = adminAuth(request(app).post("/agents/deploy").send({ ...body(), name: "Ignored replacement", env: { NEVER_APPLY: "fixture" } })).then((r) => r);
+    await new Promise((r) => setImmediate(r)); expect(state.inserts).toBe(1);
+    pause.release.resolve(); const responses = await Promise.all([first, second]);
+    expect(responses.map((r) => r.status)).toEqual([200, 200]);
+    expect(responses[1].body).toMatchObject({ id: AGENT, name: "Managed", reused: true, identity_proof: "immutable_owner_workspace" });
+    expect(mockAddDeploymentJob).toHaveBeenCalledTimes(1); expect(state.agents).toHaveLength(1);
+  });
+  test("deploy and recovery serialize on the common immutable tuple lock", async () => {
+    const pause = { entered: defer(), release: defer() }, state = store([], pause);
+    const deployment = adminAuth(request(app).post("/agents/deploy").send(body())).then((r) => r);
+    await pause.entered.promise;
+    const selected = { id: JOB, owner_id: OWNER, workspace_id: WORKSPACE, desired_action: "provision", status: "failed", step: "deploying", fence: 7, authorization_revision: 3, nora_agent_id: null, workspaces: { owner_id: OWNER } };
+    const client = { recoveryAuthority: async () => ({ owner_id: OWNER, authorization_revision: 9 }), recoveryJobs: async () => [selected], recoverProvisionJob: jest.fn(async () => ({ ...selected, nora_agent_id: AGENT })) };
+    const recovery = require("../headmasterProvisionRecovery").recoverProvisionIdentity(client, OWNER, JOB,
+      { candidateAgentId: AGENT, expectedFence: 7, expectedJobAuthorizationRevision: 3, expectedOwnerAuthorizationRevision: 9 }, { db: mockDb, acquireLock: mockAcquireAgentProvisionLock });
+    await new Promise((r) => setImmediate(r)); expect(client.recoverProvisionJob).not.toHaveBeenCalled();
+    pause.release.resolve(); expect((await deployment).status).toBe(200); expect((await recovery).recovered).toBe(true);
+    expect(state.inserts).toBe(1); expect(mockAddDeploymentJob).toHaveBeenCalledTimes(1);
+  });
+  test("reuse waits for a lifecycle deletion and refuses the disappeared runtime", async () => {
+    const state = store([runtime()]);
+    const deletionLock = await mockAcquireAgentProvisionLock(AGENT);
+    const reuse = adminAuth(request(app).post("/agents/deploy").send(body())).then((r) => r);
+    while (mockAcquireAgentProvisionLock.mock.calls.filter(([key]) => key === AGENT).length < 2) await new Promise((r) => setImmediate(r));
+    expect(state.inserts).toBe(0); expect(mockAddDeploymentJob).not.toHaveBeenCalled();
+    state.agents.splice(0); await deletionLock.release();
+    expect((await reuse).status).toBe(409);
+    expect(state.inserts).toBe(0); expect(mockAddDeploymentJob).not.toHaveBeenCalled();
+  });
+  test.each(["other_operator", "different_config", "duplicate"])("refuses existing %s without mutation or creation", async (kind) => {
+    const row = runtime();
+    if (kind === "other_operator") row.user_id = "other";
+    if (kind === "different_config") row.headmaster_workspace_id = JOB;
+    const state = store(kind === "duplicate" ? [row, { ...row, id: JOB }] : [row]);
+    await adminAuth(request(app).post("/agents/deploy").send(body())).expect(409);
+    expect(state.inserts).toBe(0); expect(mockAddDeploymentJob).not.toHaveBeenCalled();
   });
 });
 

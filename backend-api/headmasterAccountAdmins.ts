@@ -11,6 +11,7 @@
 const TABLE = "headmaster_account_entitlements";
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 const MAX_ACCOUNTS = 1000;
+const JOB_FIELDS = "id,owner_id,workspace_id,desired_action,status,step,nora_agent_id,fence,authorization_revision,updated_at,workspaces!inner(owner_id)";
 
 function config(env = process.env) {
   const url = String(env.HEADMASTER_SUPABASE_URL || "").replace(/\/+$/, "");
@@ -66,7 +67,51 @@ function createAccountAdminClient({ env = process.env, fetchImpl = globalThis.fe
     return { owner_id: row.owner_id, entitlement: row.entitlement, is_admin: row.is_admin === true, updated_at: row.updated_at || null };
   }
 
-  return { list, setAdmin };
+  async function recoveryAuthority(ownerId) {
+    const query = new URLSearchParams({ owner_id: `eq.${ownerId}`, select: "owner_id,authorization_revision" });
+    const res = await rest(`${TABLE}?${query}`);
+    if (!res.ok) throw new Error("recovery_unavailable");
+    const rows = await res.json();
+    if (!Array.isArray(rows) || rows.length !== 1 || rows[0]?.owner_id !== ownerId) throw new Error("recovery_unavailable");
+    return rows[0];
+  }
+  async function recoveryJobs(ownerId, jobId = null) {
+    const query = new URLSearchParams({ owner_id: `eq.${ownerId}`, select: JOB_FIELDS, order: "updated_at.desc", limit: "101" });
+    if (jobId) query.set("id", `eq.${jobId}`);
+    else {
+      query.set("desired_action", "eq.provision");
+      query.set("nora_agent_id", "is.null");
+      query.set("step", "neq.queued");
+    }
+    const res = await rest(`headmaster_provision_jobs?${query}`);
+    if (!res.ok) throw new Error("recovery_unavailable");
+    const rows = await res.json();
+    if (!Array.isArray(rows) || rows.length > 100) throw new Error("recovery_unavailable");
+    return rows;
+  }
+  async function recoverProvisionJob(job, authority, agentId) {
+    const res = await rest("rpc/headmaster_recover_provision_job_identity", {
+      method: "POST", signal: AbortSignal.timeout(15000), body: JSON.stringify({ p_job_id: job.id, p_owner_id: job.owner_id,
+        p_workspace_id: job.workspace_id, p_expected_fence: job.fence,
+        p_expected_job_authorization_revision: job.authorization_revision,
+        p_expected_owner_authorization_revision: authority.authorization_revision, p_nora_agent_id: agentId }),
+    });
+    if (!res.ok) {
+      const body = await res.json().catch(() => ({}));
+      const conflict = res.status === 409 || ["55000", "P0001"].includes(body.code);
+      const err = new Error(conflict ? "recovery_job_changed" : "recovery_unavailable");
+      err.statusCode = conflict ? 409 : 503;
+      throw err;
+    }
+    const rows = await res.json();
+    const row = Array.isArray(rows) && rows.length === 1 ? rows[0] : null;
+    if (!row || row.id !== job.id || row.owner_id !== job.owner_id || row.workspace_id !== job.workspace_id ||
+        row.nora_agent_id !== agentId || row.fence !== job.fence || row.authorization_revision !== job.authorization_revision ||
+        row.status !== job.status || row.step !== job.step) throw new Error("recovery_unavailable");
+    return row;
+  }
+
+  return { list, setAdmin, recoveryAuthority, recoveryJobs, recoverProvisionJob };
 }
 
 module.exports = { createAccountAdminClient };
