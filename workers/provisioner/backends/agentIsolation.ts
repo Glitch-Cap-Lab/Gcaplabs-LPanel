@@ -1,22 +1,22 @@
 // @ts-nocheck
 // Opt-in Cloud isolation for local Docker Hermes runtimes.
 //
-//   NORA_AGENT_NETWORK_ISOLATION=per-agent
-//     Every runtime gets its own bridge network, so no runtime can reach another.
+//   NORA_AGENT_NETWORK_ISOLATION=per-runtime
+//     Every runtime gets its own bridge network, so no runtime can reach another. In Headmaster one account has one runtime (its bots are profiles inside it), so this is a network per account and bots share it.
 //     NORA_AGENT_NETWORK_PEERS (comma-separated container names, for example
 //     the API, worker, admission, bridge and memory gateway) are attached to each
 //     runtime network so they can still reach it by name.
 //   NORA_AGENT_VOLUME_QUOTA=enforce
-//     The runtime home volume is created with a size limit of the agent's disk_gb.
+//     The runtime home volume (the whole account, all of its bots) is limited to the agent record's disk_gb.
 //     Needs /var/lib/docker on XFS mounted with pquota; leave unset otherwise.
 //
 // Both are off by default, so an unconfigured install behaves exactly as before.
 
-const NETWORK_LABEL = "nora.agent.network";
+const NETWORK_LABEL = "nora.runtime.network";
 const AGENT_LABEL = "nora.agent.id";
 
-function perAgentNetworkEnabled(env = process.env) {
-  return String(env.NORA_AGENT_NETWORK_ISOLATION || "").trim().toLowerCase() === "per-agent";
+function perRuntimeNetworkEnabled(env = process.env) {
+  return String(env.NORA_AGENT_NETWORK_ISOLATION || "").trim().toLowerCase() === "per-runtime";
 }
 
 function volumeQuotaMode(env = process.env) {
@@ -44,10 +44,10 @@ async function findOverQuotaVolumes(docker, diskGbByAgentId) {
   return over;
 }
 
-function perAgentNetworkName(agentId) {
+function perRuntimeNetworkName(agentId) {
   const slug = String(agentId).toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "");
-  if (!slug) throw new Error("A per-agent network needs an agent id");
-  return `nora-agent-net-${slug}`;
+  if (!slug) throw new Error("A per-runtime network needs an agent id");
+  return `nora-runtime-net-${slug}`;
 }
 
 function agentNetworkPeers(env = process.env) {
@@ -83,7 +83,7 @@ async function connectPeers(docker, networkName, peers) {
 }
 
 async function ensureAgentNetwork(docker, agentId, peers = agentNetworkPeers()) {
-  const name = perAgentNetworkName(agentId);
+  const name = perRuntimeNetworkName(agentId);
   try {
     await docker.createNetwork({
       Name: name,
@@ -109,7 +109,7 @@ async function reconcileAgentNetworks(docker, peers = agentNetworkPeers()) {
 }
 
 async function removeAgentNetwork(docker, agentId, peers = agentNetworkPeers()) {
-  const name = perAgentNetworkName(agentId);
+  const name = perRuntimeNetworkName(agentId);
   const network = docker.getNetwork(name);
   for (const peer of peers) {
     try {
@@ -126,11 +126,11 @@ async function removeAgentNetwork(docker, agentId, peers = agentNetworkPeers()) 
 }
 
 module.exports = {
-  perAgentNetworkEnabled,
+  perRuntimeNetworkEnabled,
   volumeQuotaEnabled,
   volumeQuotaMode,
   findOverQuotaVolumes,
-  perAgentNetworkName,
+  perRuntimeNetworkName,
   agentNetworkPeers,
   volumeQuotaOptions,
   ensureAgentNetwork,

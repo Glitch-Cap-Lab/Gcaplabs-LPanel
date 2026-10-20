@@ -23,7 +23,7 @@ const {
 
 const {
   ensureAgentNetwork,
-  perAgentNetworkEnabled,
+  perRuntimeNetworkEnabled,
   removeAgentNetwork,
   volumeQuotaOptions,
 } = require("./agentIsolation");
@@ -314,7 +314,7 @@ class HermesBackend extends DockerBackend {
 
     // Per-agent mode puts the runtime alone on its own network (plus the
     // configured control-plane peers), so runtimes cannot reach each other.
-    const isolated = perAgentNetworkEnabled();
+    const isolated = perRuntimeNetworkEnabled();
     const composeNetwork = isolated
       ? await ensureAgentNetwork(this.docker, id)
       : await this._findComposeNetwork();
@@ -460,7 +460,7 @@ class HermesBackend extends DockerBackend {
     // cleanup is a harmless no-op for Hermes).
     const result = await super.destroy(containerId, opts);
     const { agentId } = opts;
-    if (agentId && perAgentNetworkEnabled()) await removeAgentNetwork(this.docker, agentId);
+    if (agentId && perRuntimeNetworkEnabled()) await removeAgentNetwork(this.docker, agentId);
     // Keep the home volume on a redeploy (preserveState) so data survives the
     // destroy→create replacement; remove it only on a true delete. Preserving is
     // the default so an omitted flag leaks a volume instead of destroying the

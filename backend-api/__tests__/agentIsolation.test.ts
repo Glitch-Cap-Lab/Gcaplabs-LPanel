@@ -25,7 +25,7 @@ function mockBackend() {
     createContainer: jest.fn().mockResolvedValue(container),
     createNetwork: jest.fn().mockResolvedValue({}),
     getNetwork: jest.fn().mockReturnValue(network),
-    listNetworks: jest.fn().mockResolvedValue([{ Name: "nora-agent-net-7" }]),
+    listNetworks: jest.fn().mockResolvedValue([{ Name: "nora-runtime-net-7" }]),
   };
   return { backend, network };
 }
@@ -45,16 +45,16 @@ describe("Cloud runtime isolation (opt-in)", () => {
   });
 
   it("puts each runtime alone on its own network, with only the listed peers", async () => {
-    process.env.NORA_AGENT_NETWORK_ISOLATION = "per-agent";
+    process.env.NORA_AGENT_NETWORK_ISOLATION = "per-runtime";
     process.env.NORA_AGENT_NETWORK_PEERS = "admission, hermes-bridge,bad name!";
     const { backend, network } = mockBackend();
     await backend.create({ id: "7", env: {}, disk_gb: 5 });
     expect(backend.docker.createNetwork).toHaveBeenCalledWith(
-      expect.objectContaining({ Name: "nora-agent-net-7", Driver: "bridge" }),
+      expect.objectContaining({ Name: "nora-runtime-net-7", Driver: "bridge" }),
     );
     expect(network.connect.mock.calls.map(([c]) => c.Container)).toEqual(["admission", "hermes-bridge"]);
     const cfg = backend.docker.createContainer.mock.calls[0][0];
-    expect(Object.keys(cfg.NetworkingConfig.EndpointsConfig)).toEqual(["nora-agent-net-7"]);
+    expect(Object.keys(cfg.NetworkingConfig.EndpointsConfig)).toEqual(["nora-runtime-net-7"]);
     expect(backend._findComposeNetwork).not.toHaveBeenCalled();
     // Never joins the shared default bridge.
     expect(backend.docker.getNetwork).not.toHaveBeenCalledWith("bridge");
@@ -68,11 +68,11 @@ describe("Cloud runtime isolation (opt-in)", () => {
         connect: jest.fn().mockRejectedValue(Object.assign(new Error("no such container"), { statusCode: 404 })),
       }),
     };
-    await expect(isolation.ensureAgentNetwork(docker, "9")).resolves.toBe("nora-agent-net-9");
+    await expect(isolation.ensureAgentNetwork(docker, "9")).resolves.toBe("nora-runtime-net-9");
   });
 
   it("removes the runtime network when the runtime is destroyed", async () => {
-    process.env.NORA_AGENT_NETWORK_ISOLATION = "per-agent";
+    process.env.NORA_AGENT_NETWORK_ISOLATION = "per-runtime";
     process.env.NORA_AGENT_NETWORK_PEERS = "admission";
     const { backend, network } = mockBackend();
     await backend.destroy("nora-hermes-x", { agentId: "7", preserveState: true });
@@ -84,7 +84,7 @@ describe("Cloud runtime isolation (opt-in)", () => {
     const { backend, network } = mockBackend();
     await isolation.reconcileAgentNetworks(backend.docker, ["admission"]);
     expect(backend.docker.listNetworks).toHaveBeenCalledWith({
-      filters: JSON.stringify({ label: ["nora.agent.network=true"] }),
+      filters: JSON.stringify({ label: ["nora.runtime.network=true"] }),
     });
     expect(network.connect).toHaveBeenCalledWith({ Container: "admission" });
   });
