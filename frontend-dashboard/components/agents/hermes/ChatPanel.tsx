@@ -2,9 +2,20 @@ import { useEffect, useRef, useState } from "react";
 import { AlertTriangle, Bot, Loader2, RefreshCw, Send, Trash2 } from "lucide-react";
 import { fetchWithAuth } from "../../../lib/api";
 import { markAgentValidated } from "../../../lib/activation";
+import {
+  checkedRecovery,
+  checkpointKey,
+  knownRefusal,
+  loadPending,
+  pendingLabel,
+  savePending,
+  scopeKey,
+  type PendingChat,
+} from "../../../lib/chatRecovery";
 
 function formatMessageTime(value) {
   try {
+    if (!value || Number.isNaN(new Date(value).getTime())) return "";
     return new Date(value).toLocaleTimeString([], {
       hour: "2-digit",
       minute: "2-digit",
@@ -14,7 +25,17 @@ function formatMessageTime(value) {
   }
 }
 
-export default function HermesChatPanel({
+export default function HermesChatPanel(props) {
+  const scope = props.runtimeInfo?.chatScope;
+  return (
+    <HermesChatSession
+      key={JSON.stringify([props.agentId, scope?.ownerId, scope?.profile])}
+      {...props}
+    />
+  );
+}
+
+function HermesChatSession({
   agentId,
   runtimeInfo,
   loadingRuntime,
@@ -26,82 +47,294 @@ export default function HermesChatPanel({
   const [draft, setDraft] = useState("");
   const [error, setError] = useState("");
   const [sessionId, setSessionId] = useState("");
+  const [pending, setPending] = useState<PendingChat | null>(null);
+  const [recovering, setRecovering] = useState(false);
+  const [checkpointReady, setCheckpointReady] = useState(false);
+  const [storageError, setStorageError] = useState("");
   const messageListRef = useRef(null);
-
+  const scope =
+    runtimeInfo?.chatScope?.agentId === agentId && runtimeInfo.chatScope.profile === null
+      ? runtimeInfo.chatScope
+      : null;
+  const key = scope ? scopeKey(scope) : "";
+  const current = useRef({ key, generation: 0 });
+  if (current.current.key !== key)
+    current.current = { key, generation: current.current.generation + 1 };
+  const abort = useRef<AbortController | null>(null);
+  const busy = useRef(false);
   const runtimeReady = Boolean(runtimeInfo?.health?.ok);
   const defaultModel =
     runtimeInfo?.configuredModel ||
     runtimeInfo?.defaultModel ||
     runtimeInfo?.models?.[0]?.id ||
     null;
+  const blocked = Boolean(
+    pending || sending || recovering || storageError || !checkpointReady || !scope,
+  );
 
   useEffect(() => {
-    if (!messageListRef.current) return;
-    messageListRef.current.scrollTop = messageListRef.current.scrollHeight;
+    abort.current?.abort();
+    busy.current = false;
+    setMessages([]);
+    setDraft("");
+    setSessionId("");
+    setError("");
+    setSending(false);
+    setRecovering(false);
+    setPending(null);
+    setStorageError("");
+    setCheckpointReady(false);
+    if (scope) {
+      try {
+        const saved = loadPending(sessionStorage, scope);
+        setPending(saved);
+        if (saved) setSessionId(saved.sessionId);
+        setCheckpointReady(true);
+      } catch (e) {
+        setStorageError(e.message);
+      }
+    }
+    return () => {
+      current.current.generation++;
+      abort.current?.abort();
+    };
+  }, [key]);
+  useEffect(() => {
+    if (messageListRef.current)
+      messageListRef.current.scrollTop = messageListRef.current.scrollHeight;
   }, [messages, sending]);
 
+  function capture() {
+    const stamp = { ...current.current };
+    const controller = new AbortController();
+    abort.current = controller;
+    return {
+      signal: controller.signal,
+      valid: () =>
+        stamp.key === current.current.key &&
+        stamp.generation === current.current.generation &&
+        !controller.signal.aborted,
+    };
+  }
+  async function stillOwner(operation, ownerId) {
+    if (!operation.valid()) return false;
+    const response = await fetchWithAuth("/api/auth/me", { signal: operation.signal });
+    const user = await response.json();
+    if (!operation.valid()) return false;
+    if (!response.ok || user.id !== ownerId) {
+      current.current.generation++;
+      busy.current = false;
+      setMessages([]);
+      setDraft("");
+      setPending(null);
+      setSending(false);
+      setRecovering(false);
+      setCheckpointReady(false);
+      setError("Your account changed. Refresh the runtime before continuing.");
+      onRefreshRuntime();
+      return false;
+    }
+    return true;
+  }
+  function forget(p) {
+    try {
+      sessionStorage.removeItem(checkpointKey(p));
+      setPending(null);
+    } catch {
+      setStorageError(
+        "The saved request could not be updated. Keep this tab open and contact support.",
+      );
+    }
+  }
   function resetConversation() {
+    if (blocked || busy.current) return;
     setMessages([]);
     setSessionId("");
     setError("");
   }
-
+  async function refreshRequest(resolve = false) {
+    if (!pending || busy.current || !scope) return;
+    if (
+      resolve &&
+      !window.confirm(
+        "This request may already have run. Discard its remaining work? This does not undo actions it already took.",
+      )
+    )
+      return;
+    const p = pending,
+      operation = capture();
+    busy.current = true;
+    setRecovering(true);
+    setError("");
+    try {
+      const query = new URLSearchParams({
+        ownerId: p.ownerId,
+        requestId: p.requestId,
+        sessionId: p.sessionId,
+      });
+      const response = await fetchWithAuth(
+        `/api/agents/${p.agentId}/hermes-ui/chat${resolve ? "/resolve" : `?${query}`}`,
+        {
+          signal: operation.signal,
+          ...(resolve ? { method: "POST", body: JSON.stringify({ ...p, confirm: true }) } : {}),
+        },
+      );
+      const data = await response.json().catch(() => ({}));
+      if (!operation.valid() || !(await stillOwner(operation, p.ownerId))) return;
+      if (!response.ok)
+        throw new Error(
+          data.error || "The request could not be verified. Refresh again; do not resend it.",
+        );
+      const result = checkedRecovery(data, p.receipt);
+      if (result.receipt.status === "terminal") {
+        if (result.historyAvailable && Array.isArray(result.history)) {
+          setMessages(result.history.map((m, i) => ({ ...m, id: `history-${i}` })));
+        } else if (result.output) {
+          setMessages((rows) => [
+            ...rows,
+            {
+              id: `recovered-${p.requestId}`,
+              role: "assistant",
+              content: result.output,
+              createdAt: new Date().toISOString(),
+            },
+          ]);
+        }
+        forget(p);
+        setError(
+          result.historyAvailable
+            ? ""
+            : "The request is settled. Conversation history is temporarily unavailable.",
+        );
+      } else {
+        const next = { ...p, status: result.status, runId: result.runId, receipt: result.receipt };
+        savePending(sessionStorage, next);
+        setPending(next);
+        if (result.historyAvailable)
+          setMessages(result.history.map((m, i) => ({ ...m, id: `history-${i}` })));
+      }
+    } catch (e) {
+      if (operation.valid())
+        setError(e.message || "The request remains unconfirmed. Refresh again before continuing.");
+    } finally {
+      if (operation.valid()) {
+        busy.current = false;
+        setRecovering(false);
+      }
+    }
+  }
   async function handleSend() {
     const content = draft.trim();
-    if (!content || sending || !runtimeReady) return;
-
+    if (!content || blocked || busy.current || !runtimeReady || !scope) return;
+    const p: PendingChat = {
+      ...scope,
+      version: 1,
+      requestId: crypto.randomUUID(),
+      sessionId: sessionId || crypto.randomUUID(),
+      status: "unconfirmed",
+    };
+    try {
+      savePending(sessionStorage, p);
+    } catch {
+      setStorageError(
+        "This browser could not save the request identity. Enable session storage before sending.",
+      );
+      return;
+    }
     const nextUserMessage = {
-      id: `user-${Date.now().toString(36)}`,
+      id: `user-${p.requestId}`,
       role: "user",
       content,
       createdAt: new Date().toISOString(),
     };
-    const nextMessages = [...messages, nextUserMessage];
-
+    const nextMessages = [...messages, nextUserMessage],
+      operation = capture();
+    busy.current = true;
     setMessages(nextMessages);
     setDraft("");
+    setPending(p);
+    setSessionId(p.sessionId);
     setSending(true);
     setError("");
-
+    // A refusal from POST itself proves no input was admitted. A failed owner
+    // refresh after a successful POST cannot make that same claim.
+    let refused = false,
+      ownerVerified = false;
     try {
-      const res = await fetchWithAuth(`/api/agents/${agentId}/hermes-ui/chat`, {
-        method: "POST",
-        body: JSON.stringify({
-          ...(defaultModel ? { model: defaultModel } : {}),
-          ...(sessionId ? { sessionId } : {}),
-          messages: nextMessages.map((message) => ({
-            role: message.role,
-            content: message.content,
-          })),
-        }),
-      });
-      const data = await res.json().catch(() => ({}));
-
-      if (!res.ok) {
-        throw new Error(data.error || "Headmaster chat request failed");
+      let response;
+      try {
+        response = await fetchWithAuth(`/api/agents/${p.agentId}/hermes-ui/chat`, {
+          method: "POST",
+          signal: operation.signal,
+          body: JSON.stringify({
+            ...p,
+            ...(defaultModel ? { model: defaultModel } : {}),
+            messages: nextMessages.map(({ role, content }) => ({ role, content })),
+          }),
+        });
+      } catch (e) {
+        refused = e.message === "Unauthorized";
+        throw e;
       }
-
-      setSessionId(data.sessionId || "");
-      if (data.message) {
-        markAgentValidated(agentId, "hermes_chat");
+      const data = await response.json().catch(() => ({}));
+      refused = !response.ok && knownRefusal(response.status, data);
+      if (!operation.valid()) return;
+      if (!(await stillOwner(operation, p.ownerId))) return;
+      ownerVerified = true;
+      if (!response.ok && refused)
+        throw new Error(data.error || "The request was refused before it could run.");
+      if (!response.ok) {
+        const status =
+          data.code === "admission_queued"
+            ? "queued"
+            : data.code === "unknown_execution"
+              ? "unknown"
+              : "unconfirmed";
+        const next = { ...p, status };
+        savePending(sessionStorage, next);
+        setPending(next);
+        throw new Error(
+          "The request may have been accepted. Refresh its status before continuing.",
+        );
       }
-      setMessages((current) => [
-        ...current,
+      if (typeof data.message !== "string" || !data.message)
+        throw new Error("The reply could not be verified. Refresh this request's status.");
+      setSessionId(data.sessionId || p.sessionId);
+      forget(p);
+      markAgentValidated(p.agentId, "hermes_chat");
+      setMessages([
+        ...nextMessages,
         {
-          id: `assistant-${Date.now().toString(36)}`,
+          id: `assistant-${p.requestId}`,
           role: "assistant",
-          content: data.message || "(No response returned)",
+          content: data.message,
           usage: data.usage || null,
-          model: data.model || defaultModel || null,
+          model: data.model || defaultModel,
           createdAt: new Date().toISOString(),
         },
       ]);
-    } catch (nextError) {
-      setMessages((current) => current.filter((message) => message.id !== nextUserMessage.id));
-      setDraft(content);
-      setError(nextError.message || "Headmaster chat request failed");
+    } catch (e) {
+      if (!operation.valid()) return;
+      if (refused) {
+        forget(p);
+        if (ownerVerified) {
+          setMessages(messages);
+          setDraft(content);
+        } else {
+          setMessages([]);
+          setDraft("");
+          setCheckpointReady(false);
+          onRefreshRuntime();
+        }
+      }
+      setError(
+        e.message || "The request may have been accepted. Refresh its status before continuing.",
+      );
     } finally {
-      setSending(false);
+      if (operation.valid()) {
+        busy.current = false;
+        setSending(false);
+      }
     }
   }
 
@@ -127,7 +360,7 @@ export default function HermesChatPanel({
             Headmaster Chat
           </p>
           <p className="mt-1 text-sm font-bold text-slate-900">
-            Direct conversation against the Headmaster runtime&apos;s OpenAI-compatible API.
+            Direct conversation with the running Headmaster workspace.
           </p>
           <p className="mt-1 text-xs text-slate-500">
             {defaultModel ? `Default model: ${defaultModel}` : "No model reported yet"}
@@ -166,6 +399,41 @@ export default function HermesChatPanel({
         </div>
       ) : null}
 
+      {pending || storageError ? (
+        <div
+          role="status"
+          className="space-y-3 rounded-2xl border border-amber-200 bg-amber-50 px-4 py-3"
+        >
+          <p className="text-sm font-bold text-amber-800">
+            {storageError ? "Chat is paused" : pendingLabel(pending.status)}
+          </p>
+          <p className="text-xs text-amber-700">
+            {storageError ||
+              "Your sent request is kept here. Check its status before sending another message or resetting this conversation."}
+          </p>
+          {pending ? (
+            <div className="flex flex-wrap gap-2">
+              <button
+                onClick={() => refreshRequest()}
+                disabled={sending || recovering}
+                className="inline-flex items-center gap-1.5 rounded-xl border border-amber-300 px-3 py-2 text-xs font-bold text-amber-800 disabled:opacity-50"
+              >
+                <RefreshCw size={12} />
+                {recovering ? "Checking request" : "Refresh request"}
+              </button>
+              {pending.receipt?.status === "unknown" && pending.receipt.execution_generation ? (
+                <button
+                  onClick={() => refreshRequest(true)}
+                  disabled={sending || recovering}
+                  className="rounded-xl border border-amber-300 px-3 py-2 text-xs font-bold text-amber-800 disabled:opacity-50"
+                >
+                  Discard remaining work
+                </button>
+              ) : null}
+            </div>
+          ) : null}
+        </div>
+      ) : null}
       {error ? (
         <div className="flex items-start gap-3 rounded-2xl border border-rose-200 bg-rose-50 px-4 py-3">
           <AlertTriangle size={16} className="mt-0.5 shrink-0 text-rose-600" />
@@ -189,7 +457,7 @@ export default function HermesChatPanel({
             </div>
             <button
               onClick={resetConversation}
-              disabled={!messages.length && !sessionId}
+              disabled={blocked || (!messages.length && !sessionId)}
               className="inline-flex items-center gap-1.5 rounded-xl border border-slate-200 px-3 py-2 text-xs font-bold text-slate-700 transition-colors hover:bg-slate-50 disabled:cursor-not-allowed disabled:opacity-50"
             >
               <Trash2 size={12} />
@@ -204,9 +472,13 @@ export default function HermesChatPanel({
             {messages.length === 0 ? (
               <div className="flex h-full min-h-[280px] flex-col items-center justify-center rounded-2xl border border-dashed border-slate-200 bg-white px-6 text-center">
                 <Bot size={26} className="text-slate-300" />
-                <p className="mt-3 text-sm font-bold text-slate-700">No active conversation yet</p>
+                <p className="mt-3 text-sm font-bold text-slate-700">
+                  {pending ? "Sent request awaiting status" : "No active conversation yet"}
+                </p>
                 <p className="mt-1 max-w-sm text-xs text-slate-500">
-                  Send a prompt once the Headmaster runtime reports healthy status.
+                  {pending
+                    ? "Refresh request to load its saved conversation."
+                    : "Send a prompt once the Headmaster runtime reports healthy status."}
                 </p>
               </div>
             ) : (
@@ -274,12 +546,14 @@ export default function HermesChatPanel({
                 onChange={(event) => setDraft(event.target.value)}
                 onKeyDown={handleComposerKeyDown}
                 placeholder={
-                  runtimeReady
-                    ? "Ask Headmaster to inspect the workspace, summarize logs, or draft a response..."
-                    : "Wait for the Headmaster runtime to become ready before sending a prompt."
+                  pending
+                    ? "Check the pending request before continuing."
+                    : runtimeReady
+                      ? "Ask Headmaster to inspect the workspace, summarize logs, or draft a response..."
+                      : "Wait for the Headmaster runtime to become ready before sending a prompt."
                 }
                 rows={4}
-                disabled={!runtimeReady || sending}
+                disabled={!runtimeReady || blocked}
                 className="w-full resize-none bg-transparent text-sm text-slate-800 outline-none placeholder:text-slate-400 disabled:cursor-not-allowed disabled:text-slate-400"
               />
               <div className="mt-3 flex items-center justify-between gap-3">
@@ -288,7 +562,7 @@ export default function HermesChatPanel({
                 </div>
                 <button
                   onClick={handleSend}
-                  disabled={!runtimeReady || sending || !draft.trim()}
+                  disabled={!runtimeReady || blocked || !draft.trim()}
                   className="inline-flex items-center gap-2 rounded-xl bg-blue-600 px-4 py-2 text-xs font-bold text-white transition-colors hover:bg-blue-700 disabled:cursor-not-allowed disabled:opacity-50"
                 >
                   {sending ? <Loader2 size={12} className="animate-spin" /> : <Send size={12} />}
@@ -329,7 +603,7 @@ export default function HermesChatPanel({
                   Session Id
                 </p>
                 <p className="mt-1 break-all text-sm font-medium text-slate-800">
-                  {sessionId || "Generated on first response"}
+                  {sessionId || "Created before sending"}
                 </p>
               </div>
             </div>
@@ -342,9 +616,12 @@ export default function HermesChatPanel({
             <div className="space-y-3 p-4 text-xs text-slate-600">
               <p>Use the Status tab first if Headmaster is still starting or models are missing.</p>
               <p>
-                Integration and channel changes can restart Headmaster, so refresh this tab after edits.
+                Integration and channel changes can restart Headmaster, so refresh this tab after
+                edits.
               </p>
-              <p>Conversation state is carried with the Headmaster session id until you reset it.</p>
+              <p>
+                Conversation state is carried with the Headmaster session id until you reset it.
+              </p>
             </div>
           </section>
         </aside>
