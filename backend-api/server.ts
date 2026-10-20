@@ -682,6 +682,8 @@ const corsOrigins = (
   .map((s) => s.trim())
   .filter(Boolean);
 app.use(cors({ origin: corsOrigins }));
+// Cookie-authenticated mutations must come from an allowed origin (CSRF gate).
+app.use(require("./middleware/csrfOrigin").createCsrfOriginGate({ allowedOrigins: corsOrigins }));
 
 // Rate-limit caps are env-overridable so CI/E2E — where the whole Playwright
 // suite hits the API from a single localhost IP — can raise them without

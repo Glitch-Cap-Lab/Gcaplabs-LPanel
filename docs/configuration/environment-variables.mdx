@@ -503,7 +503,7 @@ Use `NORA_BACKUP_STORAGE=ssh`.
 
 | Variable       | Required | Default                 | Description                                                                                                                                         |
 | -------------- | -------- | ----------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `CORS_ORIGINS` | No       | `http://localhost:8080` | Comma-separated list of allowed CORS origins. Update to your public origin when Nora is exposed on a domain, for example `https://app.example.com`. |
+| `CORS_ORIGINS` | No       | `http://localhost:8080` | Comma-separated list of allowed CORS origins. Update to your public origin when Nora is exposed on a domain, for example `https://app.example.com`. The same list gates cookie-authenticated writes: a POST, PUT, PATCH or DELETE that carries the session cookie must send an `Origin` (or, failing that, `Referer`) from this list, otherwise the API answers 403 `csrf_origin_rejected`. Bearer and API-key clients, signed webhooks and `/internal/` routes are not affected. |
 
 ## LLM key storage
 
