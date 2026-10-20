@@ -308,8 +308,9 @@ Local Docker Hermes runtimes can be isolated from each other. Both settings are 
 
 | Variable                       | Required | Default | Description |
 | ------------------------------ | -------- | ------- | ----------- |
-| `NORA_AGENT_NETWORK_ISOLATION` | No       | unset   | `per-runtime` gives every runtime its own Docker network (Headmaster has one runtime per account, so this is a network per account; its bots are profiles inside the runtime and share it) (and keeps it off the default bridge). The worker attaches `NORA_AGENT_NETWORK_PEERS` to each one and re-attaches them when it starts. |
+| `NORA_AGENT_NETWORK_ISOLATION` | No       | unset   | `per-runtime` gives every runtime its own Docker network (Headmaster has one runtime per account, so this is a network per account; its bots are profiles inside the runtime and share it) (and keeps it off the default bridge). The worker attaches `NORA_AGENT_NETWORK_PEERS` to each one and re-attaches them when it starts and again every minute, so a recreated peer rejoins on its own. |
 | `NORA_AGENT_NETWORK_PEERS`     | No       | unset   | Comma-separated container names that must reach every runtime (API, worker, and any service that calls a runtime by name). A missing peer is skipped with a warning. |
+| `NORA_AGENT_NETWORK_RECONCILE_SECONDS` | No | `60` | Seconds between passes that re-attach the peers to every runtime network (minimum 10). `0` limits it to the start-up pass. |
 | `NORA_AGENT_VOLUME_QUOTA`      | No       | unset   | `monitor` logs (every 10 minutes, read-only) each runtime home volume that is over its agent's `disk_gb`; use it on hosts without filesystem quotas such as ext4. `enforce` creates each new runtime home volume with `size=<disk_gb>g`. Requires `/var/lib/docker` on XFS mounted with `pquota`; otherwise volume creation fails. Existing volumes are not resized. |
 
 ## Kubernetes registry and Compose mount helpers

@@ -1,7 +1,7 @@
 const HermesBackend = require("../../workers/provisioner/backends/hermes");
 const isolation = require("../../workers/provisioner/backends/agentIsolation");
 
-const ENV_KEYS = ["NORA_AGENT_NETWORK_ISOLATION", "NORA_AGENT_NETWORK_PEERS", "NORA_AGENT_VOLUME_QUOTA", "NORA_AGENT_NETWORK"];
+const ENV_KEYS = ["NORA_AGENT_NETWORK_RECONCILE_SECONDS", "NORA_AGENT_NETWORK_ISOLATION", "NORA_AGENT_NETWORK_PEERS", "NORA_AGENT_VOLUME_QUOTA", "NORA_AGENT_NETWORK"];
 
 function mockBackend() {
   const backend = new HermesBackend();
@@ -87,6 +87,13 @@ describe("Cloud runtime isolation (opt-in)", () => {
       filters: JSON.stringify({ label: ["nora.runtime.network=true"] }),
     });
     expect(network.connect).toHaveBeenCalledWith({ Container: "admission" });
+  });
+
+  it("re-attaches on a timer by default and lets the timer be switched off", () => {
+    expect(isolation.networkReconcileIntervalMs({})).toBe(60000);
+    expect(isolation.networkReconcileIntervalMs({ NORA_AGENT_NETWORK_RECONCILE_SECONDS: "0" })).toBe(0);
+    expect(isolation.networkReconcileIntervalMs({ NORA_AGENT_NETWORK_RECONCILE_SECONDS: "1" })).toBe(10000);
+    expect(isolation.networkReconcileIntervalMs({ NORA_AGENT_NETWORK_RECONCILE_SECONDS: "junk" })).toBe(60000);
   });
 
   it("sizes the home volume from disk_gb only when quota is enforced", async () => {
