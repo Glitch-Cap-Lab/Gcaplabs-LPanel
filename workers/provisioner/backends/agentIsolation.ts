@@ -108,10 +108,25 @@ async function reconcileAgentNetworks(docker, peers = agentNetworkPeers()) {
   return networks.map((net) => net.Name);
 }
 
+// Remove the per-runtime network after its runtime is destroyed. Whoever deletes an
+// account (the API as well as the worker) calls this, and the API does not carry the
+// isolation settings, so it must not depend on them: a missing network is a no-op, and
+// whatever is still attached (the peers) is detached first, since Docker refuses to
+// remove a network that has attached endpoints.
 async function removeAgentNetwork(docker, agentId, peers = agentNetworkPeers()) {
   const name = perRuntimeNetworkName(agentId);
   const network = docker.getNetwork(name);
-  for (const peer of peers) {
+  let attached = [];
+  try {
+    const info = await network.inspect();
+    attached = Object.values(info?.Containers || {})
+      .map((container) => container?.Name)
+      .filter(Boolean);
+  } catch (error) {
+    if (error?.statusCode === 404) return;
+    // Cannot list the members; fall back to the configured peers.
+  }
+  for (const peer of new Set([...peers, ...attached])) {
     try {
       await network.disconnect({ Container: peer, Force: true });
     } catch {
