@@ -6,6 +6,7 @@ const os = require("os");
 const path = require("path");
 const Docker = require("dockerode");
 const { buildAutoUpgrade, buildReleaseInfo } = require("./releaseInfo");
+const { redactText } = require("./lib/redaction");
 
 const DEFAULT_STATE_DIR = "/var/lib/nora-upgrade";
 const DEFAULT_STATE_VOLUME = "nora_upgrade_state";
@@ -356,37 +357,6 @@ function publicJob(job) {
   };
 }
 
-/**
- * Best-effort redaction for known environment secrets and common credential
- * patterns. It reduces accidental disclosure but is not an exhaustive sanitizer.
- *
- * @param {string} input - Log or error text.
- * @param {Object} env - Environment containing values to redact.
- * @returns {string} Redacted text.
- */
-function redactText(input, env = process.env) {
-  let output = String(input || "");
-  const secretValues = [
-    env.JWT_SECRET,
-    env.ENCRYPTION_KEY,
-    env.DB_PASSWORD,
-    env.NORA_UPGRADE_REPO,
-    env.STRIPE_SECRET_KEY,
-    env.STRIPE_WEBHOOK_SECRET,
-    env.AWS_SECRET_ACCESS_KEY,
-  ]
-    .map(readString)
-    .filter((value) => value.length >= 8);
-
-  for (const secret of secretValues) {
-    output = output.split(secret).join("[redacted]");
-  }
-
-  return output
-    .replace(/(token|secret|password|key)=([^\s]+)/gi, "$1=[redacted]")
-    .replace(/(Bearer\s+)[A-Za-z0-9._~+/=-]+/g, "$1[redacted]");
-}
-
 async function ensureStateDir(env = process.env) {
   await fsp.mkdir(getStateDir(env), { recursive: true });
 }
@@ -444,7 +414,28 @@ async function readLogTail(logFile, env = process.env) {
 
   try {
     const payload = await fsp.readFile(logFile, "utf8");
-    const lines = redactText(payload, env)
+    // Keep a bounded tail at complete-line boundaries before redaction, so a
+    // long build log does not discard its recent diagnostics. Track PEM state
+    // across the cut: a private-key continuation must never become plain text.
+    let start = Math.max(0, payload.length - 12288);
+    if (start > 0) {
+      const newline = payload.indexOf("\n", start - 1);
+      if (newline < 0) return ["[redacted: oversized log line]"];
+      start = newline + 1;
+    }
+    let tail = payload.slice(start);
+    let inPrivateKey = false;
+    const boundaries = /-----([A-Z]+) [A-Z0-9 ]{0,80}PRIVATE KEY-----/g;
+    for (const boundary of payload.matchAll(boundaries)) {
+      if (boundary.index >= start) break;
+      if (boundary[1] === "BEGIN") inPrivateKey = true;
+      else if (boundary[1] === "END") inPrivateKey = false;
+    }
+    if (inPrivateKey) {
+      const end = /-----END [A-Z0-9 ]{0,80}PRIVATE KEY-----/.exec(tail);
+      tail = end ? `[redacted]\n${tail.slice(end.index + end[0].length)}` : "[redacted]";
+    }
+    const lines = redactText(tail, env)
       .split(/\r?\n/)
       .map((line) => line.trimEnd())
       .filter(Boolean);

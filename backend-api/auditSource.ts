@@ -1,4 +1,5 @@
 // @ts-nocheck
+const { redactForRequest, requestPath } = require("./lib/redaction");
 function isPresent(value) {
   return value !== undefined && value !== null && value !== "";
 }
@@ -63,7 +64,7 @@ function buildSourceLabel(kind, account, service, explicitLabel) {
  * @param {Object} [source={}] - Explicit provenance fields that override request values.
  * @returns {Object} Compacted audit-source metadata.
  */
-function buildSourceMetadata(req, source = {}) {
+function buildSourceMetadataRaw(req, source = {}) {
   const sourceObject =
     source && typeof source === "object" && !Array.isArray(source)
       ? source
@@ -107,13 +108,24 @@ function buildSourceMetadata(req, source = {}) {
     channel: channel || (req ? "http" : "internal"),
     area: area || null,
     method: method || req?.method || null,
-    route: route || req?.originalUrl || req?.path || null,
+    route: route ? String(route).split(/[?#]/, 1)[0] : req ? requestPath(req) : null,
     origin: origin || readRequestHeader(req, "origin") || readRequestHeader(req, "referer") || null,
     ip: ip || readRequestIp(req) || null,
     userAgent: userAgent || readRequestHeader(req, "user-agent") || null,
     account,
     ...rest,
   });
+}
+
+function buildSourceMetadata(req, source = {}) {
+  try {
+    const value = redactForRequest(buildSourceMetadataRaw(req, source), req);
+    return value && typeof value === "object"
+      ? value
+      : { kind: "system", label: "[redaction failed]" };
+  } catch {
+    return { kind: "system", label: "[redaction failed]" };
+  }
 }
 
 /**
@@ -147,15 +159,23 @@ function resolveAuditSource(metadata = {}) {
  * @returns {Object} Metadata with a normalized `source` field.
  */
 function ensureAuditSourceMetadata(metadata = {}, req = null) {
-  const base =
-    metadata && typeof metadata === "object" && !Array.isArray(metadata)
-      ? metadata
-      : { value: metadata };
+  try {
+    const base =
+      metadata && typeof metadata === "object" && !Array.isArray(metadata)
+        ? metadata
+        : { value: metadata };
 
-  return {
-    ...base,
-    source: buildSourceMetadata(req, base.source || {}),
-  };
+    const value = redactForRequest(
+      {
+        ...base,
+        source: buildSourceMetadata(req, base.source || {}),
+      },
+      req,
+    );
+    return value && typeof value === "object" ? value : { redaction: "[redaction failed]" };
+  } catch {
+    return { redaction: "[redaction failed]" };
+  }
 }
 
 module.exports = {

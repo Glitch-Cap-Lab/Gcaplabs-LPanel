@@ -86,6 +86,7 @@ Proxmox places standard OpenClaw or a prepared Hermes image in an **unprivileged
 
 - **Scheduled backups are encrypted** with AES-256-GCM in a versioned archive format; restores verify the format header before decrypting.
 - **Audit logging** records operator actions in PostgreSQL for review.
+- **Error and audit diagnostics** use the shared bounded credential redactor before console output, API error responses, event persistence and alert evaluation. HTTP provenance records a path without query strings and origin domains without URL credentials or fragments. Valid UUID correlation IDs, status codes, actor/resource IDs and safe stack locations remain available; invalid correlation headers receive a generated UUID. Unavailable or oversized diagnostic values become markers rather than raw fallback text. This covers the shared boundary and its direct authentication/webhook callers; it does not sanitize historical records or establish a retention policy.
 
 ## Your data stays yours
 
