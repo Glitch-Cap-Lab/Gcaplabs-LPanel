@@ -4,6 +4,10 @@
 
 Alert rules let a workspace listen for specific event types and forward each match to one or more delivery channels. A rule has an event pattern (literal or suffix glob), a list of channels, and an enabled toggle. Rules only fire for events emitted within the same workspace.
 
+An explicit `metadata.workspace.id` or `metadata.workspaceId` limits delivery to that workspace. Agent events without an explicit workspace use the agent's current workspace assignments, including intentional sharing. When an event references multiple agents, a recipient workspace must have access to every referenced agent. Explicit workspace scope must also match those assignments.
+
+Events without a resolvable workspace or agent assignment do not trigger workspace channels. Conflicting scope, a deleted agent, or an ownership lookup failure also prevents delivery. System or administrator provenance does not grant access to workspace channels; unscoped platform events remain available through the existing administrator audit log. Queued webhooks recheck current workspace assignments and the enabled rule before sending. Removing a channel or changing its URL or headers also cancels delivery of its queued snapshots.
+
 ![Workspace alert rules — active rules with last-fired and last-error fields](/images/guides/alert-rules/alerts-list.png)
 
 ## Event patterns
@@ -51,7 +55,7 @@ The body posted to your endpoint:
 ```
 
 <Note>
-  Metadata is clamped to 8 KiB before queueing to keep Redis usage bounded. Pathologically large payloads are replaced with `{ truncated: true, originalBytes, workspace, agent }`.
+  Metadata is clamped to 8 KiB before queueing to keep Redis usage bounded. Pathologically large payloads are replaced with `{ truncated: true, originalBytes, workspace, agentId, agent, sourceAgent }`, retaining the references needed to recheck workspace access.
 </Note>
 
 ### Email
@@ -94,7 +98,7 @@ These surface in the dashboard under **Settings → Alert rules** and via the [A
     The platform mailer isn't configured. Set up SMTP in Admin Settings (or set `MAILER_*` env vars), then resend.
   </Accordion>
 
-  <Accordion title="Rule fires for events from other workspaces">
-    Rules filter by `metadata.workspace.id` on each event. If you see cross-workspace fires, the emitter is missing workspace metadata — file an issue with the event type.
+  <Accordion title="An event did not trigger a workspace rule">
+    Check the event's workspace scope and the referenced agent's current workspace assignments. Missing or conflicting scope, removed assignments, disabled rules, and unavailable ownership lookups prevent delivery. An explicit workspace on an agent event must be one of the agent's assigned workspaces.
   </Accordion>
 </AccordionGroup>
