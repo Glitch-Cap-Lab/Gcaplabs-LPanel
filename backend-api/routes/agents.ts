@@ -665,8 +665,19 @@ async function resolveHermesConnectInfo(agent, req) {
   // The connect block carries the decrypted runtime API key, so it is a
   // management capability rather than ordinary status metadata. Keep the
   // shared Hermes status route intact while omitting durable credentials for
-  // non-owner workspace members and control-plane API keys.
-  if (req?.apiKey || agent?.effective_role !== "owner") return null;
+  // non-owner workspace members and control-plane API keys. An API key gets it
+  // only when it was issued with the explicit "agents:connect" scope and its
+  // issuing user owns the agent; "agents:read"/"agents:write" never suffice.
+  if (req?.apiKey) {
+    // A workspace API key is a capability, not a role: its loaded agent row has
+    // no effective_role, so require the explicit scope and that the key's
+    // issuing user is the agent's owner.
+    const scopes = Array.isArray(req.apiKey.scopes) ? req.apiKey.scopes : [];
+    if (!scopes.includes("agents:connect")) return null;
+    if (!req.user?.id || agent?.user_id !== req.user.id) return null;
+  } else if (agent?.effective_role !== "owner") {
+    return null;
+  }
 
   const runtimeFields = buildAgentRuntimeFields(agent);
   if (runtimeFields.runtime_family !== "hermes") return null;
