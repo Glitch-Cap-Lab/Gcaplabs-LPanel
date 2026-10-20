@@ -47,25 +47,25 @@ describe("internal account deletion", () => {
   });
 
   test("cloud runtime: destroys container then deletes the agent row", async () => {
-    const d = deps({ id: AGENT });
+    const d = deps({ id: AGENT, external_namespace: "headmaster", external_owner_uuid: OWNER });
     const res = await request(app({ deps: d })).post("/internal/cloud-runtime")
-      .set("x-headmaster-internal-secret", SECRET).send({ agentId: AGENT }).expect(200);
+      .set("x-headmaster-internal-secret", SECRET).send({ agentId: AGENT, ownerId: OWNER }).expect(200);
     expect(res.body).toEqual({ done: true, existed: true });
     expect(d.calls).toEqual(["SELECT", "cancel", "destroy", "DELETE", "release"]);
   });
 
   test("cloud runtime: missing agent is done", async () => {
     const res = await request(app({ deps: deps(null) })).post("/internal/cloud-runtime")
-      .set("x-headmaster-internal-secret", SECRET).send({ agentId: AGENT }).expect(200);
+      .set("x-headmaster-internal-secret", SECRET).send({ agentId: AGENT, ownerId: OWNER }).expect(200);
     expect(res.body.existed).toBe(false);
   });
 
   test("memory bank: DELETE on Hindsight, 404 counts as done", async () => {
     const fetchImpl = jest.fn(async () => ({ ok: false, status: 404 }));
     const res = await request(app({ deps: deps(null), fetchImpl })).post("/internal/memory-bank")
-      .set("x-headmaster-internal-secret", SECRET).send({ bankId: "hm-bank_1" }).expect(200);
+      .set("x-headmaster-internal-secret", SECRET).send({ bankId: `hermes-u-${OWNER.replace(/-/g, "_")}`, ownerId: OWNER }).expect(200);
     expect(res.body.done).toBe(true);
-    expect(fetchImpl.mock.calls[0][0]).toBe("http://hindsight.test/v1/default/banks/hm-bank_1");
+    expect(fetchImpl.mock.calls[0][0]).toBe(`http://hindsight.test/v1/default/banks/hermes-u-${OWNER.replace(/-/g, "_")}`);
     expect(fetchImpl.mock.calls[0][1].method).toBe("DELETE");
   });
 
@@ -78,7 +78,7 @@ describe("internal account deletion", () => {
     }));
     const bankId = `hermes-u-${OWNER.replace(/-/g, "_")}`;
     const res = await request(a).post("/internal/memory-bank")
-      .set("x-headmaster-internal-secret", SECRET).send({ bankId }).expect(200);
+      .set("x-headmaster-internal-secret", SECRET).send({ bankId, ownerId: OWNER }).expect(200);
     expect(res.body).toEqual({ done: true, existed: true });
     expect(fetchImpl.mock.calls[0][0]).toBe(`http://hindsight.test/v1/default/banks/${bankId}`);
     expect(fetchImpl.mock.calls[0][1].headers).toEqual({ authorization: `Bearer ${"g".repeat(40)}`, "x-headmaster-owner-id": OWNER });
@@ -87,7 +87,7 @@ describe("internal account deletion", () => {
   test("memory bank: a Hindsight auth failure is reported, not counted as done", async () => {
     const fetchImpl = jest.fn(async () => ({ ok: false, status: 401 }));
     const res = await request(app({ deps: deps(null), fetchImpl })).post("/internal/memory-bank")
-      .set("x-headmaster-internal-secret", SECRET).send({ bankId: `hermes-u-${OWNER.replace(/-/g, "_")}` }).expect(502);
+      .set("x-headmaster-internal-secret", SECRET).send({ bankId: `hermes-u-${OWNER.replace(/-/g, "_")}`, ownerId: OWNER }).expect(502);
     expect(res.body.error).toBe("hindsight_delete_failed");
   });
 
@@ -105,5 +105,45 @@ describe("internal account deletion", () => {
   test("bad ids are 400", async () => {
     await request(app({ deps: deps(null) })).post("/internal/relay-usage")
       .set("x-headmaster-internal-secret", SECRET).send({ ownerId: "x" }).expect(400);
+  });
+});
+
+
+// Missing owner is never a legacy bypass of the tenant boundary.
+describe("account deletion owner boundary", () => {
+  test("requires owner on runtime and bank calls", async () => {
+    await request(app({ deps: deps(null) })).post("/internal/cloud-runtime")
+      .set("x-headmaster-internal-secret", SECRET).send({ agentId: AGENT }).expect(400);
+    await request(app({ deps: deps(null) })).post("/internal/memory-bank")
+      .set("x-headmaster-internal-secret", SECRET).send({ bankId: "hm-bank_1" }).expect(400);
+  });
+  test.each([{ external_namespace: "other", external_owner_uuid: OWNER }, { external_namespace: "headmaster", external_owner_uuid: AGENT }])("rejects foreign runtime inside the lifecycle lock", async (identity) => {
+    const d = deps({ id: AGENT, ...identity });
+    const res = await request(app({ deps: d })).post("/internal/cloud-runtime")
+      .set("x-headmaster-internal-secret", SECRET).send({ agentId: AGENT, ownerId: OWNER }).expect(409);
+    expect(res.body.error).toBe("runtime_owner_mismatch");
+    expect(d.calls).toEqual(["SELECT", "release"]);
+    expect(d.containerManager.destroy).not.toHaveBeenCalled();
+  });
+  test("missing destroy support retains runtime row and jobs", async () => {
+    const d = deps({ id: AGENT, external_namespace: "headmaster", external_owner_uuid: OWNER });
+    d.containerManager.canDestroy = () => false;
+    const res = await request(app({ deps: d })).post("/internal/cloud-runtime")
+      .set("x-headmaster-internal-secret", SECRET).send({ agentId: AGENT, ownerId: OWNER }).expect(503);
+    expect(res.body.error).toBe("runtime_destroy_unavailable");
+    expect(d.calls).toEqual(["SELECT", "release"]);
+  });
+  test("foreign or noncanonical banks are rejected before HTTP", async () => {
+    const fetchImpl = jest.fn();
+    for (const bankId of [`hermes-u-${AGENT.replace(/-/g, "_")}`, "hm-bank_1"]) {
+      await request(app({ fetchImpl })).post("/internal/memory-bank")
+        .set("x-headmaster-internal-secret", SECRET).send({ bankId, ownerId: OWNER }).expect(409);
+    }
+    expect(fetchImpl).not.toHaveBeenCalled();
+  });
+  test("GET cannot invoke a destructive operation", async () => {
+    const d = deps(null);
+    await request(app({ deps: d })).get("/internal/cloud-runtime").set("x-headmaster-internal-secret", SECRET).expect(404);
+    expect(d.db.query).not.toHaveBeenCalled();
   });
 });
