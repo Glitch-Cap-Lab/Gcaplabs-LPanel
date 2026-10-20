@@ -6,10 +6,9 @@ import { fetchWithAuth } from "../lib/api";
 import { formatDateTime } from "../lib/format";
 
 // Headmaster account deletions (decision 31): requests made in the apps, plus
-// admin-initiated deletion. Server-side steps the apps cannot reach (Cloud
-// runtime, memory bank, relay usage) show as "pending" until an operator
-// finishes them and marks them done here.
-const OPERATOR_STEPS = ["cloud_runtime", "memory_bank", "relay_usage"];
+// admin-initiated deletion. Operators retry actual failed or pending cleanup
+// from the saved targets, including requests interrupted before Auth deletion.
+const DELETION_STEPS = ["revoke_sessions", "push_registrations", "cloud_runtime", "memory_bank", "relay_usage", "auth_user"];
 const STEP_LABELS = {
   revoke_sessions: "Sessions revoked",
   push_registrations: "Push devices removed",
@@ -53,7 +52,7 @@ export default function AccountDeletionsPage() {
       });
       const body = await res.json().catch(() => null);
       if (!res.ok) throw new Error(body?.error || "The account could not be deleted.");
-      toast.success(body?.status === "failed" ? "Deletion recorded with failed steps." : "Account deleted. Finish the pending steps.");
+      toast.success(body?.status === "completed" ? "Account deletion completed." : "Deletion recorded. Retry the remaining cleanup steps.");
       setOwnerId(""); setConfirm("");
       await load();
     } catch (error) {
@@ -63,11 +62,13 @@ export default function AccountDeletionsPage() {
     }
   }
 
-  async function markDone(id, step) {
+  async function runCleanup(id, step) {
     setBusy(`${id}:${step}`);
     try {
       const res = await fetchWithAuth(`/api/admin/account-deletions/${id}/steps/${step}`, { method: "POST" });
-      if (!res.ok) throw new Error("Could not update the step.");
+      const body = await res.json().catch(() => null);
+      if (!res.ok) throw new Error(body?.error || "Could not run cleanup.");
+      if (body?.steps?.[step] !== "done") toast.error("Cleanup did not finish. Refresh and retry.");
       await load();
     } catch (error) {
       toast.error(error.message);
@@ -88,7 +89,7 @@ export default function AccountDeletionsPage() {
 
         <form onSubmit={deleteAccount} className="space-y-3 rounded-2xl border p-4">
           <h2 className="flex items-center gap-2 font-bold"><UserX size={18} /> Delete an account</h2>
-          <p className="text-sm opacity-70">Revokes sessions, removes push devices and deletes the sign-in. It cannot be undone.</p>
+          <p className="text-sm opacity-70">Revokes sessions, removes stored data and deletes the sign-in. It cannot be undone.</p>
           <input value={ownerId} onChange={(e) => setOwnerId(e.target.value)} placeholder="Account user id (uuid)"
             className="w-full rounded-xl border px-3 py-2 text-sm" />
           <input value={confirm} onChange={(e) => setConfirm(e.target.value)} placeholder='Type DELETE to confirm'
@@ -116,12 +117,13 @@ export default function AccountDeletionsPage() {
                     <td className="p-3">{row.source === "admin" ? "Admin" : "App"}</td>
                     <td className="p-3">{row.status}</td>
                     <td className="space-y-1 p-3">
-                      {Object.entries(row.steps || {}).map(([step, state]) => (
+                      {!row.cleanup_targets && <p className="text-xs">Cleanup targets are missing. Operator recovery is required.</p>}
+                      {DELETION_STEPS.map((step) => (
                         <div key={step} className="flex items-center gap-2">
-                          <span>{STEP_LABELS[step] || step}: {state}</span>
-                          {OPERATOR_STEPS.includes(step) && state === "pending_operator" && (
-                            <button type="button" onClick={() => markDone(row.id, step)} disabled={busy === `${row.id}:${step}`}
-                              className="rounded-lg border px-2 py-0.5 text-xs font-semibold">Mark done</button>
+                          <span>{STEP_LABELS[step] || step}: {row.steps?.[step] || "pending_operator"}</span>
+                          {row.cleanup_targets && row.steps?.[step] !== "done" && (
+                            <button type="button" onClick={() => runCleanup(row.id, step)} disabled={busy === `${row.id}:${step}`}
+                              className="rounded-lg border px-2 py-0.5 text-xs font-semibold">{row.steps?.[step] === "failed" || row.steps?.[step] === "skipped" ? "Retry cleanup" : "Run cleanup"}</button>
                           )}
                         </div>
                       ))}

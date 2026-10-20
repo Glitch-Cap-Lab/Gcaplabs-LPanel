@@ -69,3 +69,13 @@ Read [CONTRIBUTING.md](CONTRIBUTING.md) for the fix workflow, the brand rules an
 ## Licence
 
 LPanel is derived from the open-source Nora platform and stays under the Apache License 2.0. Keep [LICENSE](LICENSE) and [NOTICE](NOTICE) as they are; they carry the required attribution.
+
+## Account deletion recovery
+
+Account deletion begins through the site's service-only `headmaster_begin_account_deletion` RPC. The existing account authority locks and fences provisioning, snapshots the owner's bindings and known job targets, saves the existing deletion request and revokes sessions in one transaction. Running provision jobs return `deletion_busy`; wait for the runtime operation to finish and retry. LPanel requires the returned durable snapshot and never falls back to an unfenced lookup/insert. The request and per-target receipts survive sign-in and workspace cascades. Admin cleanup actions execute the existing runtime, memory and relay operations; they never merely mark a step done. Every receipt and step update compares the previous status, steps and receipts, so concurrent retries cannot overwrite each other's progress. Conflicts require a refresh; interrupted `running` requests can be retried.
+
+All six steps must succeed before a request is completed. For every validated snapshot, memory cleanup includes the canonical owner bank even if no binding exists, followed by removal of the existing tenant registry entry. A runtime must retain its matching managed owner identity and support destruction before its row is removed. Internal runtime/bank requests require both the shared secret and the expected owner ID; update the paired site caller at the same rollout boundary.
+
+This source change requires the paired site's `20261019141720_headmaster_account_deletion_cleanup_targets.sql` migration, applied only through an owner-approved rollout before enabling the new flow. Historical requests with no saved snapshot remain operator-required and cannot be completed from an empty current binding lookup. Reconstruct and verify those targets through a separately authorized recovery process. No migration, database or server change is part of local source verification.
+
+If a provisioning job may have created a runtime before recording its identity, begin-deletion returns `deletion_targets_unresolved` before effects. An operator must recover and verify the existing immutable runtime identity before retrying; an empty binding snapshot cannot prove there is no runtime to remove.
