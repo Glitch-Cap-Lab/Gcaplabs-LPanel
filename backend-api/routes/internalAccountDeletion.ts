@@ -3,8 +3,8 @@
 // browsers or users: the caller is the account API, authenticated by the
 // `x-headmaster-internal-secret` header matching HEADMASTER_ACCOUNT_DELETION_SECRET
 // (>= 32 chars; unset = every call 503). Mount only on the private network.
-//   POST /internal/headmaster/account-deletion/cloud-runtime  { agentId }
-//   POST /internal/headmaster/account-deletion/memory-bank    { bankId }
+//   POST /internal/headmaster/account-deletion/cloud-runtime  { ownerId, agentId }
+//   POST /internal/headmaster/account-deletion/memory-bank    { ownerId, bankId }
 //   POST /internal/headmaster/account-deletion/relay-usage    { ownerId }
 
 const express = require("express");
@@ -45,8 +45,8 @@ function buildRouter({ env = process.env, deps = null, redisFactory = null, fetc
     }
   };
 
-  router.post("/cloud-runtime", run((b) => wipeCloudRuntime(b.agentId, lazyDeps())));
-  router.post("/memory-bank", run((b) => deleteMemoryBank(b.bankId, { env, fetchImpl })));
+  router.post("/cloud-runtime", run((b) => wipeCloudRuntime(b.agentId, lazyDeps(), b.ownerId)));
+  router.post("/memory-bank", run((b) => deleteMemoryBank(b.bankId, { env, fetchImpl, expectedOwnerId: b.ownerId })));
   router.post("/relay-usage", run((b) => clearRelayUsage(b.ownerId, lazyRedis())));
   return router;
 }

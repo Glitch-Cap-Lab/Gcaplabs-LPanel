@@ -11,6 +11,8 @@ process.env.JWT_SECRET = JWT_SECRET;
 process.env.GOOGLE_CLIENT_ID = process.env.GOOGLE_CLIENT_ID || "google-client-id";
 
 const mockDb = { query: jest.fn(), connect: jest.fn() };
+const mockConstructWebhookEvent = jest.fn();
+jest.mock("stripe", () => () => ({ webhooks: { constructEvent: mockConstructWebhookEvent } }));
 jest.mock("../db", () => mockDb);
 jest.mock("../redisQueue", () => ({
   addDeploymentJob: jest.fn(),
@@ -121,6 +123,7 @@ jest.mock("../metrics", () => ({
 const apiKeys = require("../apiKeys");
 const mockVerifyApiKey = jest.spyOn(apiKeys, "verifyApiKey");
 const app = require("../server");
+const { correlationId, errorHandler } = require("../middleware/errorHandler");
 const { __test: authRouteTestHelpers } = require("../routes/auth");
 
 function jsonResponse(body, ok = true, status = ok ? 200 : 400) {
@@ -181,6 +184,138 @@ afterAll(() => {
   // The last-run test's value must not leak into later test files in the same
   // Jest worker — beforeEach only resets it within this file.
   delete process.env.SIGNUP_ENABLED;
+});
+
+describe("safe direct auth and signed-webhook error boundaries", () => {
+  let errorLog;
+  let stripeSecret;
+  let webhookSecret;
+  beforeEach(() => {
+    errorLog = jest.spyOn(console, "error").mockImplementation(() => {});
+    stripeSecret = process.env.STRIPE_SECRET_KEY;
+    webhookSecret = process.env.STRIPE_WEBHOOK_SECRET;
+    process.env.STRIPE_SECRET_KEY = "fixture-stripe-key";
+    process.env.STRIPE_WEBHOOK_SECRET = "fixture-webhook-secret";
+    mockConstructWebhookEvent.mockReset();
+  });
+  afterEach(() => {
+    errorLog.mockRestore();
+    if (stripeSecret === undefined) delete process.env.STRIPE_SECRET_KEY;
+    else process.env.STRIPE_SECRET_KEY = stripeSecret;
+    if (webhookSecret === undefined) delete process.env.STRIPE_WEBHOOK_SECRET;
+    else process.env.STRIPE_WEBHOOK_SECRET = webhookSecret;
+  });
+
+  it("routes unexpected login failures through the safe DTO rather than returning raw errors", async () => {
+    const canary = require("crypto").randomBytes(18).toString("hex");
+    mockDb.query.mockRejectedValue(new Error(`Database refused password=${canary}`));
+    const res = await request(app)
+      .post("/auth/login")
+      .send({ email: "fixture@example.test", password: canary });
+    expect(res.status).toBe(500);
+    expect(res.body.error).toBe("Internal server error");
+    expect(res.body.code).toBe("INTERNAL_ERROR");
+    expect(res.body.correlationId).toBe(res.headers["x-correlation-id"]);
+    expect(JSON.stringify([res.body, errorLog.mock.calls]).includes(canary)).toBe(false);
+  });
+
+  it("routes public bootstrap read failures through the safe boundary", async () => {
+    const canary = require("crypto").randomBytes(18).toString("hex");
+    mockDb.query.mockRejectedValue(new Error(`Bootstrap persistence refused ${canary}`));
+    const res = await request(app).get("/auth/bootstrap-status").query({ access_token: canary });
+    expect(res.status).toBe(500);
+    expect(res.body.error).toBe("Internal server error");
+    expect(res.body.correlationId).toBe(res.headers["x-correlation-id"]);
+    expect(JSON.stringify([res.body, errorLog.mock.calls]).includes(canary)).toBe(false);
+  });
+
+  it("redacts a dynamic signup 4xx without changing its status", async () => {
+    const canary = require("crypto").randomBytes(18).toString("hex");
+    mockDb.query.mockRejectedValue(
+      Object.assign(new Error(`Rejected fixture ${canary}`), { statusCode: 422 }),
+    );
+    const res = await signupRequest().send({ email: "fixture@example.test", password: canary });
+    expect(res.status).toBe(422);
+    expect(typeof res.body.error).toBe("string");
+    expect(JSON.stringify([res.body, errorLog.mock.calls]).includes(canary)).toBe(false);
+  });
+
+  it("redacts signup error logs while preserving the existing generic response", async () => {
+    const canary = require("crypto").randomBytes(18).toString("hex");
+    mockDb.query.mockRejectedValue(new Error(`Signup persistence refused ${canary}`));
+    const res = await signupRequest().send({ email: "fixture@example.test", password: canary });
+    expect(res.status).toBe(500);
+    expect(res.body.error).toBe("Could not create account");
+    expect(JSON.stringify([res.body, errorLog.mock.calls]).includes(canary)).toBe(false);
+  });
+
+  it("routes unexpected profile failures through the safe DTO", async () => {
+    const canary = require("crypto").randomBytes(18).toString("hex");
+    const token = jwt.sign({ id: "user-1", role: "user" }, JWT_SECRET, { expiresIn: "1h" });
+    mockDb.query.mockRejectedValue(new Error(`Profile persistence refused Bearer ${canary}`));
+    const res = await request(app)
+      .patch("/auth/profile")
+      .set("Authorization", `Bearer ${token}`)
+      .send({ name: "Fixture Name" });
+    expect(res.status).toBe(500);
+    expect(res.body.error).toBe("Internal server error");
+    expect(JSON.stringify([res.body, errorLog.mock.calls]).includes(canary)).toBe(false);
+  });
+
+  function webhookApp() {
+    const express = require("express");
+    const fixture = express();
+    fixture.use(correlationId);
+    fixture.post(
+      "/stripe/webhook",
+      express.raw({ type: "application/json" }),
+      app.__test.stripeWebhookHandler,
+    );
+    fixture.use(errorHandler);
+    return fixture;
+  }
+
+  it("keeps raw signed bytes and signature inputs while making webhook failures generic", async () => {
+    const canary = require("crypto").randomBytes(18).toString("hex");
+    const raw = '{ "type": "fixture", "password": "' + canary + '" }';
+    const signature = `fixture-signature-${canary}`;
+    mockConstructWebhookEvent.mockImplementation(() => {
+      throw new Error(`Signature rejected ${signature} payload password=${canary}`);
+    });
+    const res = await request(webhookApp())
+      .post("/stripe/webhook")
+      .set("Content-Type", "application/json")
+      .set("stripe-signature", signature)
+      .send(raw);
+    expect(res.status).toBe(400);
+    expect(res.body).toMatchObject({
+      error: "Webhook could not be processed",
+      code: "WEBHOOK_FAILED",
+    });
+    expect(res.body.correlationId).toBe(res.headers["x-correlation-id"]);
+    const [body, receivedSignature, receivedSecret] = mockConstructWebhookEvent.mock.calls[0];
+    expect(Buffer.isBuffer(body)).toBe(true);
+    expect(body.toString("utf8") === raw).toBe(true);
+    expect(receivedSignature === signature).toBe(true);
+    expect(receivedSecret === process.env.STRIPE_WEBHOOK_SECRET).toBe(true);
+    expect(JSON.stringify([res.body, errorLog.mock.calls]).includes(canary)).toBe(false);
+  });
+
+  it("processes a successfully verified webhook exactly once", async () => {
+    const event = { id: "event-fixture", type: "fixture" };
+    mockConstructWebhookEvent.mockReturnValue(event);
+    const billing = require("../billing");
+    billing.handleWebhookEvent.mockClear();
+    const res = await request(webhookApp())
+      .post("/stripe/webhook")
+      .set("Content-Type", "application/json")
+      .set("stripe-signature", "fixture-signature")
+      .send('{"type":"fixture"}');
+    expect(res.status).toBe(200);
+    expect(res.body).toEqual({ received: true });
+    expect(billing.handleWebhookEvent).toHaveBeenCalledTimes(1);
+    expect(billing.handleWebhookEvent).toHaveBeenCalledWith(event);
+  });
 });
 
 describe("auth rate limit configuration", () => {
@@ -286,7 +421,8 @@ describe("POST /auth/signup", () => {
 
       expect(res.status).toBe(403);
       expect(res.body).toEqual({
-        error: "Registration is disabled on this Headmaster control panel. Ask an admin for an invitation.",
+        error:
+          "Registration is disabled on this Headmaster control panel. Ask an admin for an invitation.",
         code: "SIGNUP_DISABLED",
       });
       expect(hashSpy).not.toHaveBeenCalled();
@@ -302,7 +438,8 @@ describe("POST /auth/signup", () => {
     const ip = "198.51.100.251";
     const hashSpy = jest.spyOn(bcrypt, "hash");
     const disabledResponse = {
-      error: "Registration is disabled on this Headmaster control panel. Ask an admin for an invitation.",
+      error:
+        "Registration is disabled on this Headmaster control panel. Ask an admin for an invitation.",
       code: "SIGNUP_DISABLED",
     };
 
@@ -623,7 +760,15 @@ describe("POST /auth/login", () => {
   it("returns token on valid login", async () => {
     const hash = await bcrypt.hash("correctpassword", 10);
     mockDb.query.mockResolvedValueOnce({
-      rows: [{ id: "uuid-1", email: "user@example.com", password_hash: hash, role: "user", session_version: 0 }],
+      rows: [
+        {
+          id: "uuid-1",
+          email: "user@example.com",
+          password_hash: hash,
+          role: "user",
+          session_version: 0,
+        },
+      ],
     });
 
     const res = await request(app)
@@ -639,7 +784,15 @@ describe("POST /auth/login", () => {
   it("sets an HttpOnly SameSite=Lax auth cookie on successful login", async () => {
     const hash = await bcrypt.hash("correctpassword", 10);
     mockDb.query.mockResolvedValueOnce({
-      rows: [{ id: "uuid-1", email: "user@example.com", password_hash: hash, role: "user", session_version: 0 }],
+      rows: [
+        {
+          id: "uuid-1",
+          email: "user@example.com",
+          password_hash: hash,
+          role: "user",
+          session_version: 0,
+        },
+      ],
     });
 
     const res = await request(app)
@@ -858,12 +1011,18 @@ describe("Cookie-based authentication", () => {
   });
 
   it("rejects scoped embed tokens as sessions (Bearer and cookie)", async () => {
-    const embedToken = jwt.sign({ id: "user-1", agentId: "agent-1", scope: "gateway-embed" }, JWT_SECRET, {
-      algorithm: "HS256",
-      expiresIn: "15m",
-    });
+    const embedToken = jwt.sign(
+      { id: "user-1", agentId: "agent-1", scope: "gateway-embed" },
+      JWT_SECRET,
+      {
+        algorithm: "HS256",
+        expiresIn: "15m",
+      },
+    );
 
-    const viaBearer = await request(app).get("/auth/me").set("Authorization", `Bearer ${embedToken}`);
+    const viaBearer = await request(app)
+      .get("/auth/me")
+      .set("Authorization", `Bearer ${embedToken}`);
     expect(viaBearer.status).toBe(401);
     const viaCookie = await request(app).get("/auth/me").set("Cookie", `nora_auth=${embedToken}`);
     expect(viaCookie.status).toBe(401);
@@ -873,7 +1032,9 @@ describe("Cookie-based authentication", () => {
   it("isSessionTokenPayload accepts login sessions and rejects scoped tokens", () => {
     const { isSessionTokenPayload } = require("../middleware/auth");
     expect(isSessionTokenPayload({ id: "u1", email: "a@b.co", role: "user" })).toBe(true);
-    expect(isSessionTokenPayload({ id: "u1", email: "a@b.co", role: "user", hm: 1, jti: "j" })).toBe(true);
+    expect(
+      isSessionTokenPayload({ id: "u1", email: "a@b.co", role: "user", hm: 1, jti: "j" }),
+    ).toBe(true);
     expect(isSessionTokenPayload({ id: "u1", agentId: "a1", scope: "gateway-embed" })).toBe(false);
     expect(isSessionTokenPayload({ id: "u1", scope: "x" })).toBe(false);
     expect(isSessionTokenPayload({ id: "u1", typ: "embed" })).toBe(false);
@@ -1172,7 +1333,15 @@ describe("OAuth hardening", () => {
       .mockResolvedValueOnce({ rows: [] })
       .mockResolvedValueOnce({ rows: [{ has_users: true }] })
       .mockResolvedValueOnce({
-        rows: [{ id: "user-1", email: "user@example.com", role: "user", name: "Google User", session_version: 0 }],
+        rows: [
+          {
+            id: "user-1",
+            email: "user@example.com",
+            role: "user",
+            name: "Google User",
+            session_version: 0,
+          },
+        ],
       })
       .mockResolvedValueOnce({ rows: [] });
 
@@ -1243,7 +1412,8 @@ describe("OAuth hardening", () => {
 
     expect(res.status).toBe(403);
     expect(res.body).toEqual({
-      error: "Registration is disabled on this Headmaster control panel. Ask an admin for an invitation.",
+      error:
+        "Registration is disabled on this Headmaster control panel. Ask an admin for an invitation.",
       code: "SIGNUP_DISABLED",
     });
     expect(
@@ -1327,7 +1497,15 @@ describe("OAuth hardening", () => {
       .mockResolvedValueOnce({ rows: [] })
       .mockResolvedValueOnce({ rows: [{ has_users: false }] })
       .mockResolvedValueOnce({
-        rows: [{ id: "user-1", email: "first@example.com", role: "admin", name: "First Admin", session_version: 0 }],
+        rows: [
+          {
+            id: "user-1",
+            email: "first@example.com",
+            role: "admin",
+            name: "First Admin",
+            session_version: 0,
+          },
+        ],
       })
       .mockResolvedValueOnce({ rows: [] });
 
@@ -1382,7 +1560,15 @@ describe("OAuth hardening", () => {
       .mockResolvedValueOnce({ rows: [] })
       .mockResolvedValueOnce({ rows: [{ has_users: true }] })
       .mockResolvedValueOnce({
-        rows: [{ id: "user-2", email: "octo@example.com", role: "user", name: "Octo Cat", session_version: 0 }],
+        rows: [
+          {
+            id: "user-2",
+            email: "octo@example.com",
+            role: "user",
+            name: "Octo Cat",
+            session_version: 0,
+          },
+        ],
       });
 
     const res = await request(app).post("/auth/oauth-login").send({

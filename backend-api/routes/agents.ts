@@ -17,6 +17,7 @@ const agentBudgets = require("../agentBudgets");
 const agentSchedules = require("../agentSchedules");
 const monitoring = require("../monitoring");
 const metrics = require("../metrics");
+const { chatIdentity, inspectChat, resolveChat } = require("../hermesChatRecovery");
 const workspaces = require("../workspaces");
 const {
   CLONE_MODES,
@@ -1576,6 +1577,7 @@ router.get(
 
     res.json({
       url: runtimeUrlForAgent(agent, "/v1"),
+      chatScope: { ownerId: req.user.id, agentId: agent.id, profile: null },
       runtime: runtimeAddress,
       health,
       dashboard,
@@ -1597,6 +1599,9 @@ router.post(
   "/:id/hermes-ui/chat",
   asyncHandler(async (req, res) => {
     const agent = await loadHermesUiAgent(req, { requiredRole: "editor" });
+    // Legacy callers remain supported; the operator UI supplies a checkpointed
+    // identity before dispatch. Its owner fence must fail before any runtime I/O.
+    const identity = req.body?.requestId != null ? chatIdentity(req.body, req.user.id) : null;
 
     const messages = (Array.isArray(req.body?.messages) ? req.body.messages : [])
       .map((entry) => ({
@@ -1627,11 +1632,10 @@ router.post(
       chatResponse = await fetchHermesApi(agent, "/v1/chat/completions", {
         method: "POST",
         timeoutMs: 240000,
-        headers: sessionId
-          ? {
-              "X-Hermes-Session-Id": sessionId,
-            }
-          : undefined,
+        headers: {
+          ...(sessionId ? { "X-Hermes-Session-Id": sessionId } : {}),
+          ...(identity ? { "Idempotency-Key": identity.requestId } : {}),
+        },
         body: {
           ...(requestedModel ? { model: requestedModel } : {}),
           stream: false,
@@ -1684,6 +1688,47 @@ router.post(
       model: chatResponse.data?.model || requestedModel || null,
       sessionId: responseSessionId,
     });
+  }),
+);
+
+router.get(
+  "/:id/hermes-ui/chat",
+  requireSession,
+  asyncHandler(async (req, res) => {
+    const agent = await loadHermesUiAgent(req, { requiredRole: "editor" });
+    const identity = chatIdentity(req.query, req.user.id);
+    try {
+      res.json(await inspectChat(agent, identity, fetchHermesApi));
+    } catch (error) {
+      res
+        .status(error.statusCode || 409)
+        .json({
+          code: error.code || "chat_recovery_unavailable",
+          error:
+            "The request could not be verified. Keep this conversation open and refresh again.",
+        });
+    }
+  }),
+);
+
+router.post(
+  "/:id/hermes-ui/chat/resolve",
+  requireSession,
+  asyncHandler(async (req, res) => {
+    const agent = await loadHermesUiAgent(req, { requiredRole: "editor" });
+    const identity = chatIdentity(req.body, req.user.id);
+    if (req.body?.confirm !== true)
+      return res.status(400).json({ error: "Explicit confirmation is required" });
+    try {
+      res.json(await resolveChat(agent, identity, req.body.receipt, fetchHermesApi));
+    } catch (error) {
+      res
+        .status(error.statusCode || 409)
+        .json({
+          code: error.code || "chat_resolution_refused",
+          error: "The request was not resolved. Refresh its status before trying again.",
+        });
+    }
   }),
 );
 
