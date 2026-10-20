@@ -390,11 +390,13 @@ describe("Hermes exact bootstrap replacement", () => {
     const stateFile = files.find((file) => file.name === "opt/nora-managed-env/state.json");
     const applyFile = files.find((file) => file.name === "opt/nora-managed-env/apply.sh");
     const profileFile = files.find((file) => file.name === "etc/profile.d/nora-managed-env.sh");
-    expect(stateFile.mode).toBe(0o600);
-    expect(stateFile).toMatchObject({ uid: 10000, gid: 10000 });
+    // Root-owned, so the bot (hermes) can read its managed env but not rewrite
+    // the state or the script that root login shells source.
+    expect(stateFile.mode).toBe(0o640);
+    expect(stateFile).toMatchObject({ uid: 0, gid: 10000 });
     expect(JSON.parse(stateFile.content).values.OPENAI_API_KEY).toBe("rotated-hermes-secret");
-    expect(applyFile.mode).toBe(0o700);
-    expect(applyFile).toMatchObject({ uid: 10000, gid: 10000 });
+    expect(applyFile.mode).toBe(0o755);
+    expect(applyFile).toMatchObject({ uid: 0, gid: 10000 });
     expect(applyFile.content).not.toContain("rotated-hermes-secret");
     expect(profileFile.mode).toBe(0o644);
     expect(profileFile.content).toContain("/opt/nora-managed-env/apply.sh");

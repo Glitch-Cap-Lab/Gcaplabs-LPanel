@@ -304,6 +304,14 @@ Runtime selection is three-dimensional: **runtime family × deploy target × san
 | `ENABLED_SANDBOX_PROFILES` | No       | `standard`  | Sandbox profiles enabled. Supported ids: `standard`, `nemoclaw`.                                                                                                                                     |
 | `DOCKER_AGENT_BIND_IP`     | No       | `127.0.0.1` | Host address used for Docker-published agent gateway/runtime ports. Keep loopback unless trusted remote clients must connect; protect any wider bind with a firewall or authenticated reverse proxy. |
 
+Local Docker Hermes runtimes can be isolated from each other. Both settings are off by default.
+
+| Variable                       | Required | Default | Description |
+| ------------------------------ | -------- | ------- | ----------- |
+| `NORA_AGENT_NETWORK_ISOLATION` | No       | unset   | `per-agent` gives every runtime its own Docker network (and keeps it off the default bridge). The worker attaches `NORA_AGENT_NETWORK_PEERS` to each one and re-attaches them when it starts. |
+| `NORA_AGENT_NETWORK_PEERS`     | No       | unset   | Comma-separated container names that must reach every runtime (API, worker, and any service that calls a runtime by name). A missing peer is skipped with a warning. |
+| `NORA_AGENT_VOLUME_QUOTA`      | No       | unset   | `enforce` creates each new runtime home volume with `size=<disk_gb>g`. Requires `/var/lib/docker` on XFS mounted with `pquota`; otherwise volume creation fails. Existing volumes are not resized. |
+
 ## Kubernetes registry and Compose mount helpers
 
 Nora no longer creates Kubernetes execution targets from `.env` labels. Register every Kubernetes cluster in **Admin -> Kubernetes**. Each enabled row becomes a concrete execution target such as `k8s:aks-eastus2` and stores its provider, actual cluster name, kubeconfig, namespaces, exposure mode, Service annotations, load-balancer source ranges, and load-balancer class.

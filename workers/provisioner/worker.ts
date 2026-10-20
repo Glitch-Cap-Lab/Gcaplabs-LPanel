@@ -5733,6 +5733,17 @@ healthServer.listen(HEALTH_PORT, () => {
   console.log(`Worker health check listening on port ${HEALTH_PORT}`);
 });
 
+// Per-agent networks (NORA_AGENT_NETWORK_ISOLATION): a recreated control-plane
+// container loses its attachments, so re-attach the configured peers on start.
+{
+  const { perAgentNetworkEnabled, reconcileAgentNetworks } = require("./backends/agentIsolation");
+  if (perAgentNetworkEnabled()) {
+    reconcileAgentNetworks(new (require("./backends/hermes"))().docker)
+      .then((names) => console.log(`[isolation] Reconciled ${names.length} agent network(s)`))
+      .catch((error) => console.warn(`[isolation] Reconcile failed: ${error.message}`));
+  }
+}
+
 module.exports = {
   allocateAvailableLocalDockerGatewayPort,
   assertProvisionerRuntimeSelection,
