@@ -359,6 +359,12 @@ const tail = {
   "/agents/{id}/restart": {
     post: summarize("Agents", "Restart a running agent in place", [agentParam], ["agents:write"]),
   },
+  "/agents/{id}/protected-runtime-target": {
+    get: {
+      ...summarize("Agents", "Read this agent's protected runtime release target", [agentParam]),
+      description: "Session JWT only, for the agent's owner. Read-only: returns {target}, the manifest target (without site_binding) read from the agent row and Docker; refusals return 409 with their PROTECTED_RELEASE_* code.",
+    },
+  },
   "/agents/{id}/protected-runtime-releases/{releaseId}": {
     get: {
       ...summarize(
