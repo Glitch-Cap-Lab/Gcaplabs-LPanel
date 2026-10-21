@@ -4468,7 +4468,9 @@ const worker = new Worker(
       if (job.data.protected_release) {
         try {
           return await runProtectedReleaseJob(job, { db, agentRow, loadBackend, withProviderMutationLock, provisionLock });
-        } catch {
+        } catch (error) {
+          // Code only: protected release errors never carry runtime values in their code.
+          console.error(`[provisioner] Protected runtime release for agent ${id} failed: ${error?.code || error?.name || "UNKNOWN"}`);
           throw new UnrecoverableError("Protected runtime release requires receipt review or explicit recovery");
         }
       }
