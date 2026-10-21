@@ -82,6 +82,7 @@ jobs:
       # Real-PostgreSQL cancellation proof. Assumes ubuntu-latest ships PostgreSQL 16
       # binaries at /usr/lib/postgresql/16/bin; the fixture creates its own new cluster.
       - name: protected release PostgreSQL fixture
+        if: steps.changes.outputs.affected == 'true'
         working-directory: workers/provisioner
         run: |
           set -eu
