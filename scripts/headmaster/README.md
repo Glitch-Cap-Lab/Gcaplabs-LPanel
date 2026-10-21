@@ -98,6 +98,15 @@ queued on the account service, sending the manifest the account service stored a
 prepare time. The owner reservation and finalization stay with the account service,
 as with this command. Refusals return `409` with the `PROTECTED_RELEASE_*` code.
 
+`GET /api/agents/:id/protected-runtime-target` returns `{target}`: one bot's manifest
+target (everything but `site_binding`) read from its LP agent row and Docker, through
+`workers/provisioner/protectedReleaseTarget.ts`. The Headmaster provisioner's fleet
+rollout uses it to build each remaining bot's manifest from a proven release, so no
+manifest is written by hand. Same session rule as above. It takes no lock and changes
+nothing; the dry run and the swap re-check every value under the agent lock. A bot that
+is not running, not Headmaster-owned or whose container does not match its row returns
+`409` with the `PROTECTED_RELEASE_*` code.
+
 ## Immutable input
 
 The closed manifest format is `headmaster-protected-runtime-release/v1`.

@@ -1,7 +1,7 @@
 // @ts-nocheck
 const path = require("path");
 const fs = require("fs");
-const NAMES = new Set(["protectedReleaseStatus", "protectedReleaseManifest", "protectedReleaseDocker", "protectedReleaseOperation"]);
+const NAMES = new Set(["protectedReleaseStatus", "protectedReleaseManifest", "protectedReleaseDocker", "protectedReleaseOperation", "protectedReleaseTarget"]);
 function loadShared(name) {
   if (!NAMES.has(name)) throw new Error("invalid protected release module");
   const checkout = path.resolve(__dirname, "../workers/provisioner");
