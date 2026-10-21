@@ -67,8 +67,16 @@ function createDeletionClient({ env = process.env, fetchImpl = globalThis.fetch,
       return res.ok && typeof await res.json() === "number";
     }
     if (step === "push_registrations") {
+      // Service-only RPC (site migration 20261019170000): removes the rows still bound to this
+      // account. A token that moved to another account since is not this account's row.
+      res = await rest("rpc/headmaster_push_registration_purge_owner", { method: "POST", body: JSON.stringify({ p_owner_id: ownerId }) });
+      if (res.ok) return typeof await res.json() === "number";
+      // Before that migration is applied the function does not exist (PostgREST 404 PGRST202)
+      // and the table still accepts the owner-scoped delete. Any other failure stays failed.
+      const body = res.status === 404 ? await res.json().catch(() => ({})) : {};
+      if (body.code !== "PGRST202") return false;
       res = await rest(`headmaster_push_registrations?owner_id=eq.${ownerId}`, { method: "DELETE" });
-      return res.ok; // A REST 404 may mean the store is unavailable, not no devices.
+      return res.ok;
     }
     if (step === "auth_user") {
       res = await fetchImpl(`${url}/auth/v1/admin/users/${ownerId}`, { method: "DELETE", headers });

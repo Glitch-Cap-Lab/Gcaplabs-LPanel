@@ -37,6 +37,7 @@ function fixture({ row = null, bindings = [binding()], intercept = () => null, c
       }
     }
     if (parsed.pathname.endsWith("/headmaster_bump_account_revocation")) return ok(1);
+    if (parsed.pathname.endsWith("/headmaster_push_registration_purge_owner")) return ok(2);
     return ok();
   });
   const ops = cleanupOps || { cloud_runtime: jest.fn(async () => ({ done: true })), memory_bank: jest.fn(async () => ({ done: true })), relay_usage: jest.fn(async () => ({ done: true })) };
@@ -107,7 +108,7 @@ describe("durable account deletion", () => {
   });
   test("push and Auth failures remain failed and have real retry operations", async () => {
     let unavailable = true;
-    const f = fixture({ intercept: ({ url }) => unavailable && (url.pathname.includes("/auth/v1/") || url.pathname.endsWith("/headmaster_push_registrations")) ? fail() : null });
+    const f = fixture({ intercept: ({ url }) => unavailable && (url.pathname.includes("/auth/v1/") || url.pathname.endsWith("/headmaster_push_registration_purge_owner")) ? fail() : null });
     const row = await f.client.deleteAccount(OWNER, "ops");
     expect(row.steps).toMatchObject({ push_registrations: "failed", auth_user: "failed" });
     unavailable = false;
@@ -177,6 +178,26 @@ describe("durable account deletion", () => {
     await expect(f.client.completeStep("r1", "cloud_runtime", "ops")).rejects.toMatchObject({ message: "deletion_conflict", statusCode: 409 });
     expect(f.read().steps.push_registrations).toBe("done");
     expect(f.read().cleanup_results).toEqual({});
+  });
+  test("push device cleanup is the service-only purge RPC for this owner, with a legacy fallback only when the function is missing", async () => {
+    const run = async (rpcAnswer) => {
+      const f = fixture({ row: receiptRow({ status: "running", steps: { revoke_sessions: "done" } }), intercept: ({ url }) => url.pathname.endsWith("/headmaster_push_registration_purge_owner") ? rpcAnswer : null });
+      const row = await f.client.completeStep("r1", "push_registrations", "ops");
+      return { row, calls: f.calls.filter((c) => c.path.includes("headmaster_push_registration")) };
+    };
+    const ok1 = await run(null);
+    expect(ok1.row.steps.push_registrations).toBe("done");
+    expect(ok1.calls).toEqual([expect.objectContaining({ path: expect.stringMatching(/\/rpc\/headmaster_push_registration_purge_owner$/), method: "POST", body: { p_owner_id: OWNER } })]);
+    // Function not created yet (migration unapplied): the old owner-scoped delete still works.
+    const legacy = await run(fail(404, { code: "PGRST202" }));
+    expect(legacy.row.steps.push_registrations).toBe("done");
+    expect(legacy.calls.map((c) => [c.method, c.query.get("owner_id")])).toEqual([["POST", null], ["DELETE", `eq.${OWNER}`]]);
+    // Anything else, including a plain 404 or a non-count answer, never records the step as done.
+    for (const answer of [fail(404, {}), fail(500, {}), ok({}), ok("x")]) {
+      const bad = await run(answer);
+      expect(bad.row.steps.push_registrations).toBe("failed");
+      expect(bad.calls.some((c) => c.method === "DELETE")).toBe(false);
+    }
   });
   test("Auth missing receipt can be recovered only for a precise user-not-found response", async () => {
     const f = fixture({ row: receiptRow({ steps: { revoke_sessions: "done" } }), intercept: ({ url }) => url.pathname.includes("/auth/v1/") ? fail(404, { code: "user_not_found" }) : null });
