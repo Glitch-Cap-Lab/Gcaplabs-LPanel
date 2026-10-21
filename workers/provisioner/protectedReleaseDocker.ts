@@ -67,6 +67,12 @@ const PUBLISH_RECEIPT = [
   " os.close(directory)",
   " os.close(parent)",
 ].join("\n");
+// Docker reports unset HostConfig fields differently by daemon version and by when a container
+// was created (a 29.x create says OomKillDisable false where an older one says null), so an unset
+// value and its zero value compare equal. Any field actually set still has to match exactly.
+const unsetValue = v => v === null || v === undefined || v === false || v === 0 || v === ""
+  || (Array.isArray(v) && v.length === 0) || (typeof v === "object" && !Array.isArray(v) && Object.keys(v).length === 0);
+const hostIdentity = hostConfig => Object.fromEntries(Object.entries(hostConfig || {}).filter(([, v]) => !unsetValue(v)));
 const networkIdentity = c => Object.fromEntries(Object.entries(c.NetworkSettings.Networks || {}).map(([name, v]) => [name, {
   ipam: v.IPAMConfig || null, aliases: (v.Aliases || []).filter(x => x !== c.Id && x !== c.Id.slice(0, 12)).sort(),
 }]));
@@ -122,6 +128,13 @@ class ProtectedReleaseDocker {
     const project = c => ({ container_id: c.Id, container_name: c.Name.replace(/^\//, ""), image_id: c.Image, running: c.State.Running });
     return { retained: project(old), candidate: candidate ? project(candidate) : null };
   }
+  // Enough to know a container is this release's own candidate, so recovery can stop and set it
+  // aside even when the full check below is exactly what refused it.
+  async verifyCandidateIdentity(c, m, id) {
+    const t = m.targets[0];
+    if (c.Image !== m.image.id || c.Config.Labels?.["headmaster.release.id"] !== id
+        || c.Config.Labels?.["nora.agent.id"] !== t.agent_id || c.Config.Labels?.["headmaster.release.owner"] !== t.owner_id) throw refuse("PROTECTED_RELEASE_CANDIDATE_CHANGED");
+  }
   async verifyCandidate(c, m, id) {
     await this.verifyImageBinding(m);
     const t = m.targets[0];
@@ -132,7 +145,7 @@ class ProtectedReleaseDocker {
         || c.Config.Labels?.["nora.agent.id"] !== t.agent_id || c.Config.Labels?.["headmaster.release.owner"] !== t.owner_id
         || !c.Mounts.some(x => x.Name === t.volume && x.Destination === ROOT && x.RW)
         || envFingerprint(c.Config.Env) !== envFingerprint([...expected].map(([key, value]) => `${key}=${value}`))
-        || digest(c.HostConfig) !== digest(old.HostConfig)
+        || digest(hostIdentity(c.HostConfig)) !== digest(hostIdentity(old.HostConfig))
         || digest(c.Mounts) !== digest(old.Mounts)
         || digest(networkIdentity(c)) !== digest(networkIdentity(old))
         || ["Entrypoint", "Cmd", "User", "WorkingDir"].some(key => digest(c.Config[key] ?? null) !== digest(old.Config[key] ?? null))) throw refuse("PROTECTED_RELEASE_CANDIDATE_CHANGED");
