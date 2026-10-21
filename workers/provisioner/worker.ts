@@ -197,7 +197,7 @@ function advisoryLockKeyForAgent(agentId) {
 }
 
 /**
- * Acquire a per-agent session-level advisory lock so two concurrent provision
+ * Acquire a per-runtime session-level advisory lock so two concurrent provision
  * jobs for the same agent ID (same worker or different worker replicas) cannot
  * both call adapter.create() and double-provision containers.
  *
@@ -205,7 +205,7 @@ function advisoryLockKeyForAgent(agentId) {
  * to the pg client's session: a worker crash drops the connection and the
  * lock is released by Postgres automatically.
  */
-// Ceiling on how long one job may hold a per-agent provision lock. Set above
+// Ceiling on how long one job may hold a per-runtime provision lock. Set above
 // the deployment job timeout so it never interrupts a provision that is merely
 // slow — it exists for the case where the guarded work never returns at all and
 // the lock would otherwise be held until the process restarts (#406).
@@ -633,7 +633,7 @@ async function failDeploymentForUnresolvedRuntime({
  * data of whatever runtime that agent owns right now — the runtime this job was
  * replacing on a redeploy, or a newer deployment that already superseded this
  * one. Only a genuine agent delete may remove that state, and `destroyAgent` in
- * the control plane owns it, under the same per-agent provision lock.
+ * the control plane owns it, under the same per-runtime provision lock.
  *
  * So cleanup keeps state for any agent row that still exists and removes it only
  * for an agent that is gone. An unreachable database resolves to preserving:
@@ -5754,6 +5754,49 @@ const healthServer = http.createServer((req, res) => {
 healthServer.listen(HEALTH_PORT, () => {
   console.log(`Worker health check listening on port ${HEALTH_PORT}`);
 });
+
+// Per-agent networks (NORA_AGENT_NETWORK_ISOLATION): a recreated control-plane
+// container loses its attachments, so re-attach the configured peers on start.
+if (process.env.NORA_AGENT_NETWORK_ISOLATION === "per-runtime") {
+  const { reconcileAgentNetworks, networkReconcileIntervalMs } = require("./backends/agentIsolation");
+  const isolationDocker = new (require("./backends/hermes"))().docker;
+  reconcileAgentNetworks(isolationDocker)
+    .then((names) => console.log(`[isolation] Reconciled ${names.length} agent network(s)`))
+    .catch((error) => console.warn(`[isolation] Reconcile failed: ${error.message}`));
+  // Peers recreated after the worker started (a backend or admission redeploy) rejoin on the next pass.
+  const reconcileMs = networkReconcileIntervalMs();
+  if (reconcileMs > 0) {
+    setInterval(() => {
+      reconcileAgentNetworks(isolationDocker).catch((error) =>
+        console.warn(`[isolation] Reconcile failed: ${error.message}`),
+      );
+    }, reconcileMs).unref();
+  }
+}
+
+// NORA_AGENT_VOLUME_QUOTA=monitor: hosts without filesystem quotas (ext4) cannot
+// cap a volume, so log every runtime home volume that is over its agent's
+// disk_gb. Read-only; nothing is stopped or deleted.
+if (process.env.NORA_AGENT_VOLUME_QUOTA === "monitor") {
+  const QUOTA_CHECK_MS = 10 * 60 * 1000;
+  const checkVolumeQuota = async () => {
+    try {
+      const { findOverQuotaVolumes } = require("./backends/agentIsolation");
+      const rows = (await db.query("SELECT id, disk_gb FROM agents WHERE disk_gb IS NOT NULL")).rows;
+      const limits = Object.fromEntries(rows.map((row) => [String(row.id), row.disk_gb]));
+      const over = await findOverQuotaVolumes(new (require("./backends/hermes"))().docker, limits);
+      for (const item of over) {
+        console.warn(
+          `[quota] agent ${item.agentId} uses ${(item.usedBytes / 1024 ** 3).toFixed(2)} GB, over its ${(item.limitBytes / 1024 ** 3).toFixed(0)} GB limit`,
+        );
+      }
+    } catch (error) {
+      console.warn(`[quota] check failed: ${error.message}`);
+    }
+  };
+  setInterval(checkVolumeQuota, QUOTA_CHECK_MS).unref();
+  checkVolumeQuota();
+}
 
 module.exports = {
   allocateAvailableLocalDockerGatewayPort,

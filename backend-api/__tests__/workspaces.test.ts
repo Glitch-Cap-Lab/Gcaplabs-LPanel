@@ -468,7 +468,9 @@ describe("Workspace member management", () => {
         workspace: expect.objectContaining({ id: "ws-1" }),
         invitation: expect.objectContaining({
           id: "inv-1",
-          email: "new@b.com",
+          // Audit metadata redacts request-body emails (safe error boundaries);
+          // the event message above still names the invitee.
+          email: "[redacted]",
           role: "editor",
         }),
       }),

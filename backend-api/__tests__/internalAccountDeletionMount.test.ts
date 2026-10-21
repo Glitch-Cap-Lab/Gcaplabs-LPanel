@@ -23,6 +23,7 @@ jest.mock("../redisQueue", () => ({
   cancelDeploymentJobsForAgent: jest.fn(),
 }));
 jest.mock("../scheduler", () => ({ selectNode: jest.fn() }));
+jest.mock("ioredis", () => jest.fn(() => ({ on: jest.fn(), get: jest.fn(), set: jest.fn(), status: "wait" })));
 jest.mock("../containerManager", () => ({ destroy: jest.fn(), canDestroy: () => true }));
 jest.mock("../monitoring", () => ({
   logEvent: jest.fn().mockResolvedValue(undefined),
@@ -35,6 +36,9 @@ const app = require("../server");
 const PATH = "/internal/headmaster/account-deletion/cloud-runtime";
 
 describe("account-deletion mount (server.ts)", () => {
+  test("admin cleanup requires the server's login wall", async () => {
+    await request(app).post("/admin/account-deletions/r1/steps/cloud_runtime").expect(401);
+  });
   test("correct secret without a user session reaches the handler", async () => {
     // An invalid agentId is rejected by the handler itself (400 agent_invalid),
     // which proves the request got past the auth wall and the S2S router.

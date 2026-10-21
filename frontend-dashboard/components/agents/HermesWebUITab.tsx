@@ -56,7 +56,8 @@ export default function HermesWebUITab({ agentId, agentStatus }) {
   const [runtimeInfo, setRuntimeInfo] = useState(null);
   const [error, setError] = useState("");
   const pollRef = useRef(null);
-  const cancelledRef = useRef(false);
+  const generationRef = useRef(0);
+  const requestRef = useRef(0);
 
   function clearStatusPoll() {
     if (pollRef.current) {
@@ -66,6 +67,9 @@ export default function HermesWebUITab({ agentId, agentStatus }) {
   }
 
   async function loadRuntimeInfo({ showSpinner = true } = {}) {
+    const generation = generationRef.current,
+      request = ++requestRef.current;
+    const valid = () => generation === generationRef.current && request === requestRef.current;
     clearStatusPoll();
     if (showSpinner) {
       setLoading(true);
@@ -79,7 +83,7 @@ export default function HermesWebUITab({ agentId, agentStatus }) {
         throw new Error(data.error || "Failed to load Hermes WebUI");
       }
 
-      if (cancelledRef.current) return;
+      if (!valid()) return;
       setRuntimeInfo(data);
 
       const dashboardStillBooting =
@@ -94,7 +98,7 @@ export default function HermesWebUITab({ agentId, agentStatus }) {
         }, STATUS_POLL_MS);
       }
     } catch (nextError) {
-      if (cancelledRef.current) return;
+      if (!valid()) return;
       setError(nextError.message || "Failed to load Hermes WebUI");
       if (agentStatus === "running" || agentStatus === "warning") {
         pollRef.current = window.setTimeout(() => {
@@ -102,7 +106,7 @@ export default function HermesWebUITab({ agentId, agentStatus }) {
         }, STATUS_POLL_MS);
       }
     } finally {
-      if (!cancelledRef.current) {
+      if (valid()) {
         setLoading(false);
       }
     }
@@ -113,7 +117,8 @@ export default function HermesWebUITab({ agentId, agentStatus }) {
   }, [agentId]);
 
   useEffect(() => {
-    cancelledRef.current = false;
+    generationRef.current++;
+    setRuntimeInfo(null);
 
     if (agentId && (agentStatus === "running" || agentStatus === "warning")) {
       loadRuntimeInfo();
@@ -125,7 +130,7 @@ export default function HermesWebUITab({ agentId, agentStatus }) {
     }
 
     return () => {
-      cancelledRef.current = true;
+      generationRef.current++;
       clearStatusPoll();
     };
   }, [agentId, agentStatus]);
