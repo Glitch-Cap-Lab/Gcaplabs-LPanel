@@ -10,7 +10,7 @@ const { pgAvailable, startPg, lit } = require("./support/pgFixture");
 
 const DIR = process.env.HEADMASTER_SITE_MIGRATIONS;
 const OLD = ["20261006120000_headmaster_push_registrations.sql", "20261006121000_headmaster_account_deletion_requests.sql", "20261013130000_push_registration_muted_kinds.sql", "20261013170000_push_muted_kinds_question.sql", "20261016120000_headmaster_auth_session_active.sql"];
-const NEW = [...OLD, "20261019120000_push_registration_binding_cas.sql"];
+const NEW = [...OLD, "20261019170000_push_registration_binding_cas.sql"];
 const runnable = pgAvailable() && DIR && existsSync(join(DIR || "", NEW[NEW.length - 1]));
 if (!runnable && process.env.HEADMASTER_REQUIRE_PG === "1") throw new Error("PostgreSQL or HEADMASTER_SITE_MIGRATIONS missing");
 const maybe = runnable ? describe : describe.skip;

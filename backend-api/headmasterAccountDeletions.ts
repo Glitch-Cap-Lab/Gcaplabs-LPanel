@@ -67,7 +67,7 @@ function createDeletionClient({ env = process.env, fetchImpl = globalThis.fetch,
       return res.ok && typeof await res.json() === "number";
     }
     if (step === "push_registrations") {
-      // Service-only RPC (site migration 20261019120000): removes the rows still bound to this
+      // Service-only RPC (site migration 20261019170000): removes the rows still bound to this
       // account. A token that moved to another account since is not this account's row.
       res = await rest("rpc/headmaster_push_registration_purge_owner", { method: "POST", body: JSON.stringify({ p_owner_id: ownerId }) });
       if (res.ok) return typeof await res.json() === "number";
