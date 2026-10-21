@@ -46,7 +46,7 @@ async function fixture(t, options = {}) {
   let row = saved?.row || { id: uuid(1), user_id: uuid(2), external_namespace: "headmaster", external_owner_uuid: uuid(3), external_id: uuid(4), headmaster_owner_id: uuid(3), headmaster_workspace_id: uuid(4), ...runtime, status: "queued", image: "old-tag" };
   const persist = () => require("node:fs").writeFileSync(path.join(root, ".fake-docker.json"), JSON.stringify({ row, events, lastReceipt, containers: [...containers], metadata: [...metadata] }));
   const old = { Id: "old", Name: "/hm-owned", Image: image(1), State: { Running: true }, Config: { Env: env, Image: "old-tag", Labels: { "nora.agent.id": uuid(1) } },
-    HostConfig: { PortBindings: { "8642/tcp": [{ HostIp: "127.0.0.1", HostPort: "1234" }] }, RestartPolicy: { Name: "unless-stopped" } },
+    HostConfig: { PortBindings: { "8642/tcp": [{ HostIp: "127.0.0.1", HostPort: "1234" }] }, RestartPolicy: { Name: "unless-stopped" }, OomKillDisable: null },
     Mounts: [{ Name: "owned-volume", Destination: "/opt/data", Type: "volume", RW: true }], NetworkSettings: { Networks: { private: { Aliases: ["hm-owned"], IPAMConfig: {} } } } };
   if (!options.resume) containers.set("old", old);
   const resolve = name => [...containers.values()].find(c => c.Id === name || c.Name === `/${name}`);
@@ -179,6 +179,9 @@ async function fixture(t, options = {}) {
       if (faults.helperCreate && cfg.Labels?.["headmaster.release.maintenance"]) { cfg.abortSignal.addEventListener("abort", () => events.push("abort:helper-create")); return new Promise(() => {}); }
       const id = cfg.Labels?.["headmaster.release.maintenance"] ? `helper-${containers.size}` : "candidate";
       const c = { ...clone(old), Id: id, Name: `/${cfg.name || id}`, Image: cfg.Image, Config: clone(cfg), HostConfig: clone(cfg.HostConfig), State: { Running: false } };
+      // A newer daemon fills unset HostConfig fields with zero values on create.
+      if (id === "candidate" && faults.daemonDefaults) Object.assign(c.HostConfig, { OomKillDisable: false, CpuCount: 0, Devices: [] });
+      if (id === "candidate" && faults.hostDrift) c.HostConfig.PortBindings = { "8642/tcp": [{ HostIp: "0.0.0.0", HostPort: "1234" }] };
       containers.set(id, c); events.push(`create:${id}`); persist();
       if (id === "candidate" && options.killAfterCreate) process.exit(23);
       return docker.getContainer(id);
@@ -604,6 +607,15 @@ test("wrong owner, uid, env or binding fails before stop", async t => {
   }
 });
 
+test("a candidate the daemon filled with zero-value defaults is the same runtime; a real HostConfig change is not", async t => {
+  const same = await fixture(t); same.faults.daemonDefaults = true;
+  assert.equal((await same.run()).phase, "external_metadata_pending");
+  // The refused candidate is still this release's own: the automatic rollback sets it aside and restarts the old bot.
+  const drift = await fixture(t); drift.faults.hostDrift = true; await assert.rejects(drift.run(), /PROTECTED_RELEASE_FAILED/);
+  assert.ok(!drift.events.includes("start:candidate")); assert.equal(drift.events.filter(x => /^start:(old|candidate)$/.test(x)).at(-1), "start:old");
+  assert.equal(drift.receipts.at(-1).phase, "rolled_back"); assert.equal(drift.row().image, "old-tag");
+});
+
 test("candidate UID and contract bytes are verified before its first start", async t => {
   for (const change of [f => { f.faults.candidateUid = true; }, f => { f.manifest.image.contract_sha256 = "0".repeat(64); }]) {
     const f = await fixture(t); change(f); await assert.rejects(f.run(), /PROTECTED_RELEASE_FAILED/);
@@ -615,6 +627,16 @@ test("failed restore leaves the old runtime stopped and a durable recovery-requi
   const f = await fixture(t); f.faults.health = true; f.faults.restore = true;
   await assert.rejects(f.run(), /RECOVERY_REQUIRED/); assert.ok(!f.events.includes("start:old"));
   assert.equal(f.receipts.at(-1).phase, "recovery_required");
+});
+
+test("explicit recovery restores the old bot even when the candidate is the one the full check refused", async t => {
+  // 21 Oct canary: the candidate failed the pre-start check and the automatic rollback stopped at the same check.
+  const f = await fixture(t); f.faults.hostDrift = true; f.faults.restore = true;
+  await assert.rejects(f.run(), /RECOVERY_REQUIRED/); assert.equal(f.receipts.at(-1).phase, "recovery_required");
+  assert.ok(!f.events.includes("start:candidate"));
+  f.faults.restore = false;
+  assert.equal((await f.run({ action: "recover" })).phase, "rolled_back");
+  assert.equal(f.events.filter(x => /^start:(old|candidate)$/.test(x)).at(-1), "start:old"); assert.equal(f.row().image, "old-tag");
 });
 
 test("maintained command validates dry run and enqueues one explicit protected job through existing producer", async t => {

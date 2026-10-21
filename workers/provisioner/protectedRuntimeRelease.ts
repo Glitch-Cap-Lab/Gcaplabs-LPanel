@@ -68,7 +68,8 @@ async function runProtectedRuntimeRelease({ manifest: input, action = "apply", a
     }
     if (candidate) {
       // A create ACK can be lost before candidate_id was recorded: require the immutable labels.
-      await adapter.verifyCandidate(candidate, manifest, releaseId);
+      // Identity only: a candidate the full check refused must still be stopped and set aside.
+      await adapter.verifyCandidateIdentity(candidate, manifest, releaseId);
       r.candidate_id = candidate.Id;
       await adapter.stop(candidate.Id);
     }

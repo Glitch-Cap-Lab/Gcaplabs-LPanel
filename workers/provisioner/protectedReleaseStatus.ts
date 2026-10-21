@@ -21,7 +21,8 @@ async function readProtectedReleaseStatus({ manifest: input, adapter, state, job
   if (receipt && receipt.release_id !== releaseId) throw refuse("PROTECTED_RELEASE_RECEIPT_MISMATCH");
   const candidate = await adapter.candidate(target, releaseId);
   if (!canonical && candidate) throw refuse("PROTECTED_RELEASE_CANONICAL_RECEIPT_REQUIRED");
-  if (candidate) await adapter.verifyCandidate(candidate, manifest, releaseId);
+  // A rolled-back candidate is kept only as evidence; it may be the very one the full check refused.
+  if (candidate) await (canonical?.phase === "rolled_back" ? adapter.verifyCandidateIdentity(candidate, manifest, releaseId) : adapter.verifyCandidate(candidate, manifest, releaseId));
   assertAgent(manifest, row, { candidateId: candidate?.Id === row?.container_id ? candidate.Id : null, allowRefused: allowRefused && !canonical && !candidate && !retained });
   const runtime = await adapter.observe(target, candidate);
   return { release_id: releaseId, manifest, phase: receipt?.phase || (queueState === "failed" ? "failed_before_receipt" : job ? "queued" : "not_queued"),

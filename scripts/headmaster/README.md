@@ -164,7 +164,10 @@ label/full environment hash, named writable `/opt/data` volume, actual bot
 UID/GID 10000, locally present new image and source labels. Another running
 writable volume user refuses the operation. Candidate configuration preserves
 the old full environment plus the closed nonsecret delta, host configuration,
-mounts, network identity, command, user and working directory.
+mounts, network identity, command, user and working directory. Host
+configuration fields that are unset compare equal to their zero value, because
+Docker reports them differently by daemon version (a Docker 29 create reports
+`OomKillDisable: false` where an older container reports `null`).
 
 The controller requests the existing Core drain as the bot user, stops the old
 container, proves no writable container remains, and archives only `installs`,
@@ -195,7 +198,9 @@ existing runtime/gateway readiness before being committed
 through the existing guarded LP finalizer. Only this operation's deployment ID
 can be finalized or compensated; historical deployment rows remain unchanged.
 
-On failure, the candidate stops before restoration. A one-shot filesystem
+On failure, the candidate stops before restoration. Recovery identifies it by
+its release, agent and owner labels and its image only, so a candidate that
+failed the full configuration check is still stopped and set aside. A one-shot filesystem
 process uses the exact retained old image and its already-available Python
 interpreter with `-I -S` and fixed `os.rename`/directory-`fsync` code. It has no network or
 gateway, a read-only image filesystem, only the exact data volume, root UID with
