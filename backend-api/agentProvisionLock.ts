@@ -41,6 +41,7 @@ async function acquireAgentProvisionLock(
   {
     applicationName = "nora-backend-agent-provision-lock",
     timeoutMs = normalizeLockTimeoutMs(process.env.AGENT_PROVISION_LOCK_TIMEOUT_MS),
+    signal = null,
   } = {},
 ) {
   if (agentId == null || String(agentId).trim() === "") {
@@ -50,6 +51,23 @@ async function acquireAgentProvisionLock(
   const client = createAgentProvisionLockClient(applicationName);
   const lockKey = advisoryLockKeyForAgent(agentId).toString();
   const deadline = Date.now() + normalizeLockTimeoutMs(timeoutMs);
+  if (signal) {
+    // Protected command only: the mutation queries use the same cancellable session as its lock.
+    return require(require("fs").existsSync(require("path").join(__dirname, "../workers/provisioner/deploymentLifecycle.ts"))
+      ? "../workers/provisioner/deploymentLifecycle" : "./protected-release/deploymentLifecycle").acquireDedicatedSessionLock({
+      createClient: () => client, signal, maxHoldMs: 1200000,
+      acquire: async session => {
+        while (true) {
+          signal.throwIfAborted();
+          const result = await session.query("SELECT pg_try_advisory_lock($1) AS locked", [lockKey]);
+          if (result.rows[0]?.locked) return result;
+          if (Date.now() >= deadline) throw Object.assign(new Error("Provision lock unavailable"), { code: "AGENT_PROVISION_LOCK_TIMEOUT" });
+          await require("node:timers/promises").setTimeout(100, undefined, { signal });
+        }
+      },
+      release: session => session.query("SELECT pg_advisory_unlock($1)", [lockKey]),
+    });
+  }
   let connected = false;
   try {
     await client.connect();
@@ -184,7 +202,7 @@ function replacementTupleFromJob(jobData = {}) {
 }
 
 function assertReplacementJobMatchesAgent(agent, jobData = {}) {
-  if (jobData.replace_existing_runtime !== true) {
+  if (jobData.replace_existing_runtime !== true && !(jobData.protected_release && jobData.replace_existing_runtime === false)) {
     const error = new Error("Replacement deployment marker is required");
     error.code = "AGENT_REPLACEMENT_MARKER_MISSING";
     error.statusCode = 409;
@@ -253,6 +271,7 @@ async function enqueueReplacementDeployment(
   const ownsLock = !provisionLock;
   let statusTransitioned = false;
   let deploymentInserted = false;
+  let protectedDeploymentId = null;
   let enqueueAttempted = false;
 
   try {
@@ -304,9 +323,14 @@ async function enqueueReplacementDeployment(
     }
     statusTransitioned = true;
 
-    await queryable.query("INSERT INTO deployments(agent_id, status) VALUES($1, 'queued')", [
-      agent.id,
-    ]);
+    if (jobData.protected_release) {
+      const inserted = await queryable.query("INSERT INTO deployments(agent_id, status) VALUES($1, 'queued') RETURNING id", [agent.id]);
+      if (!inserted.rows[0]?.id) throw new Error("Protected release deployment identity unavailable");
+      protectedDeploymentId = inserted.rows[0].id;
+      jobData = { ...jobData, protected_release: { ...jobData.protected_release, deployment_id: inserted.rows[0].id } };
+    } else {
+      await queryable.query("INSERT INTO deployments(agent_id, status) VALUES($1, 'queued')", [agent.id]);
+    }
     deploymentInserted = true;
 
     enqueueAttempted = true;
@@ -332,8 +356,8 @@ async function enqueueReplacementDeployment(
         ...(deploymentInserted
           ? [
               queryable.query(
-                "UPDATE deployments SET status = 'failed' WHERE agent_id = $1 AND status = 'queued'",
-                [agent.id],
+                `UPDATE deployments SET status = 'failed' WHERE agent_id = $1 AND status = 'queued'${protectedDeploymentId ? " AND id = $2" : ""}`,
+                protectedDeploymentId ? [agent.id, protectedDeploymentId] : [agent.id],
               ),
             ]
           : []),

@@ -37,7 +37,10 @@ const mockContainerManager = {
   destroy: jest.fn(),
 };
 const mockWorkerOn = jest.fn();
+const mockRunProtectedReleaseJob = jest.fn();
 let mockDeploymentProcessor;
+let mockDeploymentFailed;
+jest.mock("../../workers/provisioner/protectedReleaseJob", () => ({ runProtectedReleaseJob: (...args) => mockRunProtectedReleaseJob(...args) }));
 
 jest.mock("../../workers/provisioner/node_modules/bullmq", () => ({
   UnrecoverableError: class UnrecoverableError extends Error {
@@ -49,7 +52,7 @@ jest.mock("../../workers/provisioner/node_modules/bullmq", () => ({
   Worker: jest.fn().mockImplementation((queueName, processor) => {
     if (queueName === "deployments") mockDeploymentProcessor = processor;
     return {
-      on: mockWorkerOn,
+      on: (name, callback) => { if (queueName === "deployments" && name === "failed") mockDeploymentFailed = callback; return mockWorkerOn(name, callback); },
       isRunning: jest.fn().mockReturnValue(true),
     };
   }),
@@ -150,6 +153,7 @@ const { DASHBOARD_PORT_PURPOSE, GATEWAY_PORT_PURPOSE } = require("../portAllocat
 beforeEach(() => {
   jest.clearAllMocks();
   mockWorkerDb.query.mockReset();
+  mockRunProtectedReleaseJob.mockReset();
   mockLockClient.connect.mockReset().mockResolvedValue(undefined);
   mockLockClient.query.mockReset().mockResolvedValue({ rows: [] });
   mockLockClient.end.mockReset().mockResolvedValue(undefined);
@@ -194,6 +198,72 @@ beforeEach(() => {
 });
 
 describe("provisioner deployment provider selection", () => {
+  it("dispatches only explicit protected releases before generic replacement can destroy a runtime", async () => {
+    const receipt = { phase: "external_metadata_pending", publication_blocked: true };
+    mockLockClient.query.mockResolvedValue({ rows: [{ locked: true }] });
+    mockWorkerDb.query.mockResolvedValue({ rows: [{ user_id: "owner-1", status: "queued", container_id: "old-runtime" }] });
+    mockRunProtectedReleaseJob.mockResolvedValue(receipt);
+    const job = { id: "protected-job", data: { id: "agent-1", userId: "owner-1", replace_existing_runtime: false, protected_release: { manifest: {} } } };
+    await expect(mockDeploymentProcessor(job)).resolves.toEqual(receipt);
+    expect(mockRunProtectedReleaseJob).toHaveBeenCalledWith(job, expect.objectContaining({ db: mockWorkerDb }));
+    expect(mockContainerManager.destroy).not.toHaveBeenCalled();
+    expect(mockHermesProvisioner.create).not.toHaveBeenCalled();
+    expect(mockLockClient.end).toHaveBeenCalledTimes(1);
+  });
+  it("pinned main worker refuses a private protected job before any runtime replacement", async () => {
+    const fs = require("node:fs"), path = require("node:path"), { execFileSync } = require("node:child_process");
+    const pin = "b022f0c66e253a4727e0944aa45504164b2eb747";
+    const repo = path.join(__dirname, "../.."), git = args => execFileSync("git", args, { cwd: repo, windowsHide: true, stdio: ["ignore", "pipe", "pipe"] });
+    // CI checks out one commit; fetch the pinned main commit when the clone lacks it.
+    try { git(["cat-file", "-e", `${pin}^{commit}`]); } catch { git(["fetch", "--no-tags", "--depth=1", "origin", pin]); }
+    const source = git(["show", `${pin}:workers/provisioner/worker.ts`]);
+    const temporary = path.join(__dirname, `../../workers/provisioner/worker-main-${process.pid}.fixture.ts`);
+    const current = mockDeploymentProcessor, failed = mockDeploymentFailed;
+    try {
+      fs.writeFileSync(temporary, source, { flag: "wx" });
+      // Jest transformation/mocks apply to the entire actual old handler. No SDK/service connection is opened.
+      jest.isolateModules(() => require(temporary));
+      mockLockClient.query.mockResolvedValue({ rows: [{ locked: true }] });
+      mockWorkerDb.query.mockImplementation(async sql => ({ rows: sql.includes("FROM agents") ? [{ id: "agent-1", user_id: "owner-1", status: "queued", container_id: "old-runtime" }] : [] }));
+      await expect(mockDeploymentProcessor({ id: "protected-operation", data: { id: "agent-1", userId: "owner-1", name: "fixture", replace_existing_runtime: false, protected_release: { manifest: {} } }, opts: { attempts: 1 }, attemptsMade: 0 })).rejects.toThrow(/runtime|provisioning/i);
+      expect(mockRunProtectedReleaseJob).not.toHaveBeenCalled();
+      expect(mockContainerManager.destroy).not.toHaveBeenCalled();
+      expect(mockHermesProvisioner.create).not.toHaveBeenCalled();
+      expect(mockRemoteProvisioner.create).not.toHaveBeenCalled();
+      expect(mockWorkerDb.query.mock.calls.some(([sql]) => /SET status = 'error'/.test(sql))).toBe(true);
+      expect(mockWorkerDb.query.mock.calls.some(([sql]) => /SET container_id\s*=/.test(sql))).toBe(false);
+    } finally { mockDeploymentProcessor = current; mockDeploymentFailed = failed; fs.rmSync(temporary, { force: true }); }
+  });
+  const bindingManifest = { format: "headmaster-protected-runtime-release/v1", image: { id: `sha256:${"2".repeat(64)}`, binding: "approved-tag" }, targets: [{ agent_id: "agent-1", image_binding: "old-tag", site_binding: { image_binding: "old-tag", deployment_generation: 7, authorization_revision: 1, revocation_generation: 0 } }] };
+  it("pinned main worker refuses a binding-shaped (owner-reserved, image.binding + site_binding) protected job before any runtime replacement", async () => {
+    const fs = require("node:fs"), path = require("node:path"), { execFileSync } = require("node:child_process");
+    const pin = "b022f0c66e253a4727e0944aa45504164b2eb747";
+    const source = execFileSync("git", ["show", `${pin}:workers/provisioner/worker.ts`], { cwd: path.join(__dirname, "../.."), windowsHide: true });
+    const temporary = path.join(__dirname, `../../workers/provisioner/worker-main-${process.pid}.fixture.ts`);
+    const current = mockDeploymentProcessor, failed = mockDeploymentFailed;
+    try {
+      fs.writeFileSync(temporary, source, { flag: "wx" });
+      // Jest transformation/mocks apply to the entire actual old handler. No SDK/service connection is opened.
+      jest.isolateModules(() => require(temporary));
+      mockLockClient.query.mockResolvedValue({ rows: [{ locked: true }] });
+      mockWorkerDb.query.mockImplementation(async sql => ({ rows: sql.includes("FROM agents") ? [{ id: "agent-1", user_id: "owner-1", status: "queued", container_id: "old-runtime" }] : [] }));
+      await expect(mockDeploymentProcessor({ id: "protected-operation", data: { id: "agent-1", userId: "owner-1", name: "fixture", replace_existing_runtime: false, image: "approved-tag", protected_release: { manifest: bindingManifest, release_id: "a".repeat(64), action: "apply" } }, opts: { attempts: 1 }, attemptsMade: 0 })).rejects.toThrow(/runtime|provisioning/i);
+      expect(mockRunProtectedReleaseJob).not.toHaveBeenCalled();
+      expect(mockContainerManager.destroy).not.toHaveBeenCalled();
+      expect(mockHermesProvisioner.create).not.toHaveBeenCalled();
+      expect(mockRemoteProvisioner.create).not.toHaveBeenCalled();
+      expect(mockWorkerDb.query.mock.calls.some(([sql]) => /SET status = 'error'/.test(sql))).toBe(true);
+      expect(mockWorkerDb.query.mock.calls.some(([sql]) => /SET container_id\s*=/.test(sql))).toBe(false);
+    } finally { mockDeploymentProcessor = current; mockDeploymentFailed = failed; fs.rmSync(temporary, { force: true }); }
+  });
+  it("limits the post-lock protected failed event to this deployment row", async () => {
+    mockWorkerDb.query.mockResolvedValue({ rows: [] });
+    const id = "00000000-0000-0000-0000-000000000010";
+    await mockDeploymentFailed({ id: "protected-job", data: { id: "agent-1", protected_release: { deployment_id: id } } }, new Error("synthetic failure"));
+    expect(mockWorkerDb.query).toHaveBeenCalledTimes(1);
+    expect(mockWorkerDb.query).toHaveBeenCalledWith(expect.stringMatching(/UPDATE deployments.*agent_id = \$1 AND id = \$2/), ["agent-1", id]);
+    expect(mockWorkerDb.query.mock.calls.some(([sql]) => /UPDATE agents/.test(sql))).toBe(false);
+  });
   it("extends readiness polling for Hermes only", () => {
     expect(readinessOptionsForRuntimeFamily("hermes")).toEqual({
       runtime: {

@@ -155,12 +155,14 @@ if (IS_TEST_ENV) {
 
 // ── Deployment enqueue and cancellation ────────────────────────
 
-async function addDeploymentJob(agent, options = undefined) {
+async function addDeploymentJob(agent, options = undefined, queue = deployQueue, guard = () => {}) {
+  guard();
   const jobId = options?.jobId ? String(options.jobId) : "";
   if (jobId) {
-    const existing = await deployQueue.getJob(jobId);
+    const existing = await queue.getJob(jobId); guard();
     if (existing) {
       const state = typeof existing.getState === "function" ? await existing.getState() : "unknown";
+      guard();
       if (["active", "waiting", "waiting-children", "delayed", "prioritized"].includes(state)) {
         return existing;
       }
@@ -168,15 +170,16 @@ async function addDeploymentJob(agent, options = undefined) {
         await existing.remove();
       }
     }
-    return deployQueue.add("deploy-agent", agent, { ...options, jobId });
+    guard(); return queue.add("deploy-agent", agent, { ...options, jobId });
   }
-  return deployQueue.add("deploy-agent", agent);
+  guard(); return queue.add("deploy-agent", agent);
 }
 
-async function cancelDeploymentJobsForAgent(agentId) {
+async function cancelDeploymentJobsForAgent(agentId, queue = deployQueue, guard = () => {}) {
+  guard();
   if (!agentId) return { removed: 0, active: 0 };
 
-  const jobs = await deployQueue.getJobs([
+  const jobs = await queue.getJobs([
     "active",
     "waiting",
     "waiting-children",
@@ -189,8 +192,12 @@ async function cancelDeploymentJobsForAgent(agentId) {
   let active = 0;
 
   for (const job of jobs) {
+    guard();
     if (!job || String(job.data?.id || "") !== normalizedAgentId) continue;
     const state = typeof job.getState === "function" ? await job.getState() : "unknown";
+    guard();
+    // Protected release failures are durable operation evidence, also used by exact status lookup.
+    if (state === "failed" && job.data?.protected_release) continue;
     if (state === "active") {
       // BullMQ cannot remove a locked job from another process. The provisioner
       // treats a missing agent row as cancellation before create, after create,
@@ -206,6 +213,19 @@ async function cancelDeploymentJobsForAgent(agentId) {
   }
 
   return { removed, active };
+}
+
+function createProtectedQueueSession(signal) {
+  signal.throwIfAborted();
+  // Same queue and Lua contracts; only this command's socket is ever cancelled.
+  const owned = connection.duplicate({ commandTimeout: 30000, connectTimeout: 5000, maxRetriesPerRequest: 0, retryStrategy: () => null, enableOfflineQueue: false });
+  const queue = new Queue("deployments", { connection: owned }); queue.on("error", () => {});
+  const cancel = () => owned.disconnect(false), guard = () => signal.throwIfAborted();
+  signal.addEventListener("abort", cancel, { once: true });
+  return { getJob: async id => { guard(); const job = await queue.getJob(id); guard(); return job; },
+    addJob: (data, options) => addDeploymentJob(data, options, queue, guard),
+    cancelJobs: id => cancelDeploymentJobsForAgent(id, queue, guard),
+    close() { signal.removeEventListener("abort", cancel); cancel(); void queue.close(true).catch(() => {}); } };
 }
 
 // ── Other enqueue operations ───────────────────────────────────
@@ -463,6 +483,7 @@ module.exports = {
   alertDeliveryQueue,
   agentScheduleQueue,
   addDeploymentJob,
+  createProtectedQueueSession,
   cancelDeploymentJobsForAgent,
   addScheduleRunJob,
   addClawhubJob,

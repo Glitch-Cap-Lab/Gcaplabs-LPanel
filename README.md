@@ -9,6 +9,7 @@ LPanel is reachable only inside the Headmaster admin, at `headmaster.gcaplabs.co
 ## What it does for Headmaster
 
 - **Runtimes.** Deploys, starts, stops, redeploys and deletes one Core runtime per account on Docker, and records each runtime's identity so the bridge and admission can find it.
+- **Protected releases.** The maintained [operator release/recovery command](scripts/headmaster/README.md) retains the old local runtime and verifies scoped archives; account binding finalization and publication remain explicit separate gates.
 - **Managed config.** The Headmaster bridge pushes an account's owner, workspace, memory bank and memory gateway into its runtime; see [docs/headmaster-managed-config.md](docs/headmaster-managed-config.md).
 - **Embedded console.** The admin page loads LPanel's operator and admin screens in a frame with one sign-in. The frame policy, the launch exchange and session revocation are in [docs/headmaster-integration.md](docs/headmaster-integration.md).
 - **Inference relay.** `services/headmaster-inference` is the provider relay behind the Lite and Pro tiers, with the monthly dollar cap per account. See its README.

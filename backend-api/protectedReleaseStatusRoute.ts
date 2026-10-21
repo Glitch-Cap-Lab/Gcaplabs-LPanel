@@ -1,0 +1,51 @@
+// @ts-nocheck
+const path = require("path");
+const fs = require("fs");
+const NAMES = new Set(["protectedReleaseStatus", "protectedReleaseManifest", "protectedReleaseDocker"]);
+function loadShared(name) {
+  if (!NAMES.has(name)) throw new Error("invalid protected release module");
+  const checkout = path.resolve(__dirname, "../workers/provisioner");
+  const packaged = path.resolve(__dirname, "protected-release");
+  return require(path.join(fs.existsSync(path.join(checkout,"protectedReleaseStatus.ts")) ? checkout : packaged, name));
+}
+function createProtectedReleaseStatusHandler({ db, getJob, acquireLock, loadBackend,
+  readStatus = loadShared("protectedReleaseStatus").readProtectedReleaseStatus,
+  Adapter = loadShared("protectedReleaseDocker").ProtectedReleaseDocker } = {}) {
+  return async (req,res) => {
+    res.set("Cache-Control","private, no-store");
+    if (req.apiKey || !req.user?.id) return res.status(403).json({code:"session_required"});
+    if (!/^[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}$/.test(req.params.id ?? "")
+        || !/^[0-9a-f]{64}$/.test(req.params.releaseId ?? "") || Object.keys(req.query || {}).length
+        || req.headers["content-length"] !== undefined || req.headers["transfer-encoding"] !== undefined
+        || (req.body && Object.keys(req.body).length)) return res.status(400).json({code:"invalid_request"});
+    const controller=new AbortController();
+    const disconnect=()=>{if(!res.writableEnded)controller.abort(new Error("protected status disconnected"));};
+    res.once("close",disconnect);
+    let queryable=db;
+    const read = async () => {
+      if(controller.signal.aborted)throw new Error("protected status disconnected");
+      return (await queryable.query("SELECT * FROM agents WHERE id = $1",[req.params.id])).rows[0];
+    };
+    let lock;
+    try {
+      const visible = await read();
+      if (!visible || visible.user_id !== req.user.id) return res.status(404).json({code:"release_not_found"});
+      lock = await acquireLock(visible.id,{applicationName:"headmaster-protected-release-status",signal:controller.signal});
+      // Production uses the same held advisory-lock PG session. The fallback
+      // keeps dependency-injected local query adapters explicit.
+      if(typeof lock.query === "function")queryable=lock;
+      const row = await read();
+      if (!row || row.user_id !== req.user.id) return res.status(404).json({code:"release_not_found"});
+      const job = await getJob(`protected-release-${req.params.releaseId}`);
+      if (!job) return res.status(404).json({code:"release_not_found"});
+      const backend = await loadBackend(row);
+      const status = await readStatus({manifest:job.data?.protected_release?.manifest,adapter:new Adapter(backend),state:{read},job});
+      if(controller.signal.aborted || lock.signal?.aborted)throw new Error("protected status lease lost");
+      return res.json(status);
+    } catch (error) {
+      const status=(typeof error?.code === "string" && error.code.startsWith("PROTECTED_RELEASE_")) || error?.statusCode===409 ? 409 : 503;
+      return res.status(status).json({code:"release_status_unconfirmed",publication_blocked:true});
+    } finally { res.off("close",disconnect);if (lock) await lock.release(); }
+  };
+}
+module.exports = {createProtectedReleaseStatusHandler,loadShared};

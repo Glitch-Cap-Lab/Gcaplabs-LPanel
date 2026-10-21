@@ -4,6 +4,8 @@ Provisioner backends are shared execution-target adapters used by both the worke
 
 > **Shared code warning:** this directory is bind-mounted into `backend-api` at `/app/backends`. A change here affects at least two services and shadows the host `backend-api/backends/` directory in Compose.
 
+The existing deployments worker also supports the explicit local Docker [protected release/recovery path](../../../scripts/headmaster/README.md). It reuses the backend Docker connection and existing lifecycle/locks, and branches before generic replacement. It is not a new backend or general execution API.
+
 ## Create the fail-closed starter
 
 From the repository root:

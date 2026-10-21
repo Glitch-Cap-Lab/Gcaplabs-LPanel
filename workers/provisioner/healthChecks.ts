@@ -13,12 +13,14 @@ async function waitForHttpReady(url, options = {}) {
     acceptStatuses = [200],
     fetchImpl = fetch,
     beforeAttempt = null,
+    signal = null,
   } = options;
 
   let lastStatus = null;
   let lastError = null;
 
   for (let attempt = 1; attempt <= attempts; attempt++) {
+    signal?.throwIfAborted();
     // Authorization hooks deliberately run outside the network-error catch.
     // A revoked Remote Docker grant (or a failed authorization lookup) must
     // stop polling immediately instead of being flattened into "unreachable"
@@ -31,7 +33,7 @@ async function waitForHttpReady(url, options = {}) {
     const timer = setTimeout(() => controller.abort(), timeoutMs);
 
     try {
-      const response = await fetchImpl(url, { signal: controller.signal });
+      const response = await fetchImpl(url, { signal: signal ? AbortSignal.any([controller.signal, signal]) : controller.signal });
 
       lastStatus = response.status;
       if (acceptStatuses.includes(response.status)) {
@@ -39,6 +41,7 @@ async function waitForHttpReady(url, options = {}) {
       }
       lastError = new Error(`unexpected HTTP ${response.status}`);
     } catch (error) {
+      signal?.throwIfAborted();
       if (controller.signal.aborted) {
         lastError = new Error(`timeout after ${timeoutMs}ms`);
       } else {
@@ -49,7 +52,7 @@ async function waitForHttpReady(url, options = {}) {
     }
 
     if (attempt < attempts) {
-      await new Promise((resolve) => setTimeout(resolve, intervalMs));
+      await require("node:timers/promises").setTimeout(intervalMs, undefined, { signal: signal || undefined });
     }
   }
 
@@ -91,6 +94,7 @@ async function waitForAgentReadiness(
         ? { beforeAttempt: options.beforeAttempt }
         : {}),
       ...options.runtime,
+      signal: options.signal,
     },
   );
 
@@ -118,6 +122,7 @@ async function waitForAgentReadiness(
         ? { beforeAttempt: options.beforeAttempt }
         : {}),
       ...options.gateway,
+      signal: options.signal,
     });
     gateway = {
       ...gateway,
