@@ -1,0 +1,58 @@
+name: Inference relay
+
+# Deterministic relay tests on every relevant ready PR head. Keep this separate
+# from Backend so a relay-only change does not run the backend/provisioner suites.
+# No provider credentials, live services, Docker, E2E, or deploys.
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened, ready_for_review]
+    paths:
+      - 'services/headmaster-inference/**'
+      # Modules copied into the relay image by its Dockerfile.
+      - 'backend-api/llmProviders.ts'
+      - 'backend-api/db.ts'
+      - 'backend-api/crypto.ts'
+      - 'backend-api/demoLlm.ts'
+      - 'backend-api/lib/advisoryLocks.ts'
+      - 'backend-api/lib/connectionConfig.ts'
+      - 'agent-runtime/lib/nemoclawDefaults.ts'
+      - 'agent-runtime/lib/hermesRuntimeBootstrap.ts'
+      - 'agent-runtime/lib/headmasterInference.ts'
+      - 'agent-runtime/lib/headmasterStorage.ts'
+      - 'tsconfig.base.json'
+      - '.nvmrc'
+      - '.github/workflows/inference-relay.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: inference-relay-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  relay:
+    name: inference relay node:test
+    if: github.event_name != 'pull_request' || github.event.pull_request.draft == false
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@v4
+        with:
+          node-version-file: .nvmrc
+          cache: npm
+          cache-dependency-path: services/headmaster-inference/package-lock.json
+      - run: npm ci --ignore-scripts --no-audit --no-fund
+        working-directory: services/headmaster-inference
+      - run: npm test
+        working-directory: services/headmaster-inference
+        # Keep the existing live provider/Redis probes opt-in outside this check.
+        env:
+          OPENROUTER_API_KEY: ''
+          HEADMASTER_INFERENCE_LIVE: '0'
+          REDIS_URL: ''
