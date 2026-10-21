@@ -226,7 +226,7 @@ function database(f, deploymentId = uuid(10)) {
   } };
 }
 
-module.exports = { fixture };
+module.exports = { fixture, database, protectedJobData };
 if (!process.env.PROTECTED_RELEASE_FIXTURE_ONLY) {
 test("receipt journal cancellation closes only the operation-owned transport and never acknowledges a late write", async () => {
   const { EventEmitter } = require("node:events"), abort = new AbortController(); let cancelled = false, complete, calls = 0;
@@ -322,7 +322,7 @@ test("operation deadline and lost provision lease abort a stalled archive before
 
 test("uncertain queue ACK after create requires explicit recovery without automatic restart", async t => {
   const f = await fixture(t), db = database(f), job = { id: "uncertain-journal", data: protectedJobData(f) };
-  await assert.rejects(runProtectedReleaseJob(job, { db, agentRow: f.row(), loadBackend: async () => f.backend,
+  await assert.rejects(runProtectedReleaseJob(job, { db, agentRow: f.row(), loadBackend: async () => f.backend, stagingRoot: path.join(f.root, ".worker-tmp"),
     withProviderMutationLock: async (_, fn) => fn(), checkReadiness: async () => ({ ok: true }),
     journalAdapter: { updateData: async data => { if (data.protected_release.receipt.phase === "candidate_created") throw new Error("Command timed out"); job.data = data; } },
   }), /RECOVERY_REQUIRED/);
@@ -392,7 +392,7 @@ test("actual worker/controller/state path keeps exact deployment identity and se
   const f = await fixture(t), db = database(f), deploymentId = uuid(10);
   const job = { id: `protected-release-${digest(f.manifest)}`, data: protectedJobData(f),
     async updateData(value) { this.data = value; }, async getState() { return "completed"; } };
-  const result = await runProtectedReleaseJob(job, { db, agentRow: f.row(), loadBackend: async () => f.backend,
+  const result = await runProtectedReleaseJob(job, { db, agentRow: f.row(), loadBackend: async () => f.backend, stagingRoot: path.join(f.root, ".worker-tmp"),
     journalAdapter: { updateData: value => job.updateData(value) },
     withProviderMutationLock: async (owner, fn) => { assert.equal(owner, uuid(2)); return fn(); }, checkReadiness: async () => ({ ok: true }) });
   assert.equal(result.phase, "external_metadata_pending"); assert.equal(result.deployment_id, deploymentId);
@@ -423,7 +423,7 @@ test("recovery owner mismatch refuses before stopping the current candidate", as
 test("real worker preflight rejection compensates exact queued state without runtime mutation", async t => {
   const f = await fixture(t), db = database(f); f.faults.uid = true;
   const job = { id: "protected-job", data: protectedJobData(f), async updateData() {} };
-  await assert.rejects(runProtectedReleaseJob(job, { db, agentRow: f.row(), loadBackend: async () => f.backend,
+  await assert.rejects(runProtectedReleaseJob(job, { db, agentRow: f.row(), loadBackend: async () => f.backend, stagingRoot: path.join(f.root, ".worker-tmp"),
     journalAdapter: { updateData: value => job.updateData(value) },
     withProviderMutationLock: async (_, fn) => fn(), checkReadiness: async () => ({ ok: true }) }), /UID_CHANGED/);
   assert.equal(f.row().status, "running"); assert.equal(db.deployments.get(uuid(10)), "failed");
