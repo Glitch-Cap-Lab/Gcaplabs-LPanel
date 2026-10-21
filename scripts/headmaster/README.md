@@ -107,6 +107,14 @@ nothing; the dry run and the swap re-check every value under the agent lock. A b
 is not running, not Headmaster-owned or whose container does not match its row returns
 `409` with the `PROTECTED_RELEASE_*` code.
 
+`GET /api/agents/:id/protected-runtime-releases/:releaseId/progress` returns the phase
+the running job last journaled (`validated`, `stopped`, `staged`, `old_retained`,
+`candidate_created`, `candidate_healthy`, `external_metadata_pending`, or a rollback
+phase) and its queue state. The status route needs the agent lock, which the running
+job holds, so it can only answer at the end; this one takes no lock and touches no
+container, so the Releases page can show each step as it happens. It proves nothing:
+finalize still reads the status route.
+
 ## Immutable input
 
 The closed manifest format is `headmaster-protected-runtime-release/v1`.

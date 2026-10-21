@@ -375,6 +375,16 @@ const tail = {
       description: "Session JWT only. Read-only: reports the release operation's recorded state and never changes the runtime.",
     },
   },
+  "/agents/{id}/protected-runtime-releases/{releaseId}/progress": {
+    get: {
+      ...summarize(
+        "Agents",
+        "Read the live phase of one protected runtime release while it runs",
+        [agentParam, { name: "releaseId", in: "path", required: true, schema: { type: "string" }, description: "Release operation id." }],
+      ),
+      description: "Session JWT only, for the agent's owner. Lock-free and read-only: returns the phase the release job last journaled and its queue state. Not proof of an outcome; finalize uses the status route.",
+    },
+  },
   "/agents/{id}/protected-runtime-releases/{releaseId}/operations": {
     post: {
       ...summarize(

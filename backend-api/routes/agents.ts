@@ -122,6 +122,7 @@ const router = express.Router();
 const { createProtectedReleaseStatusHandler } = require("../protectedReleaseStatusRoute");
 const { createProtectedReleaseOperationHandler } = require("../protectedReleaseOperationRoute");
 const { createProtectedReleaseTargetHandler } = require("../protectedReleaseTargetRoute");
+const { createProtectedReleaseProgressHandler } = require("../protectedReleaseProgressRoute");
 router.use(createMutationFailureAuditMiddleware("agent"));
 const coreAgentScope = scopeByMethod("agents:read", "agents:write");
 const ROUTE_SPECIFIC_SCOPE_SEGMENTS = new Set([
@@ -160,6 +161,9 @@ router.get("/:id/protected-runtime-releases/:releaseId", requireSession, createP
 }));
 router.get("/:id/protected-runtime-target", requireSession, createProtectedReleaseTargetHandler({
   db, loadBackend: row => containerManager.backendFor(row),
+}));
+router.get("/:id/protected-runtime-releases/:releaseId/progress", requireSession, createProtectedReleaseProgressHandler({
+  db, getJob: id => require("../redisQueue").deployQueue.getJob(id),
 }));
 router.post("/:id/protected-runtime-releases/:releaseId/operations", requireSession, createProtectedReleaseOperationHandler({
   db, acquireLock: acquireAgentProvisionLock, loadBackend: row => containerManager.backendFor(row),

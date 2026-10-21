@@ -45,3 +45,22 @@ test('the target route serves only the owning session and changes nothing',async
   row.status='queued';const refused=await get();assert.equal(refused.status,409);assert.equal((await refused.json()).code,'PROTECTED_RELEASE_RUNNING_REQUIRED');
   assert.deepEqual(f.events.slice(before).filter(e=>/^(stop|start|rename|create|remove|kill|exec)/.test(String(e))),[]);
 });
+
+test('progress reads the phase the running job journaled, without the agent lock, for the owning session only',async t=>{
+  const {createProtectedReleaseProgressHandler}=require('../../backend-api/protectedReleaseProgressRoute');
+  const {digest}=require('./protectedReleaseManifest');
+  const f=await fixture(t),target=f.manifest.targets[0],id=digest(f.manifest);
+  let owner=target.owner_id,state='active',receipt={release_id:id,phase:'stopped'};
+  const job={id:`protected-release-${id}`,get data(){return {id:target.agent_id,protected_release:{release_id:id,manifest:f.manifest,receipt}};},getState:async()=>state};
+  const app=express();app.use((req,res,next)=>{req.user={id:owner};next();});
+  app.get('/api/agents/:id/protected-runtime-releases/:releaseId/progress',createProtectedReleaseProgressHandler({
+    db:{query:async()=>({rows:[{id:target.agent_id,user_id:target.owner_id}]})},getJob:async name=>name===job.id?job:null}));
+  const server=app.listen(0,'127.0.0.1');await new Promise(r=>server.once('listening',r));t.after(()=>new Promise(r=>server.close(r)));
+  const get=async(release=id)=>{const r=await fetch(`http://127.0.0.1:${server.address().port}/api/agents/${target.agent_id}/protected-runtime-releases/${release}/progress`);return [r.status,await r.json()];};
+  assert.deepEqual(await get(),[200,{release_id:id,queue_state:'active',phase:'stopped',lp_committed:false,publication_blocked:true}]);
+  receipt={release_id:id,phase:'candidate_healthy'};assert.equal((await get())[1].phase,'candidate_healthy','each journaled phase shows as it happens');
+  receipt=null;state='failed';assert.equal((await get())[1].phase,'failed_before_receipt');
+  state='waiting';assert.equal((await get())[1].phase,'queued');
+  assert.equal((await get('b'.repeat(64)))[0],404);
+  owner='foreign';assert.equal((await get())[0],404);
+});
