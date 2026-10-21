@@ -33,7 +33,15 @@ async function runProtectedReleaseOperation(flag, input, deps) {
     const backend = await deps.loadBackend(target.runtime, { ownerUserId: target.owner_id });
     guard(); const adapter = new ProtectedReleaseDocker(backend, { signal, assertActive: guard });
     const jobId = `protected-release-${releaseId}`;
-    const existing = deps.getJob ? await deps.getJob(jobId) : null;
+    let existing = deps.getJob ? await deps.getJob(jobId) : null;
+    // A refusal before the first receipt touched nothing. Once explicit recovery has put the
+    // agent back to running, the same immutable release may be queued again under its stable id.
+    if (flag === "--enqueue" && existing && !existing.data?.protected_release?.receipt && await existing.getState() === "failed") {
+      const status = await readProtectedReleaseStatus({ manifest, adapter, state, job: existing });
+      if (status.phase !== "failed_before_receipt") throw refuse("PROTECTED_RELEASE_RECOVERY_UNAVAILABLE");
+      assertAgent(manifest, row, { allowQueued: false }); guard();
+      await existing.remove(); existing = null;
+    }
     if (flag === "--status" || (flag === "--enqueue" && existing)) return await readProtectedReleaseStatus({ manifest, adapter, state, job: existing });
     if (flag === "--recover") {
       const status = await readProtectedReleaseStatus({ manifest, adapter, state, job: existing });

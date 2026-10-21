@@ -379,6 +379,34 @@ test("old-worker refusal remains an exact failed-before-receipt operation and ex
   assert.equal(f.events.filter(x => x === "create:candidate").length, 0);
 });
 
+test("a release refused before its receipt is queued again only after recovery put the agent back to running", async t => {
+  const f = await fixture(t); f.setRow({ ...f.row(), status: "queued" });
+  let removed = 0, added = 0, queued;
+  const job = { id: `protected-release-${digest(f.manifest)}`, data: protectedJobData(f), getState: async () => "failed", remove: async () => { removed++; } };
+  const deps = { owner: { prepare: async () => ({ release_id: digest(f.manifest), phase: "binding_pending", metadata_finalized: false }), finalize: async () => ({ release_id: digest(f.manifest), phase: "binding_pending", metadata_finalized: false }) },
+    readFile: async () => JSON.stringify(f.manifest), db: { query: async () => ({ rows: [f.row()] }) }, acquireLock: async () => ({ release: async () => {} }),
+    loadBackend: async () => f.backend, getJob: async () => (removed ? null : job), buildReplacementDeploymentJob, cancelJobs: async () => ({ active: 0 }),
+    enqueue: async (_, data, options) => { queued = data; return options.addDeploymentJob(data); }, addJob: async (_, options) => { added++; return { id: options.jobId }; } };
+  // Still queued from the refused attempt: no recovery yet, so nothing is removed or queued.
+  await assert.rejects(command(["--manifest", "local.json", "--enqueue"], deps), /BINDING_CHANGED/);
+  assert.equal(removed, 0); assert.equal(added, 0);
+  f.setRow({ ...f.row(), status: "running" });
+  const result = await command(["--manifest", "local.json", "--enqueue"], deps);
+  assert.equal(result.phase, "queued"); assert.equal(result.job_id, job.id); assert.equal(removed, 1); assert.equal(added, 1);
+  assert.equal(queued.protected_release.action, "apply"); assert.equal(queued.replace_existing_runtime, false);
+});
+
+test("a failed release that saved a receipt is never queued again by enqueue", async t => {
+  const f = await fixture(t); f.setRow({ ...f.row(), status: "running" }); let removed = 0, added = 0;
+  const data = protectedJobData(f); data.protected_release.receipt = { release_id: digest(f.manifest), phase: "validated" };
+  const job = { id: `protected-release-${digest(f.manifest)}`, data, getState: async () => "failed", remove: async () => { removed++; } };
+  const deps = { owner: { prepare: async () => ({ release_id: digest(f.manifest), phase: "binding_pending", metadata_finalized: false }), finalize: async () => ({ release_id: digest(f.manifest), phase: "binding_pending", metadata_finalized: false }) },
+    readFile: async () => JSON.stringify(f.manifest), db: { query: async () => ({ rows: [f.row()] }) }, acquireLock: async () => ({ release: async () => {} }),
+    loadBackend: async () => f.backend, getJob: async () => job, buildReplacementDeploymentJob, enqueue: async () => { added++; } };
+  await command(["--manifest", "local.json", "--enqueue"], deps);
+  assert.equal(removed, 0); assert.equal(added, 0);
+});
+
 test("immutable manifest rejects secret env inputs and unsupported owner/UID/targets", async t => {
   const f = await fixture(t);
   for (const mutate of [m => { m.env_delta.set.API_SERVER_KEY = "synthetic-secret"; }, m => { m.image.uid = 0; },
