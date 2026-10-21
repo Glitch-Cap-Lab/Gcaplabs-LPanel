@@ -203,6 +203,29 @@ describe("durable account deletion", () => {
     const f = fixture({ row: receiptRow({ steps: { revoke_sessions: "done" } }), intercept: ({ url }) => url.pathname.includes("/auth/v1/") ? fail(404, { code: "user_not_found" }) : null });
     expect((await f.client.completeStep("r1", "auth_user", "ops")).steps.auth_user).toBe("done");
   });
+  test("grace sweeper wipes each claimed account as the owner's own request and keeps going past a failure", async () => {
+    const OTHER = "22222222-3333-4444-5555-666666666666";
+    const log = { error: jest.fn() };
+    const f = fixture({ intercept: ({ url, body }) => {
+      if (url.pathname.endsWith("/headmaster_claim_due_account_deletions")) return ok([{ owner_id: OTHER, email: null }, { owner_id: OWNER, email: "a@example.test" }]);
+      if (url.pathname.endsWith("/headmaster_begin_account_deletion") && body.p_owner_id === OTHER) return fail(400, { message: "deletion_busy" });
+      return null;
+    } });
+    const results = await f.client.sweepDueDeletions({ limit: 5, log });
+    expect(f.calls[0]).toMatchObject({ path: "/rest/v1/rpc/headmaster_claim_due_account_deletions", body: { p_limit: 5 } });
+    const begins = f.calls.filter((c) => c.path.endsWith("/headmaster_begin_account_deletion")).map((c) => c.body);
+    expect(begins).toEqual([{ p_owner_id: OTHER, p_email: null, p_source: "app" }, { p_owner_id: OWNER, p_email: "a@example.test", p_source: "app" }]);
+    expect(results).toEqual([{ owner_id: OTHER, status: "error", error: "deletion_busy" }, { owner_id: OWNER, status: "completed" }]);
+    expect(f.read().completed_by).toBe("grace-sweeper");
+    expect(log.error).toHaveBeenCalledTimes(1);
+  });
+  test("grace sweeper does nothing when nothing is due and reports a failed claim", async () => {
+    const none = fixture({ intercept: ({ url }) => url.pathname.endsWith("/headmaster_claim_due_account_deletions") ? ok([]) : null });
+    expect(await none.client.sweepDueDeletions()).toEqual([]);
+    expect(none.calls).toHaveLength(1);
+    const broken = fixture({ intercept: ({ url }) => url.pathname.endsWith("/headmaster_claim_due_account_deletions") ? fail(404) : null });
+    await expect(broken.client.sweepDueDeletions()).rejects.toThrow("deletion_claim_failed");
+  });
   test("requires all six successful steps for completed", async () => {
     const f = fixture({ row: receiptRow({ steps: { relay_usage: "pending_operator" } }) });
     expect((await f.client.completeStep("r1", "relay_usage", "ops")).status).toBe("needs_operator");
