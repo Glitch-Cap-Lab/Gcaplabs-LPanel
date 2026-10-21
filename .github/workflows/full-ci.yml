@@ -1,8 +1,8 @@
 name: Full CI
 
-# The checks that do not run on every push: inference relay tests and the
-# dashboard/marketing unit tests (3 jobs, about 3 cents). Add the "full-ci" label
-# to a PR, or use Run workflow on the branch.
+# Dashboard/marketing unit tests remain opt-in. Add the "full-ci" label to a PR,
+# or use Run workflow on the branch. Relay tests run in inference-relay.yml on
+# every relevant ready PR head.
 
 on:
   pull_request:
@@ -17,26 +17,6 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
-  relay:
-    if: github.event_name == 'workflow_dispatch' || github.event.label.name == 'full-ci'
-    name: inference relay node:test
-    runs-on: ubuntu-latest
-    timeout-minutes: 10
-    steps:
-      - uses: actions/checkout@v4
-        with:
-          persist-credentials: false
-      - uses: actions/setup-node@v4
-        with:
-          node-version-file: .nvmrc
-          cache: npm
-          cache-dependency-path: services/headmaster-inference/package-lock.json
-      - run: npm ci --ignore-scripts --no-audit --no-fund
-        working-directory: services/headmaster-inference
-      # Live provider tests skip without OPENROUTER_API_KEY; none is set here.
-      - run: npm test
-        working-directory: services/headmaster-inference
-
   frontends:
     if: github.event_name == 'workflow_dispatch' || github.event.label.name == 'full-ci'
     name: ${{ matrix.app }} unit tests

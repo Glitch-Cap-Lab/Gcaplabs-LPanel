@@ -130,12 +130,12 @@ Redis backs BullMQ for deployment, ClawHub install, backup, and alert-delivery j
 | `BACKUP_WORKER_CONCURRENCY`          | No       | `2`                    | Backup worker concurrency.                                                                                                                                                                                                  |
 | `NORA_BACKUP_JOB_TIMEOUT_MS`         | No       | `1800000`              | Backup job hard timeout. The backup worker enforces this via `Promise.race` because BullMQ v5 ignores `defaultJobOptions.timeout`.                                                                                          |
 | `NORA_BACKUP_SCHEDULE_POLL_MS`       | No       | `60000`                | How often the backup worker checks for due scheduled backups.                                                                                                                                                               |
-| `AGENT_PROVISION_LOCK_TIMEOUT_MS`    | No       | `30000`                | Maximum wait for the shared per-agent provision lock used by replacement producers and destructive restore. On timeout Nora rejects the transition instead of racing an active worker.                                      |
+| `AGENT_PROVISION_LOCK_TIMEOUT_MS`    | No       | `30000`                | Maximum wait for the shared per-runtime provision lock used by replacement producers and destructive restore. On timeout Nora rejects the transition instead of racing an active worker.                                      |
 | `PROVISIONER_LOCK_TIMEOUT_MS`        | No       | `30000`                | Maximum wait for any advisory lock taken on a worker lock session, applied as `lock_timeout` on the connection. A stuck holder makes the waiter fail fast instead of blocking forever. Clamped to `[10, 120000]`.           |
 | `PROVIDER_MUTATION_LOCK_TIMEOUT_MS`  | No       | `30000`                | Maximum wait for the per-user provider mutation lock. Without a bound, a stuck holder made `POST /api/llm-providers` hang past the reverse proxy and 504 after the insert had already committed. Clamped to `[10, 120000]`. |
 | `DEMO_ACTIVATION_LOCK_TIMEOUT_MS`    | No       | `30000`                | Maximum wait for the demo activation lock. Clamped to `[10, 120000]`.                                                                                                                                                       |
 | `PROVIDER_MUTATION_LOCK_MAX_HOLD_MS` | No       | `120000`               | Ceiling on how long a provider mutation may hold its lock. Exceeding it closes the lock session so Postgres releases the lock, the same way a crashed process would.                                                        |
-| `PROVISION_LOCK_MAX_HOLD_MS`         | No       | job timeout + `300000` | Ceiling on how long one job may hold a per-agent provision lock. Set above the deployment job timeout so it only fires on work that never completes, not work that is merely slow.                                          |
+| `PROVISION_LOCK_MAX_HOLD_MS`         | No       | job timeout + `300000` | Ceiling on how long one job may hold a per-runtime provision lock. Set above the deployment job timeout so it only fires on work that never completes, not work that is merely slow.                                          |
 | `ALERT_DELIVERY_ATTEMPTS`            | No       | `5`                    | Number of retry attempts for an alert webhook delivery before the worker records a terminal failure on the rule. Clamped to `[1, 10]`.                                                                                      |
 | `ALERT_DELIVERY_WORKER_CONCURRENCY`  | No       | `5`                    | Concurrency of the alert-deliveries worker.                                                                                                                                                                                 |
 | `WORKER_HEALTH_PORT`                 | No       | `4001`                 | Provisioner worker health-check port.                                                                                                                                                                                       |
@@ -268,7 +268,7 @@ The former built-in `40` attempts / `3` seconds pair is treated as a legacy defa
 
 | Variable        | Required | Default      | Description                                                                                                                                                                                                                                                                                                             |
 | --------------- | -------- | ------------ | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `PLATFORM_MODE` | No       | `selfhosted` | Operating mode. `selfhosted` uses operator-defined request limits with no billing. `paas` enables Stripe billing; plan tiers control agent-count and managed-backup entitlements while per-agent compute uses operator-managed platform defaults. See [Platform modes](/configuration/platform-modes) for full details. |
+| `PLATFORM_MODE` | No       | `selfhosted` | Operating mode. `selfhosted` uses operator-defined request limits with no billing. `paas` enables Stripe billing; plan tiers control agent-count and managed-backup entitlements while per-runtime compute uses operator-managed platform defaults. See [Platform modes](/configuration/platform-modes) for full details. |
 
 ## Self-hosted resource limits
 
@@ -303,6 +303,15 @@ Runtime selection is three-dimensional: **runtime family × deploy target × san
 | `ENABLED_BACKENDS`         | No       | `docker`    | Env-configured deploy targets enabled. `proxmox` is opt-in and experimental. Kubernetes clusters are registered in Admin.                                                                            |
 | `ENABLED_SANDBOX_PROFILES` | No       | `standard`  | Sandbox profiles enabled. Supported ids: `standard`, `nemoclaw`.                                                                                                                                     |
 | `DOCKER_AGENT_BIND_IP`     | No       | `127.0.0.1` | Host address used for Docker-published agent gateway/runtime ports. Keep loopback unless trusted remote clients must connect; protect any wider bind with a firewall or authenticated reverse proxy. |
+
+Local Docker Hermes runtimes can be isolated from each other. Both settings are off by default.
+
+| Variable                       | Required | Default | Description |
+| ------------------------------ | -------- | ------- | ----------- |
+| `NORA_AGENT_NETWORK_ISOLATION` | No       | unset   | `per-runtime` gives every runtime its own Docker network (Headmaster has one runtime per account, so this is a network per account; its bots are profiles inside the runtime and share it) (and keeps it off the default bridge). The worker attaches `NORA_AGENT_NETWORK_PEERS` to each one and re-attaches them when it starts and again every minute, so a recreated peer rejoins on its own. |
+| `NORA_AGENT_NETWORK_PEERS`     | No       | unset   | Comma-separated container names that must reach every runtime (API, worker, and any service that calls a runtime by name). A missing peer is skipped with a warning. |
+| `NORA_AGENT_NETWORK_RECONCILE_SECONDS` | No | `60` | Seconds between passes that re-attach the peers to every runtime network (minimum 10). `0` limits it to the start-up pass. |
+| `NORA_AGENT_VOLUME_QUOTA`      | No       | unset   | `monitor` logs (every 10 minutes, read-only) each runtime home volume that is over its agent's `disk_gb`; use it on hosts without filesystem quotas such as ext4. `enforce` creates each new runtime home volume with `size=<disk_gb>g`. Requires `/var/lib/docker` on XFS mounted with `pquota`; otherwise volume creation fails. Existing volumes are not resized. |
 
 ## Kubernetes registry and Compose mount helpers
 
@@ -380,7 +389,7 @@ Proxmox is an opt-in experimental LXC target for standard OpenClaw and prepared 
 | `PROXMOX_NODE_MAJOR`                       | No                  | `24`                                                       | Minimum Node.js major installed in stock OpenClaw templates.                                                                                                                                                                                                                                                      |
 | `PROXMOX_OPENCLAW_PACKAGE`                 | No                  | `openclaw@2026.6.11`                                       | Package spec installed for OpenClaw. Override only after validating Gateway and activation compatibility.                                                                                                                                                                                                         |
 | `PROXMOX_HERMES_BIN`                       | No                  | `/opt/hermes/.venv/bin/hermes`                             | Hermes executable in the prepared template.                                                                                                                                                                                                                                                                       |
-| `PROXMOX_HERMES_ENABLE_INSECURE_DASHBOARD` | No                  | `false`                                                    | Binds the Hermes dashboard to `0.0.0.0` instead of `127.0.0.1`. The dashboard now always requires authentication (Hermes basic-auth provider; Nora injects a per-agent credential), so this controls only the bind address — not authentication. Leave false unless the port is separately protected.             |
+| `PROXMOX_HERMES_ENABLE_INSECURE_DASHBOARD` | No                  | `false`                                                    | Binds the Hermes dashboard to `0.0.0.0` instead of `127.0.0.1`. The dashboard now always requires authentication (Hermes basic-auth provider; Nora injects a per-runtime credential), so this controls only the bind address — not authentication. Leave false unless the port is separately protected.             |
 
 ## NemoClaw / NVIDIA
 
@@ -401,7 +410,7 @@ These variables tune the OpenClaw runtime image and gateway. Most operators leav
 | `OPENCLAW_DOCKER_IMAGE`    | No       | OpenClaw default         | Container image used for OpenClaw agents.                                                  |
 | `OPENCLAW_STANDARD_IMAGE`  | No       | OpenClaw default         | Image used specifically for the `standard` sandbox profile.                                |
 | `OPENCLAW_GATEWAY_PORT`    | No       | `18789`                  | Internal port the OpenClaw gateway listens on inside the agent container.                  |
-| `OPENCLAW_GATEWAY_TOKEN`   | No       | auto-generated per agent | Static gateway token override. Most deployments rely on the per-agent token Nora issues.   |
+| `OPENCLAW_GATEWAY_TOKEN`   | No       | auto-generated per agent | Static gateway token override. Most deployments rely on the per-runtime token Nora issues.   |
 | `OPENCLAW_DOCKER_PACKAGE`  | No       | `openclaw@2026.6.11`     | Validated package spec used across Docker, Kubernetes, and as the Proxmox fallback.        |
 | `OPENCLAW_TSX_BIN`         | No       | OpenClaw default         | Path to the `tsx` runner inside the OpenClaw image.                                        |
 | `OPENCLAW_TSX_PACKAGE`     | No       | OpenClaw default         | Override `tsx` package name.                                                               |
@@ -495,7 +504,7 @@ Use `NORA_BACKUP_STORAGE=ssh`.
 
 | Variable       | Required | Default                 | Description                                                                                                                                         |
 | -------------- | -------- | ----------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `CORS_ORIGINS` | No       | `http://localhost:8080` | Comma-separated list of allowed CORS origins. Update to your public origin when Nora is exposed on a domain, for example `https://app.example.com`. |
+| `CORS_ORIGINS` | No       | `http://localhost:8080` | Comma-separated list of allowed CORS origins. Update to your public origin when Nora is exposed on a domain, for example `https://app.example.com`. The same list gates cookie-authenticated writes: a POST, PUT, PATCH or DELETE that carries the session cookie must send an `Origin` (or, failing that, `Referer`) from this list, otherwise the API answers 403 `csrf_origin_rejected`. Bearer and API-key clients, signed webhooks and `/internal/` routes are not affected. |
 
 ## LLM key storage
 

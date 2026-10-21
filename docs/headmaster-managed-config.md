@@ -28,6 +28,19 @@ name allowlist includes the four names for this runtime family, including the
 Kubernetes reconciliation path. Other runtime families retain their existing
 allowlist.
 
+Every account identity, provider, saved-model, channel and integration lookup
+must succeed before replacing the managed environment. An unavailable preflight
+source fails reconciliation before any environment write, connection eviction or
+physical start/restart; it cannot acknowledge the desired revision. An explicit
+start/restart temporarily marks the lifecycle pending. A proven preflight read
+failure restores its durable prior status and pause reason under the provider
+lock, only if the owner and pending state still match. A newer lifecycle state
+is never overwritten; a failed restoration remains an error requiring attention.
+Retry re-reads the full candidate under the same provider lock. A successful
+empty source is still authoritative and removes revoked credentials. Once an
+environment write or physical action has begun, failures retain the existing
+quarantine/recovery behavior even if they carry the source-unavailable code.
+
 Application failure returns HTTP 200 with `deployment_status: "failed"` and an
 unacknowledged desired revision. A successful call must return an explicit
 non-staged sync result after readiness; an empty, skipped, failed or merely staged

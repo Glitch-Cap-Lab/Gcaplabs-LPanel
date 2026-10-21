@@ -1,6 +1,6 @@
 # Headmaster admin integration (Nora-rebranding)
 
-This branch lets the signed-in Headmaster **Admin Panel** embed Nora's real
+This integration lets the signed-in Headmaster **Admin Panel** embed Nora's real
 operator (`/app`) and platform-admin (`/admin`) surfaces inside one
 Headmaster-hosted workspace, with a single sign-in and no routine second
 login. Native Nora login remains fully functional as the protected

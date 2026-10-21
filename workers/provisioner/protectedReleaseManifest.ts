@@ -20,17 +20,21 @@ function validateManifest(input) {
   if (m.format !== "headmaster-protected-runtime-release/v1") throw refuse("PROTECTED_RELEASE_MANIFEST_INVALID");
   keys(m.sources, ["core", "webapp", "lpanel"]);
   if (!["core", "webapp", "lpanel"].every(key => /^[0-9a-f]{40}$/.test(m.sources[key]))) throw refuse("PROTECTED_RELEASE_SOURCE_INVALID");
-  keys(m.image, ["id", "contract_sha256", "dependency_sha256", "uid", "gid"]);
+  keys(m.image, ["id", "binding", "contract_sha256", "dependency_sha256", "uid", "gid"]);
   if (!imageId(m.image.id) || !sha(m.image.contract_sha256) || !sha(m.image.dependency_sha256)
+      || typeof m.image.binding !== "string" || !/^[A-Za-z0-9][A-Za-z0-9._\/:@-]{0,255}$/.test(m.image.binding)
       || m.image.uid !== 10000 || m.image.gid !== 10000) throw refuse("PROTECTED_RELEASE_IMAGE_INVALID");
   // This first supported slice is one local runtime, with sequential fleet orchestration held.
   if (!Array.isArray(m.targets) || m.targets.length !== 1) throw refuse("PROTECTED_RELEASE_TARGET_INVALID");
   const t = m.targets[0];
-  keys(t, ["agent_id", "owner_id", "account_id", "workspace_id", "container_id", "container_name", "image_id", "image_binding", "env_sha256", "volume", "runtime", "status"]);
+  keys(t, ["agent_id", "owner_id", "account_id", "workspace_id", "container_id", "container_name", "image_id", "image_binding", "site_binding", "env_sha256", "volume", "runtime", "status"]);
   if (!uuid(t.agent_id) || !uuid(t.owner_id) || !uuid(t.account_id) || !uuid(t.workspace_id)
       || !name(t.container_id) || !name(t.container_name) || !name(t.volume)
       || !imageId(t.image_id) || typeof t.image_binding !== "string" || !/^[A-Za-z0-9][A-Za-z0-9._\/:@-]{0,255}$/.test(t.image_binding)
       || !sha(t.env_sha256)) throw refuse("PROTECTED_RELEASE_TARGET_INVALID");
+  keys(t.site_binding,["image_binding","deployment_generation","authorization_revision","revocation_generation"]);
+  if (t.site_binding.image_binding !== t.image_binding
+      || !["deployment_generation","authorization_revision","revocation_generation"].every(key => Number.isSafeInteger(t.site_binding[key]) && t.site_binding[key] >= (key === "revocation_generation" ? 0 : 1))) throw refuse("PROTECTED_RELEASE_TARGET_INVALID");
   keys(t.runtime, ["container_id", "container_name", "host", "backend_type", "runtime_family", "deploy_target", "execution_target_id", "sandbox_profile"]);
   if (!name(t.runtime.container_id) || !["running", "warning"].includes(t.status) || t.runtime.container_name !== t.container_name
       || t.runtime.runtime_family !== "hermes" || t.runtime.backend_type !== "docker" || t.runtime.deploy_target !== "docker"
@@ -53,7 +57,7 @@ function assertAgent(m, row, { candidateId = null, allowQueued = true, allowRefu
       || row.headmaster_owner_id !== t.account_id || row.headmaster_workspace_id !== t.workspace_id) throw refuse("PROTECTED_RELEASE_OWNER_CHANGED");
   const expected = candidateId ? { ...t.runtime, container_id: candidateId } : t.runtime;
   if (Object.entries(expected).some(([key, value]) => row[key] !== value)
-      || row.image !== (candidateId ? m.image.id : t.image_binding)
+      || row.image !== (candidateId ? m.image.binding : t.image_binding)
       || !(allowQueued ? [candidateId ? "running" : t.status, "queued", "deploying", ...(allowRefused && !candidateId ? ["error"] : [])] : [t.status]).includes(row.status)) {
     throw refuse("PROTECTED_RELEASE_BINDING_CHANGED");
   }

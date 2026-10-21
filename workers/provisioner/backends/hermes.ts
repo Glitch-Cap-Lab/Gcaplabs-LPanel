@@ -18,8 +18,14 @@ const {
 } = require("../../../agent-runtime/lib/hermesDashboardAuth");
 const {
   headmasterInferenceContainerEnv,
-  headmasterRelayContainerEnv,
 } = require("../../../agent-runtime/lib/headmasterInference");
+
+const {
+  ensureAgentNetwork,
+  perRuntimeNetworkEnabled,
+  removeAgentNetwork,
+  volumeQuotaOptions,
+} = require("./agentIsolation");
 
 const HERMES_RUNTIME_PORT = 8642;
 const HERMES_HOME = "/opt/data";
@@ -109,14 +115,23 @@ function safeContainerName(prefix, name, id) {
 }
 
 class HermesBackend extends DockerBackend {
+  // The bot runs as the hermes user and root login shells source apply.sh, so
+  // neither file may be writable by hermes: root owns both and the hermes group
+  // can only read. The bot's own login shells still read the state to get their
+  // managed env (state.json 0640 root:hermes, apply.sh 0755 root:root).
   async _initialManagedEnvFileOwnership(_container) {
     // The official Hermes image runs its application user as 10000:10000.
     // Existing-container reconciliation still verifies the live passwd entry.
-    return { uid: 10000, gid: 10000 };
+    return { uid: 0, gid: 10000 };
   }
 
   async _managedEnvFileOwnership(container) {
-    return this._containerUserOwnership(container, "hermes");
+    const { gid } = await this._containerUserOwnership(container, "hermes");
+    return { uid: 0, gid };
+  }
+
+  _managedEnvFileModes() {
+    return { state: 0o640, apply: 0o755 };
   }
 
   async _pullImage(imgName) {
@@ -192,6 +207,7 @@ class HermesBackend extends DockerBackend {
       vcpu,
       ram_mb,
       env,
+      disk_gb,
       container_name,
       abortSignal,
       credentialManagedEnvNames = [],
@@ -227,7 +243,10 @@ class HermesBackend extends DockerBackend {
     // reused across recreates; it's removed only on a true delete (see destroy()).
     const homeVolumeName = `nora_hermes_home_${id}`;
     try {
-      await this.docker.createVolume({ Name: homeVolumeName });
+      await this.docker.createVolume({
+        Name: homeVolumeName,
+        ...(volumeQuotaOptions(disk_gb) || {}),
+      });
     } catch (error) {
       // Volume already exists — reuse it (idempotent), preserving prior data.
     }
@@ -274,9 +293,8 @@ class HermesBackend extends DockerBackend {
       // key is derived from API_SERVER_KEY, so it is inert on any install that
       // has no relay and never duplicates an operator provider key.
       ...headmasterInferenceContainerEnv(apiServerKey, process.env),
-      // Shared secret for X-Headmaster-Relay (admission sends it, Core checks it).
-      // Empty when unset, so this is a no-op until the operator configures it.
-      ...headmasterRelayContainerEnv(process.env),
+      // Relay provenance is derived by admission/Core from this runtime's API
+      // key; never copy an operator's shared provenance credential here.
       // s6 initialization runs before the managed .env is sourced. Only
       // server-owned, nonsecret memory identity belongs in the Docker env.
       ...Object.fromEntries(
@@ -292,7 +310,12 @@ class HermesBackend extends DockerBackend {
       ),
     }).map(([key, value]) => `${key}=${value}`);
 
-    const composeNetwork = await this._findComposeNetwork();
+    // Per-agent mode puts the runtime alone on its own network (plus the
+    // configured control-plane peers), so runtimes cannot reach each other.
+    const isolated = perRuntimeNetworkEnabled();
+    const composeNetwork = isolated
+      ? await ensureAgentNetwork(this.docker, id)
+      : await this._findComposeNetwork();
     const networkingConfig = composeNetwork ? { [composeNetwork]: {} } : undefined;
     // Derive the hostname from an explicit agent `name` only. `containerName`
     // is (or falls back to) an upstream-templated value like
@@ -358,12 +381,16 @@ class HermesBackend extends DockerBackend {
       throwIfAborted(abortSignal, `hermes start for ${containerName}`);
       await container.start();
 
-      try {
-        const bridgeNet = this.docker.getNetwork("bridge");
-        await bridgeNet.connect({ Container: container.id });
-        console.log("[hermes] Connected container to bridge network for internet access");
-      } catch (error) {
-        console.warn(`[hermes] Could not connect to bridge network: ${error.message}`);
+      // The default bridge is shared by every container on the host, so an
+      // isolated runtime stays off it (its own network already routes out).
+      if (!isolated) {
+        try {
+          const bridgeNet = this.docker.getNetwork("bridge");
+          await bridgeNet.connect({ Container: container.id });
+          console.log("[hermes] Connected container to bridge network for internet access");
+        } catch (error) {
+          console.warn(`[hermes] Could not connect to bridge network: ${error.message}`);
+        }
       }
 
       const info = await container.inspect();
@@ -431,6 +458,8 @@ class HermesBackend extends DockerBackend {
     // cleanup is a harmless no-op for Hermes).
     const result = await super.destroy(containerId, opts);
     const { agentId } = opts;
+    // Not gated on the isolation settings: the API destroys runtimes on account deletion and does not carry them.
+    if (agentId) await removeAgentNetwork(this.docker, agentId);
     // Keep the home volume on a redeploy (preserveState) so data survives the
     // destroy→create replacement; remove it only on a true delete. Preserving is
     // the default so an omitted flag leaks a volume instead of destroying the

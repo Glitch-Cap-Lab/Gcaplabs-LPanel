@@ -1,6 +1,9 @@
 // @ts-nocheck
 const crypto = require("crypto");
-const { startAdvisoryLockHoldWatchdog } = require("../../backend-api/lib/advisoryLocks.ts");
+// Checkout layout reaches backend-api/lib; the backend-api image ships this file in
+// /app/protected-release beside /app/lib.
+const { startAdvisoryLockHoldWatchdog } = require(require("fs").existsSync(require("path").join(__dirname, "../../backend-api/lib/advisoryLocks.ts"))
+  ? "../../backend-api/lib/advisoryLocks.ts" : "../lib/advisoryLocks.ts");
 
 function normalizeProviderConfig(config) {
   if (typeof config !== "string") return config ?? null;

@@ -15,11 +15,13 @@ const {
   resolvePreferredLocale,
 } = require("../platformSettings");
 const headmasterLaunch = require("../headmasterLaunch");
+const { redactForRequest } = require("../lib/redaction");
 
 const router = express.Router();
 const FIRST_USER_ADMIN_LOCK_KEY = 20260408;
 const DUPLICATE_SIGNUP_MESSAGE = "Account already exists for this email";
-const SIGNUP_DISABLED_MESSAGE = "Registration is disabled on this Headmaster control panel. Ask an admin for an invitation.";
+const SIGNUP_DISABLED_MESSAGE =
+  "Registration is disabled on this Headmaster control panel. Ask an admin for an invitation.";
 const SIGNUP_DISABLED_CODE = "SIGNUP_DISABLED";
 const SIGNUP_CHALLENGE_MESSAGE = "Complete the verification challenge and try again";
 const TURNSTILE_SITEVERIFY_URL = "https://challenges.cloudflare.com/turnstile/v0/siteverify";
@@ -385,6 +387,11 @@ function isDuplicateUserError(error) {
   );
 }
 
+function publicAuthErrorMessage(error, req) {
+  const diagnostic = redactForRequest(error, req);
+  return typeof diagnostic?.message === "string" ? diagnostic.message : "Request failed";
+}
+
 // ─── Public routes ────────────────────────────────────────────────
 
 // First-run claim check: true until the first user registers (who becomes the
@@ -392,7 +399,7 @@ function isDuplicateUserError(error) {
 // metadata from this endpoint so reusable frontend images do not bake deploy-time
 // auth behavior. Only the public portion of signup-challenge configuration is
 // exposed; secret verification keys stay server-side.
-router.get("/bootstrap-status", async (req, res) => {
+router.get("/bootstrap-status", async (req, res, next) => {
   try {
     const { rows } = await db.query("SELECT 1 FROM users LIMIT 1");
     const firstAdminClaimAllowed = allowsFirstAdminSignupClaim();
@@ -405,7 +412,7 @@ router.get("/bootstrap-status", async (req, res) => {
       signupBotProtection: getPublicSignupBotProtectionConfig(),
     });
   } catch (e) {
-    res.status(500).json({ error: e.message });
+    next(e);
   }
 });
 
@@ -440,20 +447,23 @@ router.post(
       if (isDuplicateUserError(e)) {
         return res.status(409).json({ error: DUPLICATE_SIGNUP_MESSAGE });
       }
-      const statusCode = e.statusCode || 500;
+      const statusCode =
+        Number.isInteger(e.statusCode) && e.statusCode >= 400 && e.statusCode <= 599
+          ? e.statusCode
+          : 500;
       if (e.code === "PAAS_BOOTSTRAP_ADMIN_REQUIRED") {
-        return res.status(statusCode).json({ error: e.message, code: e.code });
+        return res.status(statusCode).json({ error: publicAuthErrorMessage(e, req), code: e.code });
       }
       if (statusCode >= 500) {
-        console.error("Signup failed:", e.message);
+        console.error("Signup failed:", redactForRequest(e, req));
         return res.status(500).json({ error: "Could not create account" });
       }
-      res.status(statusCode).json({ error: e.message });
+      res.status(statusCode).json({ error: publicAuthErrorMessage(e, req) });
     }
   },
 );
 
-router.post("/login", authLimiter, async (req, res) => {
+router.post("/login", authLimiter, async (req, res, next) => {
   const { email, password } = req.body;
   const normalizedEmail = normalizeEmail(email);
   if (!normalizedEmail || !password)
@@ -473,15 +483,14 @@ router.post("/login", authLimiter, async (req, res) => {
       });
     }
     if (!passwordOk) return res.status(401).json({ error: "Invalid email or password" });
-    const token = jwt.sign(
-      buildSessionPayload(user),
-      process.env.JWT_SECRET,
-      { expiresIn: "7d", algorithm: "HS256" },
-    );
+    const token = jwt.sign(buildSessionPayload(user), process.env.JWT_SECRET, {
+      expiresIn: "7d",
+      algorithm: "HS256",
+    });
     setAuthCookie(res, token, req);
     res.json({ token });
   } catch (e) {
-    res.status(e.statusCode || 500).json({ error: e.message });
+    next(e);
   }
 });
 
@@ -582,19 +591,18 @@ router.post("/oauth-login", authLimiter, async (req, res, next) => {
       return result.rows[0];
     });
 
-    const token = jwt.sign(
-      buildSessionPayload(user),
-      process.env.JWT_SECRET,
-      { expiresIn: "7d", algorithm: "HS256" },
-    );
+    const token = jwt.sign(buildSessionPayload(user), process.env.JWT_SECRET, {
+      expiresIn: "7d",
+      algorithm: "HS256",
+    });
     setAuthCookie(res, token, req);
     res.json({ token, user });
   } catch (e) {
     if (/Unsupported OAuth provider/i.test(e.message)) {
-      return res.status(400).json({ error: e.message });
+      return res.status(400).json({ error: publicAuthErrorMessage(e, req) });
     }
     if (e.statusCode === 409) {
-      return res.status(409).json({ error: e.message });
+      return res.status(409).json({ error: publicAuthErrorMessage(e, req) });
     }
     if (e.code === SIGNUP_DISABLED_CODE) {
       return sendSignupDisabled(res);
@@ -604,7 +612,7 @@ router.post("/oauth-login", authLimiter, async (req, res, next) => {
         e.message,
       )
     ) {
-      return res.status(401).json({ error: e.message });
+      return res.status(401).json({ error: publicAuthErrorMessage(e, req) });
     }
     next(e);
   }
@@ -630,7 +638,9 @@ router.patch("/password", authenticateToken, requireSession, async (req, res, ne
     // A password change ends every other session, then re-issues this one.
     await revokeUserSessions(db, req.user.id);
     const refreshed = (
-      await db.query("SELECT id, email, role, session_version FROM users WHERE id = $1", [req.user.id])
+      await db.query("SELECT id, email, role, session_version FROM users WHERE id = $1", [
+        req.user.id,
+      ])
     ).rows[0];
     if (refreshed && !req.user.hm) {
       const token = jwt.sign(buildSessionPayload(refreshed), process.env.JWT_SECRET, {
@@ -676,7 +686,7 @@ router.get("/me", authenticateToken, requireSession, async (req, res, next) => {
   }
 });
 
-router.patch("/profile", authenticateToken, requireSession, async (req, res) => {
+router.patch("/profile", authenticateToken, requireSession, async (req, res, next) => {
   try {
     const body = req.body || {};
     const { name, avatar } = body;
@@ -739,7 +749,7 @@ router.patch("/profile", authenticateToken, requireSession, async (req, res) => 
       effectiveLocale: resolvePreferredLocale(preferredLocale, languageSettings.defaultLocale),
     });
   } catch (e) {
-    res.status(e.statusCode || 500).json({ error: e.message });
+    next(e);
   }
 });
 
@@ -783,7 +793,8 @@ router.post("/logout", async (req, res) => {
   // Only a valid session for this user can trigger the bump.
   const { extractExplicitAuth, isSessionTokenPayload } = require("../middleware/auth");
   const explicit = extractExplicitAuth(req);
-  const token = (explicit && explicit.source === "authorization" && explicit.token) || readAuthCookie(req);
+  const token =
+    (explicit && explicit.source === "authorization" && explicit.token) || readAuthCookie(req);
   if (!token || token.startsWith("nora_")) return res.json({ success: true });
   let decoded;
   try {
@@ -797,9 +808,9 @@ router.post("/logout", async (req, res) => {
       await revokeUserSessions(db, decoded.id);
     } catch {
       // The cookie is gone, but a copied token would still work: say so.
-      return res
-        .status(503)
-        .json({ error: "Signed out here, but other copies of this session could not be ended. Try again." });
+      return res.status(503).json({
+        error: "Signed out here, but other copies of this session could not be ended. Try again.",
+      });
     }
   }
   res.json({ success: true });
@@ -839,7 +850,9 @@ router.post("/headmaster/redeem", authLimiter, async (req, res, next) => {
     res.json({ success: true, role: "admin" });
   } catch (error) {
     if (error.statusCode) {
-      return res.status(error.statusCode).json({ error: error.message, code: error.code });
+      return res
+        .status(error.statusCode)
+        .json({ error: publicAuthErrorMessage(error, req), code: error.code });
     }
     next(error);
   }

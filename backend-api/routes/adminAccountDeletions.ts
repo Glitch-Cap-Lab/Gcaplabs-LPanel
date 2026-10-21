@@ -2,7 +2,7 @@
 // Admin "Account deletions" tab (decision 31).
 //   GET  /admin/account-deletions                      list requests (newest first)
 //   POST /admin/account-deletions                      { ownerId, confirm: "DELETE" } delete an account
-//   POST /admin/account-deletions/:id/steps/:step      mark an operator step done
+//   POST /admin/account-deletions/:id/steps/:step      run/retry actual cleanup
 // Admin session only (requireSession + requireAdmin); API keys never reach it.
 
 const express = require("express");
@@ -31,8 +31,12 @@ function buildRouter({ clientFactory = () => createDeletionClient() } = {}) {
     try {
       res.json(await c.deleteAccount(String(req.body?.ownerId || "").trim(), actorOf(req)));
     } catch (error) {
-      const code = error?.message === "owner_invalid" ? 400 : 503;
-      res.status(code).json({ error: code === 400 ? "Enter the account's user id." : "The account could not be deleted." });
+      const code = error?.statusCode || 503;
+      const copy = error?.message === "deletion_busy" ? "A runtime operation is still running. Wait for it to finish, then retry account deletion."
+        : error?.message === "deletion_targets_unresolved" ? "A runtime identity needs operator recovery before account deletion can continue."
+        : error?.message === "deletion_already_requested" ? "A deletion request already exists. Refresh and retry its remaining cleanup steps."
+        : code === 400 ? "Enter the account's user id." : "The account could not be deleted.";
+      res.status(code).json({ error: copy });
     }
   });
 
@@ -42,7 +46,11 @@ function buildRouter({ clientFactory = () => createDeletionClient() } = {}) {
       res.json(await c.completeStep(req.params.id, req.params.step, actorOf(req)));
     } catch (error) {
       const msg = error?.message;
-      res.status(msg === "step_invalid" ? 400 : msg === "not_found" ? 404 : 503).json({ error: "Could not update the step." });
+      const copy = msg === "cleanup_targets_missing" ? "Cleanup targets are missing. Operator recovery is required."
+        : msg === "cleanup_targets_invalid" ? "Cleanup targets are invalid. Operator recovery is required."
+        : msg === "deletion_conflict" ? "Deletion progress changed. Refresh and retry cleanup."
+        : "Could not run cleanup. Refresh and retry.";
+      res.status(error?.statusCode || 503).json({ error: copy });
     }
   });
   return router;

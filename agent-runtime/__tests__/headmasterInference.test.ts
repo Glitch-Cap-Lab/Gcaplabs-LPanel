@@ -21,7 +21,6 @@ const {
   deriveHeadmasterInferenceKey,
   headmasterInferenceBaseUrl,
   headmasterInferenceContainerEnv,
-  headmasterRelayContainerEnv,
 } = headmasterInference;
 const { buildHermesRuntimeBootstrapEnv, buildHermesRuntimeConfigBootstrapCommand } =
   hermesRuntimeBootstrap;
@@ -30,10 +29,7 @@ describe("Headmaster tier definition", () => {
   it("is exactly Lite, Pro and Max in that order", () => {
     // The desktop (apps/desktop/electron/headmaster-trial-provider.ts) and the
     // relay (services/headmaster-inference/policy.mjs) carry the same three ids.
-    expect([...HEADMASTER_TIER_MODELS]).toEqual([
-      "headmaster-lite",
-      "headmaster-pro",
-    ]);
+    expect([...HEADMASTER_TIER_MODELS]).toEqual(["headmaster-lite", "headmaster-pro"]);
     expect(HEADMASTER_DEFAULT_TIER).toBe("headmaster-lite");
   });
 
@@ -70,10 +66,15 @@ describe("relay endpoint and credential", () => {
   });
 
   it("accepts only a plain https base URL override", () => {
-    expect(headmasterInferenceBaseUrl({ HEADMASTER_INFERENCE_BASE_URL: "https://relay.example/v1/" })).toBe(
-      "https://relay.example/v1",
-    );
-    for (const bad of ["http://relay.example/v1", "https://u:p@relay.example/v1", "https://r.example/v1?x=1", "nonsense"]) {
+    expect(
+      headmasterInferenceBaseUrl({ HEADMASTER_INFERENCE_BASE_URL: "https://relay.example/v1/" }),
+    ).toBe("https://relay.example/v1");
+    for (const bad of [
+      "http://relay.example/v1",
+      "https://u:p@relay.example/v1",
+      "https://r.example/v1?x=1",
+      "nonsense",
+    ]) {
       expect(() => headmasterInferenceBaseUrl({ HEADMASTER_INFERENCE_BASE_URL: bad })).toThrow();
     }
   });
@@ -82,14 +83,6 @@ describe("relay endpoint and credential", () => {
     expect(headmasterInferenceContainerEnv("gateway-key", {})).toEqual({
       HEADMASTER_INFERENCE_KEY: deriveHeadmasterInferenceKey("gateway-key"),
       HEADMASTER_INFERENCE_BASE_URL: HEADMASTER_INFERENCE_DEFAULT_BASE_URL,
-    });
-  });
-
-  it("injects the relay shared secret only when it is configured", () => {
-    expect(headmasterRelayContainerEnv({})).toEqual({});
-    expect(headmasterRelayContainerEnv({ HEADMASTER_RELAY_SECRET: "  " })).toEqual({});
-    expect(headmasterRelayContainerEnv({ HEADMASTER_RELAY_SECRET: " s3cret " })).toEqual({
-      HEADMASTER_RELAY_SECRET: "s3cret",
     });
   });
 });
@@ -221,7 +214,9 @@ describe("container bootstrap writes the managed model block", () => {
     // The entry moved to another inference host: the stale model is not kept.
     const moved = runBootstrap(buildHeadmasterModelConfig({}), {
       model: chosen,
-      providers: { "headmaster-own-openai": { ...own, base_url: "https://other.example/v1/own/openai" } },
+      providers: {
+        "headmaster-own-openai": { ...own, base_url: "https://other.example/v1/own/openai" },
+      },
     });
     expect(moved.model.provider).toBe("headmaster");
     expect(moved.model.base_url).toBe(HEADMASTER_INFERENCE_DEFAULT_BASE_URL);
@@ -233,7 +228,12 @@ describe("container bootstrap writes the managed model block", () => {
     });
     expect(otherKey.model.provider).toBe("headmaster");
     const viaApiKey = runBootstrap(buildHeadmasterModelConfig({}), {
-      model: { provider: chosen.provider, default: "gpt-x", base_url: `${own.base_url}/`, api_key: HEADMASTER_INFERENCE_KEY_REF },
+      model: {
+        provider: chosen.provider,
+        default: "gpt-x",
+        base_url: `${own.base_url}/`,
+        api_key: HEADMASTER_INFERENCE_KEY_REF,
+      },
       providers: { "headmaster-own-openai": own },
     });
     expect(viaApiKey.model.provider).toBe("headmaster-own-openai");
@@ -288,9 +288,9 @@ describe("headmasterInferenceBaseUrl memoization", () => {
       const calls = spy.mock.calls.length;
       expect(headmasterInferenceBaseUrl({ ...a })).toBe("https://memo-a.example/v1");
       expect(spy.mock.calls.length).toBe(calls);
-      expect(headmasterInferenceBaseUrl({ HEADMASTER_INFERENCE_BASE_URL: "https://memo-b.example/v1" })).toBe(
-        "https://memo-b.example/v1",
-      );
+      expect(
+        headmasterInferenceBaseUrl({ HEADMASTER_INFERENCE_BASE_URL: "https://memo-b.example/v1" }),
+      ).toBe("https://memo-b.example/v1");
       expect(spy.mock.calls.length).toBeGreaterThan(calls);
     } finally {
       global.URL = URLCtor;

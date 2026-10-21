@@ -53,7 +53,8 @@ async function acquireAgentProvisionLock(
   const deadline = Date.now() + normalizeLockTimeoutMs(timeoutMs);
   if (signal) {
     // Protected command only: the mutation queries use the same cancellable session as its lock.
-    return require("../workers/provisioner/deploymentLifecycle").acquireDedicatedSessionLock({
+    return require(require("fs").existsSync(require("path").join(__dirname, "../workers/provisioner/deploymentLifecycle.ts"))
+      ? "../workers/provisioner/deploymentLifecycle" : "./protected-release/deploymentLifecycle").acquireDedicatedSessionLock({
       createClient: () => client, signal, maxHoldMs: 1200000,
       acquire: async session => {
         while (true) {

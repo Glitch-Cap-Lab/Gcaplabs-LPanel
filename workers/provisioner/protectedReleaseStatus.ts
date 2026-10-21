@@ -11,7 +11,8 @@ async function readProtectedReleaseStatus({ manifest: input, adapter, state, job
   const queueState = job ? await job.getState() : null;
   const allowRefused = queueState === "failed" && job.data.protected_release.action === "apply" && job.data.replace_existing_runtime === false
     && String(job.id) === `protected-release-${releaseId}` && /^[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}$/.test(job.data.protected_release.deployment_id || "");
-  assertAgent(manifest, row, { candidateId: row?.image === manifest.image.id ? row.container_id : null, allowRefused });
+  assertAgent(manifest, row, { candidateId: row?.image === manifest.image.binding ? row.container_id : null, allowRefused });
+  await adapter.verifyImageBinding(manifest);
   const names = { old: `${target.container_name}-release-${releaseId.slice(0, 16)}`, stage: `.protected-release-${releaseId}` };
   const retained = await adapter.retained(target, names);
   const canonical = await adapter.readReceipt(target, names), queuedReceipt = job?.data?.protected_release?.receipt || null;

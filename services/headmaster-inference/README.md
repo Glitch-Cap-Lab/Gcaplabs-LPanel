@@ -1,8 +1,9 @@
 # Headmaster managed inference relay (S1)
 
 This is a provider relay, not an agent runtime. It accepts only the private
-Headmaster assertion contract and the OpenAI-compatible `GET /v1/models` and
-`POST /v1/chat/completions` operations. It never receives a prompt from Nora's
+Headmaster assertion contract, the OpenAI-compatible `GET /v1/models` and
+`POST /v1/chat/completions` operations, and the own-key realtime voice token
+route `POST /v1/realtime/session` (see "Realtime voice sessions" below). It never receives a prompt from Nora's
 cloud Hermes runtime and never runs tools. The container has no Docker socket,
 Docker CLI, runtime API, or agent execution dependencies. Build it with the Nora
 repository root as context:
@@ -17,6 +18,24 @@ existing `llm_providers` rows/columns required by the resolver and its Redis
 ACL only on the `headmaster-inference:*` key prefix. It requires the existing
 Nora `ENCRYPTION_KEY` to decrypt provider rows; it creates no provider table,
 vault, or credential catalog.
+
+## Tests and CI
+
+Use Node 24 from the repository's `.nvmrc`, then run from this directory:
+
+```sh
+npm ci --ignore-scripts --no-audit --no-fund
+npm test
+```
+
+`.github/workflows/inference-relay.yml` runs this deterministic suite for each
+relevant ready PR head, including pushes after a label was already applied.
+Changes to the relay, its copied backend/shared modules, Node version, or workflow
+start the check. Draft PRs wait until ready; manual dispatch remains available.
+CI leaves provider credentials and Redis unset and disables the live probe flag.
+Real provider and Redis probes remain separately opt-in. This package has no
+standalone typecheck script or TypeScript project; backend/provisioner typechecks
+remain in the Backend workflow.
 
 ## Trusted mapping and secrets
 
@@ -143,7 +162,9 @@ the bearer token and checking current account entitlement.
 ## Personal provider keys (byo)
 
 A user can store their own key for one of the relay's fixed-endpoint providers
-(openai, groq, mistral, deepseek, xai, moonshot, zai, nvidia, openrouter).
+(openai, groq, mistral, deepseek, xai, moonshot, zai, nvidia, openrouter, plus
+anthropic and gemini, which are personal-key only and have no operator
+coverage). The list is `PROVIDER_ENDPOINTS` in `policy.mjs`.
 Admission stores it AES-256-GCM encrypted in
 `public.headmaster_user_provider_keys` and forwards use through this relay with
 the same signed assertion plus an extra claim `byo_provider: <provider>`.
@@ -177,6 +198,24 @@ the same signed assertion plus an extra claim `byo_provider: <provider>`.
 - Never logged: the key, the ciphertext, the service credential, request or
   response bodies. Logs carry request id, provider, model id and error codes
   only.
+
+## Realtime voice sessions (own keys)
+
+`POST /v1/realtime/session` (`realtime.mjs`) mints a short-lived voice session
+token from the user's own stored key. The relay does not proxy the realtime
+WebSocket; it returns only the provider's ephemeral token, and the raw key never
+leaves the relay.
+
+- Own keys only: the assertion must carry `byo_provider`. Without it the answer
+  is `400 realtime_requires_own_key`. Supported providers are `openai`, `xai`
+  and `gemini`; any other is `400 realtime_provider_unsupported`.
+- The body may contain only `model` and `ttl_seconds`; any other field is
+  `400 realtime_field_forbidden`. The lifetime is clamped to 10 to 600 seconds
+  (default 600), and the response reports `ttl_seconds` and `ttl_clamped`.
+- Each mint takes one slot of the own-key hourly request budget, like own-key
+  chat. Personal keys do not count against the Headmaster monthly cap.
+- A provider token whose expiry is later than requested is refused
+  (`502 provider_token_ttl_invalid`). Logs carry owner id and provider only.
 
 ## Model names
 
@@ -248,12 +287,18 @@ month (UTC)."). Personal-key traffic is not counted.
 
 Initial protocol coverage is limited to the current Nora OpenAI-compatible
 catalog entries for OpenAI, Groq, Mistral, DeepSeek, xAI, Moonshot, Z.AI, and
-NVIDIA. Anthropic, Gemini, Cohere, custom URLs, Microsoft Foundry, Ollama,
-OAuth-only providers, and the Nora demo stub are intentionally unavailable
-until individually adapted and tested. This does not claim the pinned Hermes
+NVIDIA, later extended with OpenRouter. On the operator-funded path, Anthropic,
+Gemini, Cohere, custom URLs, Microsoft Foundry, Ollama, OAuth-only providers,
+and the Nora demo stub are intentionally unavailable until individually adapted
+and tested. Anthropic and Gemini are available for personal keys only (see
+"Personal provider keys"). This does not claim the pinned Hermes
 0.21.4 desktop client is integrated; that requires the D4 loopback adapter.
 
 ## B2-A integration required before deployment
+
+Status: historical gate. The relay is in production (on 19 October 2026 it
+runs `headmaster-inference:b022f0c`). The checklist below records the
+conditions set before first deployment; it is not a statement of current gaps.
 
 Admission must use Supabase Auth to resolve the bearer token to `auth.users.id`,
 then read `headmaster_account_entitlements(owner_id, entitlement,

@@ -13,7 +13,7 @@ function createProtectedReleaseState(db, agentId, deploymentId = null) {
     const row = await assertRecoverable(manifest, candidateId);
     const t = manifest.targets[0];
     const wantedId = rollback ? t.runtime.container_id : candidateId;
-    const wantedImage = rollback ? t.image_binding : manifest.image.id;
+    const wantedImage = rollback ? t.image_binding : manifest.image.binding;
     const updated = await db.query(`UPDATE agents SET container_id = $2, image = $3, status = $4
       WHERE id = $1 AND user_id = $5 AND external_owner_uuid = $6 AND external_id = $7
         AND container_id IS NOT DISTINCT FROM $8 AND image = $9 AND status = $10

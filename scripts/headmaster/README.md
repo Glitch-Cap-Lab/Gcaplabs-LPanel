@@ -6,13 +6,14 @@ The existing deployments worker runs the same controller only for explicitly
 produced `protected_release` jobs, before generic runtime replacement. Ordinary
 deployment jobs retain their existing behavior.
 
-This source slice commits **LP state only**. Its healthy result is
-`external_metadata_pending`, with `external_metadata_confirmed: false` and
-`publication_blocked: true`. It does not update the account service's binding or
-claim successful fleet publication. A complete supported release additionally
-requires owner-side preparation of the original account binding before enqueue,
-authenticated fresh LP status, exact binding finalization/replay, and admission
-drain. Those cross-service gates are not provided by this command yet.
+The LP controller commits LP state only. The maintained command additionally
+reserves the original account binding before acquiring the LP lock/enqueuing,
+then requests owner finalization after releasing that lock. The existing account
+provisioner independently reads authenticated fresh LP status and performs an
+exact binding/revision compare-and-set. There is no distributed transaction.
+`lp_updated_owner_pending` is partial; only the stored owner receipt proves
+`metadata_finalized`. Publication remains blocked, including after that receipt:
+this path does not establish a published pullable artifact or fleet acceptance.
 
 ## Packaging and invocation
 
@@ -91,13 +92,15 @@ recovery of an earlier operation. Only one local Docker target is supported.
 | Field | Required meaning |
 | --- | --- |
 | `sources.core`, `sources.webapp`, `sources.lpanel` | Exact 40-character source commits |
-| `image.id` | Exact already-local new Docker content ID, `sha256:` plus 64 hex characters |
+| `image.id` | Already-local new Docker image configuration ID, `sha256:` plus 64 hex characters; distinct from an OCI registry manifest digest |
+| `image.binding` | Exact approved new LP `agents.image` and account `image_digest` binding string |
 | `image.contract_sha256`, `image.dependency_sha256` | Expected bytes of `/opt/hermes/headmaster/contract/desktop-contract.json` and `/opt/hermes/uv.lock` |
 | `image.uid`, `image.gid` | Both `10000` |
 | `targets[0].agent_id`, `owner_id` | LP agent UUID and its actual LP operator/user UUID |
 | `targets[0].account_id`, `workspace_id` | Distinct external Headmaster owner and workspace UUIDs |
 | `container_id`, `container_name`, `image_id` | Observed old Docker content ID, exact name and old image content ID |
-| `image_binding` | Expected old LP `agents.image` value; this does not prove the account service binding |
+| `image_binding` | Exact original LP `agents.image` string; account preparation requires the same original binding string |
+| `site_binding` | Immutable original account `image_binding`, `deployment_generation`, `authorization_revision` and `revocation_generation`; preparation checks these under owner locks |
 | `env_sha256` | SHA-256 of canonical sorted complete Docker `Config.Env`; no environment values are included |
 | `volume`, `status` | Exact writable named data volume and expected `running` or `warning` LP status |
 | `runtime` | Exact stored `container_id`, `container_name`, nullable `host`, `backend_type: docker`, `runtime_family: hermes`, `deploy_target: docker`, `execution_target_id: docker`, `sandbox_profile: standard` |
@@ -107,6 +110,36 @@ The persisted runtime reference can be a name; `container_id` outside `runtime`
 must identify the observed Docker container. New-image source labels must match
 the pinned Core and webapp commits. The LP source pin is recorded provenance;
 image labels do not independently prove it.
+
+For enqueue, recovery and status, supply the existing platform-admin account
+access bearer through protected standard input, never arguments or environment.
+The command uses the existing `HEADMASTER_PARENT_ORIGIN` HTTPS origin. Its token
+stays in process memory and is not stored in manifests, queue jobs or receipts.
+Dry run does not reserve the account or require the account bearer. `--status`
+only reads both authorities; an uncertain finalize ACK remains pending until the
+exact operation query returns its stored receipt. Recovery after owner metadata
+finalization refuses and requires a separately reviewed reversal operation.
+
+The account prepare/finalize/status routes use fresh platform-admin bearer/session
+checks. LP's `GET /api/agents/:id/protected-runtime-releases/:releaseId` requires a
+current direct-owner session and reads only the server-owned queue job plus
+canonical volume receipt under the existing agent lock. API keys and workspace
+grants do not authorize it. Missing canonical published evidence refuses queue
+fallback. The existing provisioner claims finalization on its bounded tick; an
+idle worker may take the existing five-minute claim backoff. Pending preparation,
+LP rollback/failure, stale binding or authority, and unavailable status never
+become a successful owner receipt automatically.
+
+Both preflight and final status resolve `image.binding` locally to `image.id`.
+A `repo@sha256:...` reference additionally requires that exact locally available
+RepoDigest. Tags and config IDs establish local resolution only. No pull, remote
+registry verification or binding-format conversion occurs. LP and account state
+persist the approved binding string verbatim; rollback restores the old string.
+
+The binding check runs through the same guarded Docker call path as every other
+probe, so the operation deadline, lock-loss abort and cancellation apply to it.
+The backend image ships `deploymentLifecycle.ts` beside the status modules so the
+status route's cancellable held-session lock loads from `/app/protected-release`.
 
 ## Safety and recovery
 

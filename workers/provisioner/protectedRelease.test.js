@@ -41,8 +41,8 @@ async function fixture(t, options = {}) {
   const runtime = { container_id: "old", container_name: "hm-owned", host: "hm-owned", backend_type: "docker", runtime_family: "hermes", deploy_target: "docker", execution_target_id: "docker", sandbox_profile: "standard" };
   const env = [`HEADMASTER_OWNER_ID=${uuid(3)}`, `HEADMASTER_WORKSPACE_ID=${uuid(4)}`, "API_SERVER_KEY=synthetic-private-value"];
   const manifest = { format: "headmaster-protected-runtime-release/v1", sources: { core: "a".repeat(40), webapp: "b".repeat(40), lpanel: "c".repeat(40) },
-    image: { id: image(2), uid: 10000, gid: 10000, contract_sha256: sha(contract), dependency_sha256: sha(lock) },
-    targets: [{ agent_id: uuid(1), owner_id: uuid(2), account_id: uuid(3), workspace_id: uuid(4), container_id: "old", container_name: "hm-owned", image_id: image(1), image_binding: "old-tag", env_sha256: envFingerprint(env), volume: "owned-volume", runtime, status: "running" }], env_delta: { set: {} } };
+    image: { id: image(2), binding: "approved-tag", uid: 10000, gid: 10000, contract_sha256: sha(contract), dependency_sha256: sha(lock) },
+    targets: [{ agent_id: uuid(1), owner_id: uuid(2), account_id: uuid(3), workspace_id: uuid(4), container_id: "old", container_name: "hm-owned", image_id: image(1), image_binding: "old-tag", site_binding:{image_binding:"old-tag",deployment_generation:7,authorization_revision:1,revocation_generation:0}, env_sha256: envFingerprint(env), volume: "owned-volume", runtime, status: "running" }], env_delta: { set: {} } };
   let row = saved?.row || { id: uuid(1), user_id: uuid(2), external_namespace: "headmaster", external_owner_uuid: uuid(3), external_id: uuid(4), headmaster_owner_id: uuid(3), headmaster_workspace_id: uuid(4), ...runtime, status: "queued", image: "old-tag" };
   const persist = () => require("node:fs").writeFileSync(path.join(root, ".fake-docker.json"), JSON.stringify({ row, events, lastReceipt, containers: [...containers], metadata: [...metadata] }));
   const old = { Id: "old", Name: "/hm-owned", Image: image(1), State: { Running: true }, Config: { Env: env, Image: "old-tag", Labels: { "nora.agent.id": uuid(1) } },
@@ -66,10 +66,10 @@ async function fixture(t, options = {}) {
   const docker = {
     modem: { demuxStream(raw, stdout) { raw.on("data", x => stdout.write(x)); }, dial(opts, callback) {
       if (faults.helperImage) { opts.abortSignal.addEventListener("abort", () => events.push("abort:helper-image")); return; }
-      const reference = decodeURIComponent(opts.path.slice(8, -5)); assert.match(reference, /^sha256:[0-9a-f]{64}$/);
+      const reference = decodeURIComponent(opts.path.slice(8, -5)); assert.match(reference, /^[A-Za-z0-9][A-Za-z0-9._\/:@-]{0,255}$/);
       docker.getImage(reference).inspect().then(value => callback(null, value), callback);
     } },
-    getImage(id) { return { async inspect() { return { Id: id, Config: { Env: ["PYTHONPATH=/opt/data", "LD_PRELOAD=/opt/data/private.so", "LD_AUDIT=/opt/data/audit.so"], Healthcheck: { Test: ["CMD-SHELL", "unsafe-image-default"] }, Labels: { "org.opencontainers.image.revision": manifest.sources.core, "com.gcaplabs.webapp.revision": manifest.sources.webapp } } }; } }; },
+    getImage(id) { return { async inspect() { return { Id: id === manifest.image.binding ? manifest.image.id : id, RepoDigests: [], Config: { Env: ["PYTHONPATH=/opt/data", "LD_PRELOAD=/opt/data/private.so", "LD_AUDIT=/opt/data/audit.so"], Healthcheck: { Test: ["CMD-SHELL", "unsafe-image-default"] }, Labels: { "org.opencontainers.image.revision": manifest.sources.core, "com.gcaplabs.webapp.revision": manifest.sources.webapp } } }; } }; },
     async listContainers(options = {}) { return [...containers.values()].filter(c => options.all || c.State.Running).filter(c => !options.filters || (c.Config.Labels?.["headmaster.release.id"] === digest(manifest))).map(c => ({ Id: c.Id })); },
     getContainer(name) {
       const get = () => { const c = resolve(name); if (!c) throw missing(); return c; };
@@ -185,7 +185,7 @@ async function fixture(t, options = {}) {
     },
   };
   const state = { async read() { return clone(row); }, async assertRecoverable() { if (faults.binding) throw new Error("changed"); },
-    async commit(m, id) { events.push("commit"); row.container_id = id; row.image = m.image.id; row.status = "running"; persist(); if (faults.commit) throw new Error("database outage after CAS"); },
+    async commit(m, id) { events.push("commit"); row.container_id = id; row.image = m.image.binding; row.status = "running"; persist(); if (faults.commit) throw new Error("database outage after CAS"); },
     async rollback() { events.push("rollback-row"); row = { ...row, ...runtime, image: "old-tag", status: "running" }; persist(); } };
   const backend = { docker, _containerUserOwnership: async container => ({ uid: faults.uid || (faults.candidateUid && (await container.inspect()).Id === "candidate") ? 10001 : 10000, gid: 10000 }) };
   const adapter = new ProtectedReleaseDocker(backend, { stagingRoot: path.join(root, ".worker-tmp"), checkReadiness: async () => { if (faults.health) throw new Error("health failed"); return { ok: true }; } });
@@ -226,7 +226,7 @@ function database(f, deploymentId = uuid(10)) {
   } };
 }
 
-module.exports = { fixture };
+module.exports = { fixture, database, protectedJobData };
 if (!process.env.PROTECTED_RELEASE_FIXTURE_ONLY) {
 test("receipt journal cancellation closes only the operation-owned transport and never acknowledges a late write", async () => {
   const { EventEmitter } = require("node:events"), abort = new AbortController(); let cancelled = false, complete, calls = 0;
@@ -280,19 +280,22 @@ test("public Docker RPC and exec phases cancel the actual transport instead of w
 });
 
 test("a lost candidate-create ACK never starts or creates again until fresh explicit recovery", async t => {
-  const f = await fixture(t), original = f.docker.createContainer.bind(f.docker); f.adapter.probeTimeoutMs = 25;
+  const f = await fixture(t), original = f.docker.createContainer.bind(f.docker);
+  // Shorten only the candidate-create call; a global 25 ms budget flakes on a loaded host.
+  const guardedCall = f.adapter.call.bind(f.adapter); f.adapter.call = (run, ms) => guardedCall(run, /\.\.\.cfg/.test(String(run)) ? 25 : ms);
   let late, aborted = false;
   f.docker.createContainer = async cfg => {
+    // Observe the abort before the slow fixture create so a loaded host cannot miss it.
+    if (!cfg.Labels?.["headmaster.release.maintenance"]) cfg.abortSignal.addEventListener("abort", () => { aborted = true; });
     const value = await original(cfg);
     if (cfg.Labels?.["headmaster.release.maintenance"]) return value;
-    cfg.abortSignal.addEventListener("abort", () => { aborted = true; });
     return new Promise(resolve => { late = () => resolve(value); });
   };
   await assert.rejects(f.run(), /RECOVERY_REQUIRED/);
   assert.equal(aborted, true); assert.equal(f.events.filter(x => x === "create:candidate").length, 1);
   const boundary = f.events.length; late(); await new Promise(resolve => setTimeout(resolve, 30));
   assert.equal(f.events.length, boundary); assert.ok(!f.events.includes("start:candidate")); assert.ok(!f.events.includes("start:old"));
-  f.docker.createContainer = original; f.adapter.probeTimeoutMs = 60000;
+  f.docker.createContainer = original; f.adapter.call = guardedCall;
   assert.equal((await f.run({ action: "recover" })).phase, "rolled_back");
   assert.equal(f.events.filter(x => x === "create:candidate").length, 1);
 });
@@ -319,7 +322,7 @@ test("operation deadline and lost provision lease abort a stalled archive before
 
 test("uncertain queue ACK after create requires explicit recovery without automatic restart", async t => {
   const f = await fixture(t), db = database(f), job = { id: "uncertain-journal", data: protectedJobData(f) };
-  await assert.rejects(runProtectedReleaseJob(job, { db, agentRow: f.row(), loadBackend: async () => f.backend,
+  await assert.rejects(runProtectedReleaseJob(job, { db, agentRow: f.row(), loadBackend: async () => f.backend, stagingRoot: path.join(f.root, ".worker-tmp"),
     withProviderMutationLock: async (_, fn) => fn(), checkReadiness: async () => ({ ok: true }),
     journalAdapter: { updateData: async data => { if (data.protected_release.receipt.phase === "candidate_created") throw new Error("Command timed out"); job.data = data; } },
   }), /RECOVERY_REQUIRED/);
@@ -365,7 +368,7 @@ test("old-worker refusal remains an exact failed-before-receipt operation and ex
   const status = await readProtectedReleaseStatus({ manifest: f.manifest, adapter: f.adapter, state: f.state, job });
   assert.equal(status.phase, "failed_before_receipt"); assert.equal(status.receipt, null); assert.equal(status.publication_blocked, true);
   let queued;
-  const deps = { readFile: async () => JSON.stringify(f.manifest), db: { query: async () => ({ rows: [f.row()] }) }, acquireLock: async () => ({ release: async () => {} }),
+  const deps = { owner: { status: async () => ({ release_id: digest(f.manifest), phase: "prepared", metadata_finalized: false }) }, readFile: async () => JSON.stringify(f.manifest), db: { query: async () => ({ rows: [f.row()] }) }, acquireLock: async () => ({ release: async () => {} }),
     loadBackend: async () => f.backend, getJob: async () => job, buildReplacementDeploymentJob,
     enqueue: async (_, data) => { queued = data; return { id: "explicit-recovery" }; } };
   await command(["--manifest", "local.json", "--recover"], deps);
@@ -389,7 +392,7 @@ test("actual worker/controller/state path keeps exact deployment identity and se
   const f = await fixture(t), db = database(f), deploymentId = uuid(10);
   const job = { id: `protected-release-${digest(f.manifest)}`, data: protectedJobData(f),
     async updateData(value) { this.data = value; }, async getState() { return "completed"; } };
-  const result = await runProtectedReleaseJob(job, { db, agentRow: f.row(), loadBackend: async () => f.backend,
+  const result = await runProtectedReleaseJob(job, { db, agentRow: f.row(), loadBackend: async () => f.backend, stagingRoot: path.join(f.root, ".worker-tmp"),
     journalAdapter: { updateData: value => job.updateData(value) },
     withProviderMutationLock: async (owner, fn) => { assert.equal(owner, uuid(2)); return fn(); }, checkReadiness: async () => ({ ok: true }) });
   assert.equal(result.phase, "external_metadata_pending"); assert.equal(result.deployment_id, deploymentId);
@@ -420,7 +423,7 @@ test("recovery owner mismatch refuses before stopping the current candidate", as
 test("real worker preflight rejection compensates exact queued state without runtime mutation", async t => {
   const f = await fixture(t), db = database(f); f.faults.uid = true;
   const job = { id: "protected-job", data: protectedJobData(f), async updateData() {} };
-  await assert.rejects(runProtectedReleaseJob(job, { db, agentRow: f.row(), loadBackend: async () => f.backend,
+  await assert.rejects(runProtectedReleaseJob(job, { db, agentRow: f.row(), loadBackend: async () => f.backend, stagingRoot: path.join(f.root, ".worker-tmp"),
     journalAdapter: { updateData: value => job.updateData(value) },
     withProviderMutationLock: async (_, fn) => fn(), checkReadiness: async () => ({ ok: true }) }), /UID_CHANGED/);
   assert.equal(f.row().status, "running"); assert.equal(db.deployments.get(uuid(10)), "failed");
@@ -429,7 +432,7 @@ test("real worker preflight rejection compensates exact queued state without run
 
 test("maintained recovery command rejects wrong external owner before enqueue or DB mutation", async t => {
   const f = await fixture(t); f.manifest.targets[0].account_id = uuid(9); let enqueued = 0;
-  const db = database(f), deps = { db, readFile: async () => JSON.stringify(f.manifest), acquireLock: async () => ({ release: async () => {} }),
+  const db = database(f), deps = { owner:{status:async()=>({release_id:digest(f.manifest),phase:"prepared",metadata_finalized:false})},db, readFile: async () => JSON.stringify(f.manifest), acquireLock: async () => ({ release: async () => {} }),
     loadBackend: async () => f.backend, enqueue: async () => { enqueued++; }, getJob: async () => null };
   await assert.rejects(command(["--manifest", "local.json", "--recover"], deps), /OWNER_CHANGED/);
   assert.equal(enqueued, 0); assert.ok(db.queries.every(x => x.sql.startsWith("SELECT")));
@@ -589,7 +592,7 @@ test("maintained command validates dry run and enqueues one explicit protected j
   const f = await fixture(t); const row = f.row(); row.status = "running";
   const { buildReplacementDeploymentJob } = require("../../backend-api/agentProvisionLock");
   let queued;
-  const deps = { readFile: async () => JSON.stringify(f.manifest), db: { query: async () => ({ rows: [row] }) }, acquireLock: async () => ({ release: async () => {} }),
+  const deps = { owner:{prepare:async()=>({release_id:digest(f.manifest),phase:"prepared",metadata_finalized:false}),finalize:async()=>({release_id:digest(f.manifest),phase:"binding_pending",metadata_finalized:false})},readFile: async () => JSON.stringify(f.manifest), db: { query: async () => ({ rows: [row] }) }, acquireLock: async () => ({ release: async () => {} }),
     loadBackend: async () => f.backend, buildReplacementDeploymentJob,
     enqueue: async (agent, data, options) => { queued = data; return options.addDeploymentJob(data); }, addJob: async () => ({ id: "existing-queue-job" }), cancelJobs: async () => ({ active: 0 }) };
   assert.equal((await command(["--manifest", "local.json", "--dry-run"], deps)).phase, "dry_run");
