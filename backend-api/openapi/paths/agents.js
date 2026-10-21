@@ -369,6 +369,16 @@ const tail = {
       description: "Session JWT only. Read-only: reports the release operation's recorded state and never changes the runtime.",
     },
   },
+  "/agents/{id}/protected-runtime-releases/{releaseId}/operations": {
+    post: {
+      ...summarize(
+        "Agents",
+        "Run one protected runtime release operation (dry run, apply or recover) for this agent",
+        [agentParam, { name: "releaseId", in: "path", required: true, schema: { type: "string" }, description: "Release operation id." }],
+      ),
+      description: "Session JWT only, for the agent's owner. Body is exactly {action, manifest}; the manifest must hash to releaseId and name this agent. Same controller as the operator command; refusals return 409 with their PROTECTED_RELEASE_* code.",
+    },
+  },
   "/agents/{id}/redeploy": {
     post: {
       ...summarize(
