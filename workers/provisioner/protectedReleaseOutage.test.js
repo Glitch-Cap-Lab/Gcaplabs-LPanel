@@ -2,6 +2,7 @@
 // recovery evidence, never a second mutation, and must never leak the advisory lock.
 const test = require("node:test");
 const assert = require("node:assert/strict");
+const path = require("node:path");
 process.env.PROTECTED_RELEASE_FIXTURE_ONLY = "1";
 const { fixture, database, protectedJobData } = require("./protectedRelease.test");
 delete process.env.PROTECTED_RELEASE_FIXTURE_ONLY;
@@ -29,7 +30,8 @@ function locks(db) {
 async function attempt(f, db, job, l, extra = {}) {
   const provisionLock = l.provisionLock();
   try {
-    return await runProtectedReleaseJob(job, { db, agentRow: f.row(), loadBackend: async () => f.backend,
+    // Each fixture stages in its own folder: test files run in parallel and share one manifest digest.
+    return await runProtectedReleaseJob(job, { db, agentRow: f.row(), loadBackend: async () => f.backend, stagingRoot: path.join(f.root, ".worker-tmp"),
       withProviderMutationLock: l.withProviderMutationLock, provisionLock, checkReadiness: async () => ({ ok: true }), ...extra });
   } finally { provisionLock.release(); }
 }

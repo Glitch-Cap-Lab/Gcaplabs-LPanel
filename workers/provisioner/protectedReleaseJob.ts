@@ -26,7 +26,7 @@ async function createReceiptJournal(job, signal, RedisConnectionClass = require(
   } catch (error) { signal.removeEventListener("abort", cancel); cancel(); void owned.close(true).catch(() => {}); throw error; }
 }
 
-async function runProtectedReleaseJob(job, { db, agentRow, loadBackend, withProviderMutationLock, checkReadiness = null, provisionLock = null, journalAdapter = null, operationTimeoutMs = 900000 }) {
+async function runProtectedReleaseJob(job, { db, agentRow, loadBackend, withProviderMutationLock, checkReadiness = null, provisionLock = null, journalAdapter = null, operationTimeoutMs = 900000, stagingRoot = undefined }) {
   const payload = job.data.protected_release;
   if (!payload) return null;
   const { manifest, releaseId, target } = validateManifest(payload.manifest);
@@ -56,7 +56,7 @@ async function runProtectedReleaseJob(job, { db, agentRow, loadBackend, withProv
     guard();
     const queryable = provisionLock?.query ? provisionLock : db;
     const guardedDb = { query: async (...args) => { guard(); const result = await queryable.query(...args); guard(); return result; } };
-    const adapter = new ProtectedReleaseDocker(backend, { signal, assertActive: guard, checkReadiness: checkReadiness || ((_, readinessSignal) => waitForAgentReadiness({
+    const adapter = new ProtectedReleaseDocker(backend, { stagingRoot, signal, assertActive: guard, checkReadiness: checkReadiness || ((_, readinessSignal) => waitForAgentReadiness({
       host: target.container_name, runtimeHost: target.container_name, runtimePort: 8642,
       gatewayHost: target.container_name, gatewayPort: 9119,
     }, { signal: readinessSignal, beforeAttempt: guard })) });
