@@ -25,6 +25,7 @@ const {
 } = require("./backgroundTasks");
 const agentBudgets = require("./agentBudgets");
 const agentSchedules = require("./agentSchedules");
+const { createDeletionClient } = require("./headmasterAccountDeletions");
 const { addScheduleRunJob } = require("./redisQueue");
 // OpenTelemetry GenAI exporter — self-initializes on require (no-op unless
 // NORA_OTEL_ENABLED=true; fail-open). Wrapped so even a module load/parse error
@@ -2778,6 +2779,25 @@ if (require.main === module) {
       setInterval(async () => {
         await agentBudgets.sweepAgentBudgets({ dbClient: db });
       }, BUDGET_SWEEP_INTERVAL);
+
+      // ── Account deletion sweep: wipe accounts whose 14-day grace period has
+      // ended (claimed in Supabase, FOR UPDATE SKIP LOCKED). Hourly; off when
+      // the Headmaster Supabase settings are absent. ──
+      const deletionClient = createDeletionClient();
+      if (deletionClient) {
+        let deletionSweepRunning = false;
+        setInterval(async () => {
+          if (deletionSweepRunning) return;
+          deletionSweepRunning = true;
+          try {
+            await deletionClient.sweepDueDeletions();
+          } catch (err) {
+            console.error("[account-deletion] sweep failed:", err?.message || err);
+          } finally {
+            deletionSweepRunning = false;
+          }
+        }, 60 * 60 * 1000);
+      }
 
       // ── Schedule sweep: claim due agent_schedules and enqueue each run for the
       // worker to execute. Replica-safe (FOR UPDATE SKIP LOCKED in the module).

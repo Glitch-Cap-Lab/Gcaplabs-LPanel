@@ -131,13 +131,13 @@ function createDeletionClient({ env = process.env, fetchImpl = globalThis.fetch,
     if (!row) throw error("not_found", 404);
     return run(row, [step], actor);
   }
-  async function deleteAccount(ownerId, actor) {
+  async function deleteAccount(ownerId, actor, { source = "admin", email = null } = {}) {
     if (!uuid(ownerId)) throw error("owner_invalid", 400);
     ownerId = ownerId.toLowerCase();
     // The existing account authority snapshots and fences provisioning in one
     // transaction. No client-side lookup/insert fallback may race that fence.
     const created = await rest("rpc/headmaster_begin_account_deletion", { method: "POST",
-      body: JSON.stringify({ p_owner_id: ownerId, p_email: null, p_source: "admin" }) });
+      body: JSON.stringify({ p_owner_id: ownerId, p_email: email, p_source: source }) });
     if (!created.ok) {
       const body = await created.json().catch(() => ({}));
       if (body.message === "deletion_busy") throw error("deletion_busy", 409);
@@ -156,6 +156,27 @@ function createDeletionClient({ env = process.env, fetchImpl = globalThis.fetch,
         !row.cleanup_results || typeof row.cleanup_results !== "object" || Array.isArray(row.cleanup_results)) throw error("deletion_record_failed");
     return run(row, DELETION_STEPS, actor);
   }
-  return { list, completeStep, deleteAccount };
+  // Grace period sweeper (site migration 20261021090000). The claim is the
+  // account's own deletion request, made 14 days earlier, so the wipe runs with
+  // source "app". A claim that fails before the request is recorded is offered
+  // again a day later by the claim function itself.
+  async function sweepDueDeletions({ limit = 20, log = console } = {}) {
+    const claimed = await rest("rpc/headmaster_claim_due_account_deletions", { method: "POST",
+      body: JSON.stringify({ p_limit: limit }) });
+    if (!claimed.ok) throw error("deletion_claim_failed");
+    const rows = await claimed.json();
+    const results = [];
+    for (const row of Array.isArray(rows) ? rows : []) {
+      try {
+        const done = await deleteAccount(row.owner_id, "grace-sweeper", { source: "app", email: row.email ?? null });
+        results.push({ owner_id: row.owner_id, status: done?.status ?? "unknown" });
+      } catch (err) {
+        log.error?.(`[account-deletion] scheduled wipe for ${row.owner_id} failed: ${err?.message || err}`);
+        results.push({ owner_id: row.owner_id, status: "error", error: err?.message || String(err) });
+      }
+    }
+    return results;
+  }
+  return { list, completeStep, deleteAccount, sweepDueDeletions };
 }
 module.exports = { createDeletionClient, OPERATOR_STEPS, DELETION_STEPS, validateCleanupTargets };
