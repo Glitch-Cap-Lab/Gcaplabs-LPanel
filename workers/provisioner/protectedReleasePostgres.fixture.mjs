@@ -96,7 +96,8 @@ try {
     "-l",
     path.join(cluster, "server.log"),
     "-o",
-    `-p ${port} -h 127.0.0.1`,
+    // Socket in the new cluster: the system socket folder belongs to the postgres user.
+    `-p ${port} -h 127.0.0.1 -k "${cluster}"`,
     "-w",
     "start",
   ]);

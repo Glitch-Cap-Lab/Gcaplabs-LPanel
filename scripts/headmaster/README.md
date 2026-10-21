@@ -274,7 +274,7 @@ worker source from main commit `b022f0c66e253a4727e0944aa45504164b2eb747` under
 the existing Jest service mocks; this Git object must be available locally.
 
 For substantive PostgreSQL cancellation proof, the optional maintained fixture
-requires an already-installed PostgreSQL 17 and explicit **new** absolute cluster
+requires an already-installed PostgreSQL (17 on the Windows operator machine, 16 in CI) and explicit **new** absolute cluster
 directory, unprivileged localhost port, and mode. It never reads the application's
 database configuration. Each invocation creates only its new synthetic cluster,
 checks transaction rollback or delayed autocommit cancellation, lock reacquisition
@@ -288,7 +288,14 @@ node --import ./node_modules/tsx/dist/loader.mjs protectedReleasePostgres.fixtur
 ```
 
 `--bin=ABSOLUTE_PATH` can select an existing PostgreSQL binary directory; the
-Windows default is `C:/Program Files/PostgreSQL/17/bin`. Nothing is installed.
+Windows default is `C:/Program Files/PostgreSQL/17/bin`. On Linux pass it explicitly,
+for example `--bin=/usr/lib/postgresql/16/bin` (PostgreSQL 16; the fixture only needs
+`initdb` and `pg_ctl`). It must run as a non-root user, since `initdb` refuses root.
+Nothing is installed. `.github/workflows/backend.yml` runs both modes this way on
+`ubuntu-latest`, assuming that image provides PostgreSQL 16 at that path, and also
+starts a `postgres:16` service so `backend-api/__tests__/migrationPostgres.test.ts`
+runs via `TEST_POSTGRES_URL`; that suite fails, not skips, when the variable is set
+but the server is unreachable.
 This fixture proves cancellation before a delayed write, not rollback of an
 already-committed statement or production proxy/TLS behavior.
 
