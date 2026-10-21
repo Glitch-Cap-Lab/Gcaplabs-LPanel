@@ -1961,6 +1961,62 @@ describe("Hermes WebUI routes", () => {
     );
   });
 
+  it.each([
+    [409, "admission_conflict", "Refresh it before sending again.", {}],
+    [409, "unknown_execution", "Check the conversation before sending it again.", {}],
+    [409, "session_busy", "Wait for it to finish before trying again.", {}],
+    [503, "runtime_draining", "try again after it reconnects.", { "retry-after": "1" }],
+    [503, "storage_unavailable", "try again shortly.", { "retry-after": "1" }],
+    [503, "admission_queued", "Do not send it again.", { "x-should-retry": "false" }],
+  ])(
+    "keeps chat authority outcome %s %s without retrying the message",
+    async (status, code, message, headers) => {
+      mockDb.query.mockResolvedValueOnce({
+        rows: [
+          {
+            id: "a-hermes-chat",
+            user_id: "user-1",
+            status: "running",
+            runtime_family: "hermes",
+            backend_type: "docker",
+            container_id: "hermes-container",
+            runtime_host: "10.0.0.41",
+            runtime_port: 8642,
+            gateway_token: "hermes-token",
+          },
+        ],
+      });
+      global.fetch = jest.fn().mockResolvedValueOnce(
+        createMockFetchResponse({
+          ok: false,
+          status,
+          headers,
+          body: { error: { code, message: "Private runtime diagnostic" } },
+        }),
+      );
+
+      const res = await auth(
+        request(app)
+          .post("/agents/a-hermes-chat/hermes-ui/chat")
+          .send({
+            sessionId: "api-opaque-owner-session",
+            messages: [{ role: "user", content: "Inspect the workspace" }],
+          }),
+      );
+
+      expect(res.status).toBe(status);
+      expect(res.body.code).toBe(code);
+      expect(res.body.error).toContain(message);
+      expect(res.body.error).not.toContain("Private runtime diagnostic");
+      expect(global.fetch).toHaveBeenCalledTimes(1);
+      expect(global.fetch.mock.calls[0][1].headers["X-Hermes-Session-Id"]).toBe(
+        "api-opaque-owner-session",
+      );
+      expect(res.headers["retry-after"]).toBe(headers["retry-after"]);
+      expect(res.headers["x-should-retry"]).toBe(headers["x-should-retry"]);
+    },
+  );
+
   it("rejects Hermes cron routes for non-Hermes agents", async () => {
     mockDb.query.mockResolvedValueOnce({
       rows: [

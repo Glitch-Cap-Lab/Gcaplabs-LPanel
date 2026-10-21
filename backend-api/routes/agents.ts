@@ -1032,6 +1032,24 @@ function extractHermesApiError(payload, fallbackMessage) {
   return fallbackMessage;
 }
 
+function chatAuthorityError(response) {
+  const code = response.data?.error?.code;
+  const messages = {
+    admission_conflict: "This conversation changed. Refresh it before sending again.",
+    unknown_execution:
+      "The previous message may still be running. Check the conversation before sending it again.",
+    admission_queued:
+      "Your message was accepted and is waiting for the bot to restart. Do not send it again.",
+    runtime_draining:
+      "The bot is restarting. Your message is saved in the input; try again after it reconnects.",
+    storage_unavailable:
+      "The bot is temporarily unavailable. Your message is saved in the input; try again shortly.",
+    session_busy: "This conversation is still working. Wait for it to finish before trying again.",
+  };
+  if (!Object.hasOwn(messages, code) || ![409, 503].includes(response.status)) return null;
+  return { code, message: messages[code], status: response.status };
+}
+
 function createStatusCodeError(message, statusCode) {
   const error = new Error(message);
   error.statusCode = statusCode;
@@ -1660,6 +1678,20 @@ router.post(
     }
 
     if (!chatResponse.ok) {
+      const authorityError = chatAuthorityError(chatResponse);
+      if (authorityError) {
+        // Preserve accepted/uncertain outcomes without automatically resending.
+        if (chatResponse.headers.get("x-should-retry") === "false") {
+          res.setHeader("x-should-retry", "false");
+        } else if (authorityError.status === 503) {
+          const retryAfter = chatResponse.headers.get("retry-after");
+          if (/^\d+$/.test(retryAfter || "")) res.setHeader("Retry-After", retryAfter);
+        }
+        return res.status(authorityError.status).json({
+          error: authorityError.message,
+          code: authorityError.code,
+        });
+      }
       const upstreamStatus = chatResponse.status >= 500 ? 502 : chatResponse.status;
       return res.status(upstreamStatus).json({
         error: extractHermesApiError(
