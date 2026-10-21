@@ -42,7 +42,10 @@ capacity; it does not stop, write, queue, pull, or create. `--enqueue` captures 
 existing replacement tuple under the existing per-agent advisory lock and
 publishes one attempt to the existing deployments queue. Its stable job ID is
 `protected-release-<release_id>`. An exact repeat returns current status rather
-than applying again. `--recover` is explicit, validates owner/current identity
+than applying again. The one exception is an attempt the worker refused before its
+first receipt (`failed_before_receipt`, nothing touched): once `--recover` has put the
+agent back to `running`, `--enqueue` removes that failed job and queues the same
+release again. `--recover` is explicit, validates owner/current identity
 before enqueue, and creates a separate recovery job for the same immutable
 operation. It never replays the candidate's application execution.
 
