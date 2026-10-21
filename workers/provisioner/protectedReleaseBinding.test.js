@@ -6,6 +6,8 @@ process.env.PROTECTED_RELEASE_FIXTURE_ONLY='1';
 const {fixture}=require('./protectedRelease.test.js');
 const {digest}=require('./protectedReleaseManifest');
 const {createProtectedReleaseStatusHandler}=require('../../backend-api/protectedReleaseStatusRoute');
+const {createProtectedReleaseOperationHandler}=require('../../backend-api/protectedReleaseOperationRoute');
+const {buildReplacementDeploymentJob}=require('../../backend-api/agentProvisionLock');
 const {run:command}=require('../../scripts/headmaster/runtime-release');
 const {createOwnerClient,readAccessToken}=require('../../scripts/headmaster/runtimeReleaseOwnerClient');
 const {Readable}=require('node:stream');
@@ -102,4 +104,32 @@ test('shipped /app layout loads exact shared source with directly locked product
   const result=await read({manifest:f.manifest,adapter:new Adapter(f.backend),state:f.state,job:{id:`protected-release-${id}`,data:{id:f.row().id,protected_release:{manifest:f.manifest,release_id:id,receipt}},getState:async()=> 'completed'}});
   assert.equal(result.phase,'external_metadata_pending');assert.equal(result.observed.image_binding,f.manifest.image.binding);
   assert.notEqual(result.observed.image_binding,result.observed.runtime.candidate.image_id);
+});
+
+test('admin operation HTTP runs the same dry run and enqueue as the operator command, only for the stored manifest and the owning session',async t=>{
+  const f=await fixture(t),id=digest(f.manifest),target=f.manifest.targets[0],row={...f.row(),status:'running'};
+  let owner=target.owner_id,locks=0;const queued=[];
+  const app=express();app.use(express.json());app.use((req,res,next)=>{req.user={id:owner};if(req.headers['x-test-api-key'])req.apiKey={};next();});
+  app.post('/api/agents/:id/protected-runtime-releases/:releaseId/operations',createProtectedReleaseOperationHandler({
+    db:{query:async()=>({rows:[row]})},acquireLock:async()=>{locks++;return {release:async()=>{}};},loadBackend:async()=>f.backend,
+    buildReplacementDeploymentJob,enqueue:async(agent,data,options)=>{queued.push(data);return options.addDeploymentJob(data);},
+    createQueueSession:()=>({getJob:async()=>null,addJob:async(data,options)=>({id:options.jobId}),cancelJobs:async()=>({active:0}),close(){}}),
+  }));
+  const server=app.listen(0,'127.0.0.1');await new Promise(r=>server.once('listening',r));t.after(()=>new Promise(r=>server.close(r)));
+  const url=(agent=target.agent_id,release=id)=>`http://127.0.0.1:${server.address().port}/api/agents/${agent}/protected-runtime-releases/${release}/operations`;
+  const post=(body,{agent,release,headers={}}={})=>fetch(url(agent,release),{method:'POST',headers:{'content-type':'application/json',...headers},body:JSON.stringify(body)});
+  const before=f.events.length;
+  for(const [body,options] of [[{action:'delete',manifest:f.manifest}],[{action:'apply'}],[{action:'apply',manifest:f.manifest,receipt:{}}],
+    [{action:'apply',manifest:f.manifest},{release:'b'.repeat(64)}],[{action:'apply',manifest:f.manifest},{agent:'00000000-0000-0000-0000-000000000099'}]])
+    assert.equal((await post(body,options)).status,400);
+  assert.equal((await post({action:'apply',manifest:f.manifest},{headers:{'x-test-api-key':'synthetic'}})).status,403);
+  owner='foreign';assert.equal((await post({action:'apply',manifest:f.manifest})).status,404);owner=target.owner_id;
+  assert.equal(locks,0,'every refusal happens before the agent lock');
+  const dry=await post({action:'dry_run',manifest:f.manifest});assert.equal(dry.status,200);assert.equal((await dry.json()).phase,'dry_run');
+  assert.equal(queued.length,0);assert.deepEqual(f.events.slice(before).filter(e=>/^(stop|start|rename|create|remove|kill)/.test(String(e))),[],'dry run stops, starts, renames and creates nothing');
+  const applied=await post({action:'apply',manifest:f.manifest});assert.equal(applied.status,200);
+  assert.deepEqual(await applied.json(),{release_id:id,phase:'queued',job_id:`protected-release-${id}`,publication_blocked:true});
+  assert.equal(queued.length,1);assert.equal(queued[0].replace_existing_runtime,false);assert.equal(queued[0].protected_release.release_id,id);
+  const recover=await post({action:'recover',manifest:f.manifest});assert.equal(recover.status,409,'nothing to recover before a receipt');
+  assert.match((await recover.json()).code,/^PROTECTED_RELEASE_/);
 });

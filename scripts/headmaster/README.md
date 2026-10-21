@@ -35,7 +35,7 @@ node --import ./workers/provisioner/node_modules/tsx/dist/loader.mjs scripts/hea
 The operator script is not shipped inside the provisioner image. Both existing
 worker Dockerfiles copy `workers/provisioner/`, so the controller, archive module,
 state adapter, and worker branch are shipped in their actual maintained paths.
-No new service, Python installation, queue, database table, or route is required.
+No new service, Python installation, queue or database table is required; the admin operation route below reuses the same controller.
 
 `--dry-run` reads identities, image metadata, user ownership, install size and
 capacity; it does not stop, write, queue, pull, or create. `--enqueue` captures the
@@ -81,6 +81,19 @@ Deadline cancellation disconnects only those sockets, with reconnect/offline
 queueing disabled; shared worker connections are never disconnected. Real Redis
 transport behavior remains unqualified here because the local fixture environment
 has no existing Redis server; no installation or shared instance was used.
+
+## Admin-started operations
+
+The same LP part of `--dry-run`, `--enqueue` and `--recover` is also reachable at
+`POST /api/agents/:id/protected-runtime-releases/:releaseId/operations` with exactly
+`{action, manifest}` (`dry_run`, `apply` or `recover`). It shares
+`workers/provisioner/protectedReleaseOperation.ts` with this command. Only the
+agent's owning LP session may call it (no API keys); the manifest must hash to the
+path's release id and name the path's agent, and every refusal happens before the
+agent lock. The Headmaster provisioner calls it for operations a platform admin
+queued on the account service, sending the manifest the account service stored at
+prepare time. The owner reservation and finalization stay with the account service,
+as with this command. Refusals return `409` with the `PROTECTED_RELEASE_*` code.
 
 ## Immutable input
 
