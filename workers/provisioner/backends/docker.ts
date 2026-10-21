@@ -646,6 +646,12 @@ class DockerBackend extends ProvisionerBackend {
     return {};
   }
 
+  // File modes for the managed env state and apply script. Runtimes whose bot
+  // can write to its own home override this together with the ownership hooks.
+  _managedEnvFileModes() {
+    return { state: 0o600, apply: 0o700 };
+  }
+
   async _containerUserOwnership(container, username) {
     const passwd = await this._readContainerFile(container, "/etc/passwd");
     const fields = passwd
@@ -733,17 +739,18 @@ class DockerBackend extends ProvisionerBackend {
     const managedFileOwnership = initializeManagedState
       ? await this._initialManagedEnvFileOwnership(container)
       : await this._managedEnvFileOwnership(container);
+    const managedModes = this._managedEnvFileModes();
     const files = [
       {
         name: MANAGED_ENV_STATE_PATH.replace(/^\//, ""),
         content: `${JSON.stringify(state)}\n`,
-        mode: 0o600,
+        mode: managedModes.state,
         ...managedFileOwnership,
       },
       {
         name: MANAGED_ENV_APPLY_PATH.replace(/^\//, ""),
         content: buildManagedEnvApplyScript(),
-        mode: 0o700,
+        mode: managedModes.apply,
         ...managedFileOwnership,
       },
     ];

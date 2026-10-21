@@ -2,6 +2,7 @@
 const db = require("./db");
 const { deployQueue } = require("./redisQueue");
 const { ensureAuditSourceMetadata } = require("./auditSource");
+const { redactForRequest, redactValue } = require("./lib/redaction");
 
 const DEFAULT_EVENT_LIMIT = 20;
 const DEFAULT_AUDIT_PAGE_LIMIT = 30;
@@ -495,9 +496,12 @@ async function exportEvents(filters = {}) {
  */
 async function logEvent(type, message, metadata = {}) {
   const enrichedMetadata = ensureAuditSourceMetadata(metadata);
+  const redactedMessage = redactForRequest(message, { body: metadata });
+  const safeMessage =
+    typeof redactedMessage === "string" ? redactedMessage : "[redacted: invalid event message]";
   await db.query("INSERT INTO events(type, message, metadata) VALUES($1, $2, $3)", [
     type,
-    message,
+    safeMessage,
     JSON.stringify(enrichedMetadata),
   ]);
   // Fire matching alert rules. Lazy-required to avoid a hard module cycle and
@@ -505,12 +509,12 @@ async function logEvent(type, message, metadata = {}) {
   // evaluator are swallowed there — the event itself is already persisted.
   try {
     const alertRules = require("./alertRules");
-    Promise.resolve(alertRules.evaluateAndDeliver(type, message, enrichedMetadata)).catch((err) =>
-      console.error("Alert rule evaluation failed:", err.message),
+    Promise.resolve(alertRules.evaluateAndDeliver(type, safeMessage, enrichedMetadata)).catch(
+      (err) => console.error("Alert rule evaluation failed:", redactValue(err)),
     );
   } catch (err) {
     // alertRules module not present (shouldn't happen) — keep going.
-    console.error("Failed to load alertRules:", err.message);
+    console.error("Failed to load alertRules:", redactValue(err));
   }
 }
 

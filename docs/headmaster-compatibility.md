@@ -2,6 +2,22 @@
 
 Status: no Headmaster Nora image has been released as a tagged Nora release. Production runs operator-built images on the Hetzner host (production moved from Azure on 13 October 2026); see "Production state (19 October 2026)". The N0 sections below are the historical record of the 23 September 2026 adoption.
 
+## Core 1.2 session authority
+
+The operator chat preserves Core's structured 409 conflicts and 503 restart or
+storage refusals, showing plain messages while retaining the input. An accepted
+queued message or an execution with an uncertain outcome must not be resent
+automatically; check the conversation before another attempt. Retry guidance
+from Core is retained. Returned session IDs remain opaque and are echoed to the
+same operator chat.
+
+The embedded dashboard serves the Core image's own client and forwards mutation
+bodies and query parameters unchanged, including the owning profile and mutation
+fences. LPanel does not introduce another session store or schema migration.
+Runtime replacement preserves the existing state volume. A pre-upgrade snapshot,
+image canary, and rollback rehearsal remain owner release steps: reverting the
+image alone does not undo Core's upgraded state or ledger delete guard.
+
 ## Source and runtime pins
 
 - Nora upstream base: `40322503991fb9216d91e888a3834ea33b85d4a4` (checkout base for this fork branch).

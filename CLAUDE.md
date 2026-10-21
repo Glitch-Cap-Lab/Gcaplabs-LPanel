@@ -63,7 +63,7 @@ cd e2e && npm run smoke:runtime-path        # Runtime resolution
 cd e2e && npm run capture:operator-readme   # Regenerate README screenshots
 ```
 
-CI runs on non-draft pull requests (Linux only, one job each, about 1 billed minute; `scripts/infra-security.test.mjs` is not in the default job) from two workflows: `.github/workflows/backend.yml` (typecheck + Jest in `backend-api`, then typecheck + `npm test` (node:test) in `workers/provisioner`) and `.github/workflows/admin-dashboard.yml` (admin helper tests + typecheck). The inference relay's node:test suite in `services/headmaster-inference` and the `frontend-dashboard` / `frontend-marketing` unit tests run in `.github/workflows/full-ci.yml`, started by the `full-ci` label on a PR or by Run workflow.
+Scoped Linux PR checks use `.github/workflows/backend.yml` (backend-api and provisioner typechecks/tests), `.github/workflows/admin-dashboard.yml` (admin helper tests + typecheck), and `.github/workflows/inference-relay.yml` (the relay's deterministic node:test suite). These run for relevant ready PR changes, including each new head. Dashboard/marketing unit tests remain label/manual-only in `.github/workflows/full-ci.yml`. `scripts/infra-security.test.mjs` is not in the default jobs.
 
 Remote Hosts page copy is defined in `admin-dashboard/lib/remoteHostTranslations.ts`. Keep visible JSX text and user-facing attributes behind `useI18n().t()`; `remoteHostsI18n.test.ts` checks this boundary and requires every used key in all supported non-English locales.
 

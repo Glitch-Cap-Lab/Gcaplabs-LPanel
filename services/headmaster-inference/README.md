@@ -19,6 +19,24 @@ ACL only on the `headmaster-inference:*` key prefix. It requires the existing
 Nora `ENCRYPTION_KEY` to decrypt provider rows; it creates no provider table,
 vault, or credential catalog.
 
+## Tests and CI
+
+Use Node 24 from the repository's `.nvmrc`, then run from this directory:
+
+```sh
+npm ci --ignore-scripts --no-audit --no-fund
+npm test
+```
+
+`.github/workflows/inference-relay.yml` runs this deterministic suite for each
+relevant ready PR head, including pushes after a label was already applied.
+Changes to the relay, its copied backend/shared modules, Node version, or workflow
+start the check. Draft PRs wait until ready; manual dispatch remains available.
+CI leaves provider credentials and Redis unset and disables the live probe flag.
+Real provider and Redis probes remain separately opt-in. This package has no
+standalone typecheck script or TypeScript project; backend/provisioner typechecks
+remain in the Backend workflow.
+
 ## Trusted mapping and secrets
 
 Assignments are resolved at request time from Headmaster's Supabase project;
