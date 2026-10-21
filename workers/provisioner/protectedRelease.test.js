@@ -235,7 +235,8 @@ test("receipt journal cancellation closes only the operation-owned transport and
     assert.equal(options.enableOfflineQueue, false); assert.equal(options.maxRetriesPerRequest, 0); return connection;
   } };
   class Owned extends EventEmitter { constructor(value) { super(); this.client = Promise.resolve(value); } async close() {} }
-  const job = { data: { before: true }, queue: { client: Promise.resolve(shared) }, backend: { queue: { client: Promise.resolve(shared) }, async updateData(received, value) {
+  // BullMQ hands the processor the Worker as job.queue, which has no client; the backend view does.
+  const job = { data: { before: true }, queue: {}, backend: { queue: { client: Promise.resolve(shared) }, async updateData(received, value) {
     assert.equal(received, job); assert.equal(await this.queue.client, connection); calls++;
     return new Promise(resolve => { complete = resolve; });
   } } };

@@ -13,7 +13,7 @@ async function abortable(promise, signal) {
 
 async function createReceiptJournal(job, signal, RedisConnectionClass = require("bullmq").RedisConnection) {
   // Same BullMQ backend/key/script, owned transport only. Never disconnect the worker's shared connection.
-  const shared = await abortable(job.queue.client, signal);
+  const shared = await abortable(job.backend.queue.client, signal);
   const connection = shared.duplicate({ connectionName: "headmaster-protected-release-journal", commandTimeout: 30000, connectTimeout: 5000, maxRetriesPerRequest: 0, retryStrategy: () => null, enableOfflineQueue: false });
   const cancel = () => connection.disconnect(false);
   signal.addEventListener("abort", cancel, { once: true });
