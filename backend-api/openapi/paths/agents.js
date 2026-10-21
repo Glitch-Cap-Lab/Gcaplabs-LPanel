@@ -605,9 +605,23 @@ const tail = {
     get: summarize("Hermes", "Hermes runtime snapshot", [agentParam], ["agents:read"]),
   },
   "/agents/{id}/hermes-ui/chat": {
+    get: summarize(
+      "Hermes",
+      "Check the recorded outcome of an uncertain chat request",
+      [agentParam],
+      ["agents:read"],
+    ),
     post: summarize(
       "Hermes",
       "Send a chat message to a Hermes agent",
+      [agentParam],
+      ["agents:write"],
+    ),
+  },
+  "/agents/{id}/hermes-ui/chat/resolve": {
+    post: summarize(
+      "Hermes",
+      "Resolve an uncertain chat request with its receipt",
       [agentParam],
       ["agents:write"],
     ),

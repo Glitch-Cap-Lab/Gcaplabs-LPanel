@@ -52,7 +52,7 @@ const {
   requireApiKeyAgentPathScope,
   roleSatisfies,
 } = require("./middleware/ownership");
-const { correlationId, errorHandler } = require("./middleware/errorHandler");
+const { AppError, correlationId, errorHandler } = require("./middleware/errorHandler");
 const {
   createGatewayRouter,
   attachGatewayWS,
@@ -597,9 +597,9 @@ async function resolveEmbedAccess(
   if (scope === "gateway-embed") {
     const verdict = await checkGatewayEmbedSession({ id: userId, session: loginSession });
     if (!verdict.ok) {
-      res.status(verdict.status).send(
-        verdict.status === 503 ? "Session check unavailable" : "Session has been revoked",
-      );
+      res
+        .status(verdict.status)
+        .send(verdict.status === 503 ? "Session check unavailable" : "Session has been revoked");
       return null;
     }
     loginSession = verdict.actor;
@@ -638,7 +638,12 @@ async function resolveEmbedAccess(
 
   if (!relayToken) {
     relayToken = jwt.sign(
-      { id: userId, agentId, scope, ...(scope === "gateway-embed" ? { session: loginSession } : {}) },
+      {
+        id: userId,
+        agentId,
+        scope,
+        ...(scope === "gateway-embed" ? { session: loginSession } : {}),
+      },
       process.env.JWT_SECRET,
       { expiresIn: Math.floor(EMBED_SESSION_TTL_MS / 1000), algorithm: "HS256" },
     );
@@ -677,6 +682,8 @@ const corsOrigins = (
   .map((s) => s.trim())
   .filter(Boolean);
 app.use(cors({ origin: corsOrigins }));
+// Cookie-authenticated mutations must come from an allowed origin (CSRF gate).
+app.use(require("./middleware/csrfOrigin").createCsrfOriginGate({ allowedOrigins: corsOrigins }));
 
 // Rate-limit caps are env-overridable so CI/E2E — where the whole Playwright
 // suite hits the API from a single localhost IP — can raise them without
@@ -718,22 +725,26 @@ const mutationLimiter = rateLimit({
 });
 app.use(mutationLimiter);
 
-// Stripe webhook needs raw body — must come before express.json()
+// Stripe webhook needs raw body — must come before express.json(). Correlation
+// applies before parsing so signed-webhook and JSON-parser failures share it.
+app.use(correlationId);
+async function stripeWebhookHandler(req, res, next) {
+  const sig = req.headers["stripe-signature"];
+  const webhookSecret = process.env.STRIPE_WEBHOOK_SECRET;
+  if (!webhookSecret) return res.status(500).json({ error: "Webhook secret not configured" });
+  try {
+    const stripe = require("stripe")(process.env.STRIPE_SECRET_KEY);
+    const event = stripe.webhooks.constructEvent(req.body, sig, webhookSecret);
+    await billing.handleWebhookEvent(event);
+    res.json({ received: true });
+  } catch (e) {
+    const error = new AppError("Webhook could not be processed", 400, "WEBHOOK_FAILED");
+    error.cause = e;
+    next(error);
+  }
+}
 if (billing.BILLING_ENABLED) {
-  app.post("/stripe/webhook", express.raw({ type: "application/json" }), async (req, res) => {
-    const sig = req.headers["stripe-signature"];
-    const webhookSecret = process.env.STRIPE_WEBHOOK_SECRET;
-    if (!webhookSecret) return res.status(500).json({ error: "Webhook secret not configured" });
-    try {
-      const stripe = require("stripe")(process.env.STRIPE_SECRET_KEY);
-      const event = stripe.webhooks.constructEvent(req.body, sig, webhookSecret);
-      await billing.handleWebhookEvent(event);
-      res.json({ received: true });
-    } catch (e) {
-      console.error("Webhook error:", e.message);
-      res.status(400).json({ error: e.message });
-    }
-  });
+  app.post("/stripe/webhook", express.raw({ type: "application/json" }), stripeWebhookHandler);
 }
 
 app.use(
@@ -745,7 +756,6 @@ app.use(
     },
   }),
 );
-app.use(correlationId);
 app.use(require("./middleware/requestMetrics"));
 
 // ─── Public Routes ────────────────────────────────────────────────
@@ -2825,4 +2835,8 @@ if (require.main === module) {
 }
 
 module.exports = app;
-module.exports.__test = Object.freeze({ migrateDB, seedBootstrapAdminAccount });
+module.exports.__test = Object.freeze({
+  migrateDB,
+  seedBootstrapAdminAccount,
+  stripeWebhookHandler,
+});

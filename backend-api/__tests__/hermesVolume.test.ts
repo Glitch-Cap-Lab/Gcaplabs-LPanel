@@ -9,6 +9,9 @@ function mockBackend() {
       stop: jest.fn().mockResolvedValue({}),
       remove: jest.fn().mockResolvedValue({}),
     }),
+    getNetwork: jest.fn().mockReturnValue({
+      inspect: jest.fn().mockRejectedValue(Object.assign(new Error("no such network"), { statusCode: 404 })),
+    }),
     getVolume: jest.fn().mockImplementation((name) => ({
       remove: jest.fn().mockImplementation(async () => {
         removedVolumes.push(name);

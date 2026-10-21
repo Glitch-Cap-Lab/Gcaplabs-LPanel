@@ -1374,6 +1374,127 @@ describe("Hermes WebUI routes", () => {
     expect(mockDockerInspect).not.toHaveBeenCalled();
   });
 
+  it("returns the Hermes connect block for an owner API key with the agents:connect scope", async () => {
+    authorizeWorkspaceApiKey({ scopes: ["agents:read", "agents:connect"], userId: "agent-owner" });
+    const agent = {
+      id: "a-hermes-api-key-connect",
+      user_id: "agent-owner",
+      status: "running",
+      runtime_family: "hermes",
+      backend_type: "docker",
+      container_id: "hermes-container",
+      runtime_host: "10.0.0.43",
+      runtime_port: 8642,
+      gateway_token: "hermes-token",
+    };
+    mockDb.query
+      .mockResolvedValueOnce({
+        rows: [
+          {
+            id: agent.id,
+            backend_type: agent.backend_type,
+            deploy_target: agent.deploy_target,
+            execution_target_id: agent.execution_target_id,
+          },
+        ],
+      })
+      .mockResolvedValueOnce({ rows: [agent] });
+    global.fetch = jest
+      .fn()
+      .mockResolvedValueOnce(
+        createMockFetchResponse({ body: { status: "ok", platform: "hermes-agent" } }),
+      )
+      .mockResolvedValueOnce(
+        createMockFetchResponse({
+          body: { object: "list", data: [{ id: "desk-bot", object: "model" }] },
+        }),
+      )
+      .mockResolvedValueOnce(
+        createMockFetchResponse({
+          body: { version: "1.0.0", gateway_running: true, gateway_state: "running" },
+        }),
+      );
+    mockDockerInspect.mockResolvedValueOnce({
+      NetworkSettings: {
+        Ports: {
+          "8642/tcp": [{ HostIp: "100.71.115.105", HostPort: "19500" }],
+          "9119/tcp": [{ HostIp: "100.71.115.105", HostPort: "19044" }],
+        },
+      },
+    });
+
+    const res = await workspaceApiKeyAuth(
+      request(app)
+        .get("/agents/a-hermes-api-key-connect/hermes-ui")
+        .set("X-Forwarded-Host", "100.71.115.105"),
+    );
+
+    expect(res.status).toBe(200);
+    expect(res.body.connect).toMatchObject({
+      runtimeApiUrl: "http://100.71.115.105:19500",
+      apiKey: "hermes-token",
+    });
+  });
+
+  it("omits the Hermes connect block when the agents:connect key was issued to a non-owner", async () => {
+    authorizeWorkspaceApiKey({ scopes: ["agents:read", "agents:connect"], userId: "someone-else" });
+    const agent = {
+      id: "a-hermes-api-key-nonowner",
+      user_id: "agent-owner",
+      status: "running",
+      runtime_family: "hermes",
+      backend_type: "docker",
+      container_id: "hermes-container",
+      runtime_host: "10.0.0.43",
+      runtime_port: 8642,
+      gateway_token: "hermes-token",
+    };
+    mockDb.query
+      .mockResolvedValueOnce({
+        rows: [
+          {
+            id: agent.id,
+            backend_type: agent.backend_type,
+            deploy_target: agent.deploy_target,
+            execution_target_id: agent.execution_target_id,
+          },
+        ],
+      })
+      .mockResolvedValueOnce({ rows: [agent] });
+    global.fetch = jest
+      .fn()
+      .mockResolvedValueOnce(
+        createMockFetchResponse({ body: { status: "ok", platform: "hermes-agent" } }),
+      )
+      .mockResolvedValueOnce(
+        createMockFetchResponse({
+          body: { object: "list", data: [{ id: "desk-bot", object: "model" }] },
+        }),
+      )
+      .mockResolvedValueOnce(
+        createMockFetchResponse({
+          body: { version: "1.0.0", gateway_running: true, gateway_state: "running" },
+        }),
+      );
+    mockDockerInspect.mockResolvedValueOnce({
+      NetworkSettings: {
+        Ports: {
+          "8642/tcp": [{ HostIp: "100.71.115.105", HostPort: "19500" }],
+          "9119/tcp": [{ HostIp: "100.71.115.105", HostPort: "19044" }],
+        },
+      },
+    });
+
+    const res = await workspaceApiKeyAuth(
+      request(app)
+        .get("/agents/a-hermes-api-key-nonowner/hermes-ui")
+        .set("X-Forwarded-Host", "100.71.115.105"),
+    );
+
+    expect(res.status).toBe(200);
+    expect(res.body.connect).toBeUndefined();
+  });
+
   it("uses the routable published HostIp as the connect host, not the browsing host", async () => {
     mockReadHermesRuntimeSnapshot.mockResolvedValueOnce({
       runtimeStatus: { gateway_state: "running", active_agents: 1, updated_at: "t", platforms: {} },
@@ -4090,11 +4211,12 @@ describe("POST /agents/deploy", () => {
     const workspace = "22222222-2222-4222-8222-222222222222";
     const bank = "hermes-u-" + owner.replaceAll("-", "_");
     mockDb.query
+      .mockResolvedValueOnce({ rows: [] })
       .mockResolvedValueOnce({
         rows: [{ id: "a-managed", name: "Managed", status: "queued", user_id: "user-1" }],
       })
       .mockResolvedValueOnce({ rows: [] });
-    const res = await auth(
+    const res = await adminAuth(
       request(app)
         .post("/agents/deploy")
         .send({
@@ -5203,6 +5325,7 @@ describe("POST /agents/:id/integrations/headmaster/adopt", () => {
           { id: "a-adopt", name: "Hermes-Agent", user_id: "user-1", external_namespace: null },
         ],
       })
+      .mockResolvedValueOnce({ rows: [] })
       .mockResolvedValueOnce({
         rows: [
           {
@@ -5233,7 +5356,7 @@ describe("POST /agents/:id/integrations/headmaster/adopt", () => {
       external_owner_uuid: OWNER_UUID,
     });
     expect(mockDb.query).toHaveBeenNthCalledWith(
-      2,
+      3,
       expect.stringContaining("WHERE id = $4 AND external_namespace IS NULL"),
       ["headmaster", EXTERNAL_ID, OWNER_UUID, "a-adopt"],
     );
@@ -5260,6 +5383,7 @@ describe("POST /agents/:id/integrations/headmaster/adopt", () => {
           },
         ],
       })
+      .mockResolvedValueOnce({ rows: [{ id: "a-adopt-2", external_namespace: "headmaster", external_id: EXTERNAL_ID, external_owner_uuid: OWNER_UUID }] })
       // The guarded bind UPDATE matches nothing: the agent is already bound.
       .mockResolvedValueOnce({ rows: [] })
       .mockResolvedValueOnce({
@@ -5362,6 +5486,7 @@ describe("POST /agents/:id/integrations/headmaster/adopt", () => {
           { id: "a-adopt-5", name: "Hermes-Agent", user_id: "user-1", external_namespace: null },
         ],
       })
+      .mockResolvedValueOnce({ rows: [] })
       .mockResolvedValueOnce({
         rows: [
           {
@@ -5428,6 +5553,7 @@ describe("POST /agents/:id/integrations/headmaster/adopt", () => {
           { id: "a-adopt-7", name: "Hermes-Agent", user_id: "user-1", external_namespace: null },
         ],
       })
+      .mockResolvedValueOnce({ rows: [] })
       .mockResolvedValueOnce({
         rows: [
           {
@@ -5496,7 +5622,7 @@ describe("POST /agents/:id/integrations/headmaster/adopt model stamp", () => {
     mockPersistHermesStorageAllocation.mockClear();
     const [first, second] = adoptRows("a-storage-1", "hermes");
     second.rows[0].disk_gb = 10;
-    mockDb.query.mockResolvedValueOnce(first).mockResolvedValueOnce(second);
+    mockDb.query.mockResolvedValueOnce(first).mockResolvedValueOnce({ rows: [] }).mockResolvedValueOnce(second);
     const res = await adminAuth(
       request(app)
         .post("/agents/a-storage-1/integrations/headmaster/adopt")
@@ -5517,7 +5643,7 @@ describe("POST /agents/:id/integrations/headmaster/adopt model stamp", () => {
   it("stamps the relay model block on an adopted Hermes runtime", async () => {
     mockPersistHermesModelConfig.mockClear();
     const [first, second] = adoptRows("a-model-1", "hermes");
-    mockDb.query.mockResolvedValueOnce(first).mockResolvedValueOnce(second);
+    mockDb.query.mockResolvedValueOnce(first).mockResolvedValueOnce({ rows: [] }).mockResolvedValueOnce(second);
 
     const res = await adopt("a-model-1");
 
@@ -5533,7 +5659,7 @@ describe("POST /agents/:id/integrations/headmaster/adopt model stamp", () => {
     mockPersistHermesModelConfig.mockClear();
     mockPersistHermesModelConfig.mockRejectedValueOnce(new Error("runtime unreachable"));
     const [first, second] = adoptRows("a-model-2", "hermes");
-    mockDb.query.mockResolvedValueOnce(first).mockResolvedValueOnce(second);
+    mockDb.query.mockResolvedValueOnce(first).mockResolvedValueOnce({ rows: [] }).mockResolvedValueOnce(second);
 
     const res = await adopt("a-model-2");
 
@@ -5547,7 +5673,7 @@ describe("POST /agents/:id/integrations/headmaster/adopt model stamp", () => {
   it("leaves a non-Hermes runtime alone", async () => {
     mockPersistHermesModelConfig.mockClear();
     const [first, second] = adoptRows("a-model-3", "openclaw");
-    mockDb.query.mockResolvedValueOnce(first).mockResolvedValueOnce(second);
+    mockDb.query.mockResolvedValueOnce(first).mockResolvedValueOnce({ rows: [] }).mockResolvedValueOnce(second);
 
     const res = await adopt("a-model-3");
 
@@ -8371,5 +8497,322 @@ describe("POST /agents/:id/memory bot_screen", () => {
     expect(res.status).toBe(409);
     expect(cm.setMemory).not.toHaveBeenCalled();
     expect(cm.setBotScreenGate).not.toHaveBeenCalled();
+  });
+});
+
+
+describe("managed identity deploy coordination", () => {
+  const OWNER = "11111111-1111-4111-8111-111111111111", WORKSPACE = "22222222-2222-4222-8222-222222222222";
+  const AGENT = "33333333-3333-4333-8333-333333333333", JOB = "44444444-4444-4444-8444-444444444444";
+  const body = () => ({ name: "Managed", runtime_family: "hermes", idempotency_key: `headmaster-provision-${JOB}`,
+    external_identity: { namespace: "headmaster", external_id: WORKSPACE, owner_uuid: OWNER },
+    headmaster_integration_config: { owner_uuid: OWNER, workspace_uuid: WORKSPACE, memory_bank_id: `hermes-u-${OWNER.replaceAll("-", "_")}`, memory_gateway_url: "http://headmaster-memory-gateway:8791" } });
+  const defer = () => { let resolve; const promise = new Promise((r) => { resolve = r; }); return { promise, resolve }; };
+  function runtime() {
+    return { id: AGENT, name: "Managed", user_id: "user-1", status: "queued", runtime_family: "hermes", deploy_target: "docker", sandbox_profile: "standard", execution_target_id: "docker",
+      external_namespace: "headmaster", external_id: WORKSPACE, external_owner_uuid: OWNER,
+      headmaster_owner_id: OWNER, headmaster_workspace_id: WORKSPACE, headmaster_memory_bank_id: body().headmaster_integration_config.memory_bank_id, headmaster_memory_gateway_url: "http://headmaster-memory-gateway:8791" };
+  }
+  function store(initial = [], pauseInsert = null) {
+    const agents = [...initial], tails = new Map(); let inserts = 0;
+    mockAcquireAgentProvisionLock.mockImplementation(async (key) => {
+      const previous = tails.get(key) || Promise.resolve(), held = defer(); tails.set(key, previous.then(() => held.promise));
+      await previous; return { release: async () => held.resolve() };
+    });
+    mockDb.query.mockImplementation(async (sql) => {
+      if (sql.includes("external_namespace = 'headmaster'")) return { rows: [...agents] };
+      if (sql.includes("INSERT INTO agents")) {
+        inserts += 1; if (pauseInsert) { pauseInsert.entered.resolve(); await pauseInsert.release.promise; }
+        const row = runtime(); agents.push(row); return { rows: [row] };
+      }
+      if (sql.includes("INSERT INTO deployments")) return { rows: [] };
+      throw Error("unexpected managed-deploy query");
+    });
+    return { agents, get inserts() { return inserts; } };
+  }
+  beforeEach(() => { process.env.ENABLED_RUNTIME_FAMILIES = "openclaw,hermes"; process.env.ENABLED_BACKENDS = "docker"; });
+  test("non-admin sessions cannot supply a managed owner identity", async () => {
+    await auth(request(app).post("/agents/deploy").send(body())).expect(403);
+    expect(mockDb.query).not.toHaveBeenCalled(); expect(mockAddDeploymentJob).not.toHaveBeenCalled();
+  });
+  test("API keys cannot supply a managed owner identity", async () => {
+    authorizeWorkspaceApiKey(); await workspaceApiKeyAuth(request(app).post("/agents/deploy").send(body())).expect(403);
+    expect(mockAddDeploymentJob).not.toHaveBeenCalled();
+  });
+  test("concurrent deploy requests reuse one exact runtime after a real insert barrier", async () => {
+    const pause = { entered: defer(), release: defer() }, state = store([], pause);
+    const first = adminAuth(request(app).post("/agents/deploy").send(body())).then((r) => r);
+    await pause.entered.promise;
+    const second = adminAuth(request(app).post("/agents/deploy").send({ ...body(), name: "Ignored replacement", env: { NEVER_APPLY: "fixture" } })).then((r) => r);
+    await new Promise((r) => setImmediate(r)); expect(state.inserts).toBe(1);
+    pause.release.resolve(); const responses = await Promise.all([first, second]);
+    expect(responses.map((r) => r.status)).toEqual([200, 200]);
+    expect(responses[1].body).toMatchObject({ id: AGENT, name: "Managed", reused: true, identity_proof: "immutable_owner_workspace" });
+    expect(mockAddDeploymentJob).toHaveBeenCalledTimes(1); expect(state.agents).toHaveLength(1);
+  });
+  test("deploy and recovery serialize on the common immutable tuple lock", async () => {
+    const pause = { entered: defer(), release: defer() }, state = store([], pause);
+    const deployment = adminAuth(request(app).post("/agents/deploy").send(body())).then((r) => r);
+    await pause.entered.promise;
+    const selected = { id: JOB, owner_id: OWNER, workspace_id: WORKSPACE, desired_action: "provision", status: "failed", step: "deploying", fence: 7, authorization_revision: 3, nora_agent_id: null, workspaces: { owner_id: OWNER } };
+    const client = { recoveryAuthority: async () => ({ owner_id: OWNER, authorization_revision: 9 }), recoveryJobs: async () => [selected], recoverProvisionJob: jest.fn(async () => ({ ...selected, nora_agent_id: AGENT })) };
+    const recovery = require("../headmasterProvisionRecovery").recoverProvisionIdentity(client, OWNER, JOB,
+      { candidateAgentId: AGENT, expectedFence: 7, expectedJobAuthorizationRevision: 3, expectedOwnerAuthorizationRevision: 9 }, { db: mockDb, acquireLock: mockAcquireAgentProvisionLock });
+    await new Promise((r) => setImmediate(r)); expect(client.recoverProvisionJob).not.toHaveBeenCalled();
+    pause.release.resolve(); expect((await deployment).status).toBe(200); expect((await recovery).recovered).toBe(true);
+    expect(state.inserts).toBe(1); expect(mockAddDeploymentJob).toHaveBeenCalledTimes(1);
+  });
+  test("reuse waits for a lifecycle deletion and refuses the disappeared runtime", async () => {
+    const state = store([runtime()]);
+    const deletionLock = await mockAcquireAgentProvisionLock(AGENT);
+    const reuse = adminAuth(request(app).post("/agents/deploy").send(body())).then((r) => r);
+    while (mockAcquireAgentProvisionLock.mock.calls.filter(([key]) => key === AGENT).length < 2) await new Promise((r) => setImmediate(r));
+    expect(state.inserts).toBe(0); expect(mockAddDeploymentJob).not.toHaveBeenCalled();
+    state.agents.splice(0); await deletionLock.release();
+    expect((await reuse).status).toBe(409);
+    expect(state.inserts).toBe(0); expect(mockAddDeploymentJob).not.toHaveBeenCalled();
+  });
+  test.each(["other_operator", "different_config", "duplicate"])("refuses existing %s without mutation or creation", async (kind) => {
+    const row = runtime();
+    if (kind === "other_operator") row.user_id = "other";
+    if (kind === "different_config") row.headmaster_workspace_id = JOB;
+    const state = store(kind === "duplicate" ? [row, { ...row, id: JOB }] : [row]);
+    await adminAuth(request(app).post("/agents/deploy").send(body())).expect(409);
+    expect(state.inserts).toBe(0); expect(mockAddDeploymentJob).not.toHaveBeenCalled();
+  });
+});
+
+describe("operator chat recovery HTTP", () => {
+  const identity = {
+    ownerId: "user-1",
+    requestId: "c7427a31-cef5-4d6c-8041-6f943733a91e",
+    sessionId: "9e563d2c-0ff7-486d-aa77-cb9e24bb8b2d",
+    profile: null,
+  };
+  const agent = {
+    id: "chat-recovery",
+    user_id: "user-1",
+    status: "running",
+    runtime_family: "hermes",
+    backend_type: "docker",
+    container_id: "container",
+    runtime_host: "10.0.0.41",
+    runtime_port: 8642,
+    gateway_token: "hermes-token",
+  };
+  const receipt = {
+    admission_id: "admission-7",
+    ref: { profile_id: "root-profile", session_id: identity.sessionId },
+    sequence: 1,
+    authority_epoch: 3,
+    execution_generation: 4,
+    status: "unknown",
+    outcome: null,
+  };
+  const run = (changes = {}) => ({
+    object: "hermes.run",
+    run_id: "opaque-server-run",
+    session_id: identity.sessionId,
+    admission_id: receipt.admission_id,
+    execution_generation: 4,
+    status: "unknown",
+    output: "",
+    receipt,
+    ...changes,
+  });
+  function allowed() {
+    mockDb.query.mockResolvedValueOnce({ rows: [agent] });
+  }
+  function get(overrides = {}) {
+    return auth(
+      request(app)
+        .get("/agents/chat-recovery/hermes-ui/chat")
+        .query({ ...identity, profile: undefined, ...overrides }),
+    );
+  }
+  function resolve(overrides = {}) {
+    return auth(
+      request(app)
+        .post("/agents/chat-recovery/hermes-ui/chat/resolve")
+        .send({ ...identity, receipt, confirm: true, ...overrides }),
+    );
+  }
+  it("forwards the original checkpointed request and session IDs exactly once", async () => {
+    allowed();
+    global.fetch = jest
+      .fn()
+      .mockResolvedValue(
+        createMockFetchResponse({ body: { choices: [{ message: { content: "done" } }] } }),
+      );
+    const res = await auth(
+      request(app)
+        .post("/agents/chat-recovery/hermes-ui/chat")
+        .send({ ...identity, messages: [{ role: "user", content: "once" }] }),
+    );
+    expect(res.status).toBe(200);
+    expect(global.fetch).toHaveBeenCalledTimes(1);
+    expect(global.fetch.mock.calls[0][1].headers).toMatchObject({
+      "Idempotency-Key": identity.requestId,
+      "X-Hermes-Session-Id": identity.sessionId,
+      Authorization: "Bearer hermes-token",
+    });
+  });
+  it("uses authenticated original-key GET without a body, then canonical session history", async () => {
+    allowed();
+    global.fetch = jest
+      .fn()
+      .mockResolvedValueOnce(createMockFetchResponse({ body: run() }))
+      .mockResolvedValueOnce(
+        createMockFetchResponse({
+          body: {
+            object: "list",
+            session_id: identity.sessionId,
+            data: [{ role: "user", content: "once" }],
+          },
+        }),
+      );
+    const res = await get();
+    expect(res.status).toBe(200);
+    expect(res.body.receipt).toEqual(receipt);
+    expect(res.body.historyAvailable).toBe(true);
+    const [url, options] = global.fetch.mock.calls[0];
+    expect(url).toBe(`http://10.0.0.41:8642/v1/runs/${identity.requestId}?source=chat`);
+    expect(options.method).toBe("GET");
+    expect(options.body).toBeUndefined();
+    expect(options.headers).toEqual({
+      Accept: "application/json",
+      Authorization: "Bearer hermes-token",
+      "X-Hermes-Session-Id": identity.sessionId,
+    });
+    expect(global.fetch.mock.calls[1][0]).toBe(
+      `http://10.0.0.41:8642/api/sessions/${identity.sessionId}/messages?limit=100&order=latest`,
+    );
+  });
+  it("resolves only the fresh server run ID and exact admission generation", async () => {
+    allowed();
+    global.fetch = jest
+      .fn()
+      .mockResolvedValueOnce(createMockFetchResponse({ body: run() }))
+      .mockResolvedValueOnce(
+        createMockFetchResponse({
+          body: {
+            run_id: "opaque-server-run",
+            ...receipt,
+            status: "terminal",
+            outcome: "interrupted",
+          },
+        }),
+      );
+    const res = await resolve({ runId: "untrusted-input" });
+    expect(res.status).toBe(200);
+    expect(res.body.receipt.status).toBe("terminal");
+    expect(global.fetch.mock.calls[1][0]).toBe(
+      "http://10.0.0.41:8642/v1/runs/opaque-server-run/resolve-unknown",
+    );
+    expect(JSON.parse(global.fetch.mock.calls[1][1].body)).toEqual({
+      admission_id: receipt.admission_id,
+      execution_generation: 4,
+    });
+    expect(global.fetch.mock.calls.every(([url]) => !url.includes("completions"))).toBe(true);
+  });
+  it("recovers a lost resolution ACK from terminal receipt without another POST", async () => {
+    allowed();
+    global.fetch = jest
+      .fn()
+      .mockResolvedValue(
+        createMockFetchResponse({
+          body: run({
+            status: "cancelled",
+            receipt: { ...receipt, status: "terminal", outcome: "interrupted" },
+          }),
+        }),
+      );
+    expect((await resolve()).status).toBe(200);
+    expect(global.fetch).toHaveBeenCalledTimes(1);
+  });
+  it.each(["queued", "started"])("never resolves %s work", async (status) => {
+    allowed();
+    global.fetch = jest
+      .fn()
+      .mockResolvedValue(
+        createMockFetchResponse({
+          body: run({
+            status: status === "started" ? "running" : "queued",
+            receipt: { ...receipt, status },
+          }),
+        }),
+      );
+    expect((await resolve()).status).toBe(409);
+    expect(global.fetch).toHaveBeenCalledTimes(1);
+  });
+  it("rejects stale generation without destructive POST", async () => {
+    allowed();
+    global.fetch = jest
+      .fn()
+      .mockResolvedValue(
+        createMockFetchResponse({
+          body: run({ execution_generation: 5, receipt: { ...receipt, execution_generation: 5 } }),
+        }),
+      );
+    expect((await resolve()).status).toBe(409);
+    expect(global.fetch).toHaveBeenCalledTimes(1);
+  });
+  it.each([null, {}, { object: "hermes.run", run_id: "legacy-cache" }])(
+    "fails closed for noncanonical receipt %p",
+    async (body) => {
+      allowed();
+      global.fetch = jest.fn().mockResolvedValue(createMockFetchResponse({ body }));
+      expect((await get()).status).toBe(409);
+      expect(global.fetch).toHaveBeenCalledTimes(1);
+    },
+  );
+  it.each([400, 401, 403, 404, 409, 503])(
+    "does not resend input for lookup refusal %s",
+    async (status) => {
+      allowed();
+      global.fetch = jest.fn().mockResolvedValue(createMockFetchResponse({ ok: false, status }));
+      expect([409, 503]).toContain((await get()).status);
+      expect(global.fetch).toHaveBeenCalledTimes(1);
+    },
+  );
+  it("rejects foreign owner and named profile before runtime traffic", async () => {
+    allowed();
+    global.fetch = jest.fn();
+    expect((await get({ ownerId: "foreign" })).status).toBe(403);
+    allowed();
+    expect((await get({ profile: "foreign" })).status).toBe(400);
+    expect(global.fetch).not.toHaveBeenCalled();
+  });
+  it("requires explicit confirmation before lookup or resolution", async () => {
+    allowed();
+    global.fetch = jest.fn();
+    expect((await resolve({ confirm: false })).status).toBe(400);
+    expect(global.fetch).not.toHaveBeenCalled();
+  });
+  it("requires an operator session and denies workspace keys", async () => {
+    expect((await request(app).get("/agents/chat-recovery/hermes-ui/chat")).status).toBe(401);
+    authorizeWorkspaceApiKey({ scopes: ["agents:read", "agents:write"] });
+    mockDb.query.mockResolvedValueOnce({ rows: [{ id: agent.id, workspace_id: "workspace-a" }] });
+    expect(
+      (
+        await workspaceApiKeyAuth(
+          request(app)
+            .post("/agents/chat-recovery/hermes-ui/chat/resolve")
+            .send({ ...identity, receipt, confirm: true }),
+        )
+      ).status,
+    ).toBe(403);
+    expect(global.fetch).toBeUndefined();
+  });
+  it("keeps status when history is unavailable", async () => {
+    allowed();
+    global.fetch = jest
+      .fn()
+      .mockResolvedValueOnce(createMockFetchResponse({ body: run() }))
+      .mockRejectedValueOnce(new Error("history timeout"));
+    const res = await get();
+    expect(res.status).toBe(200);
+    expect(res.body.history).toBeNull();
+    expect(res.body.receipt.status).toBe("unknown");
   });
 });

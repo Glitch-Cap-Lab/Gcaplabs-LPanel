@@ -552,10 +552,20 @@ async function createPortalSession(userId) {
  * @returns {Promise<void>}
  */
 async function handleWebhookEvent(event) {
+  // Stripe redelivers events and does not guarantee order, so every statement
+  // below is idempotent and a canceled subscription is terminal: a late
+  // checkout/invoice event for the same subscription id must not revive it
+  // (a genuine resubscribe arrives as a new subscription id).
   switch (event.type) {
     case "checkout.session.completed": {
       const session = event.data.object;
       const userId = session.metadata?.userId;
+      // Without an owner there is nothing to entitle; Stripe would otherwise
+      // retry a row that can never be attached to an account.
+      if (!userId) {
+        console.warn("Stripe checkout session has no userId metadata; ignoring", session.id);
+        break;
+      }
       const plan = session.metadata?.plan || "pro";
       const specs = buildPlanSubscription(plan, await getDeploymentDefaults());
 
@@ -565,7 +575,8 @@ async function handleWebhookEvent(event) {
          ON CONFLICT (stripe_subscription_id) DO UPDATE SET
            plan = EXCLUDED.plan, status = 'active', agent_limit = EXCLUDED.agent_limit,
            vcpu = EXCLUDED.vcpu, ram_mb = EXCLUDED.ram_mb, disk_gb = EXCLUDED.disk_gb,
-           updated_at = NOW()`,
+           updated_at = NOW()
+         WHERE subscriptions.status <> 'canceled'`,
         [
           userId,
           session.customer,
@@ -584,7 +595,7 @@ async function handleWebhookEvent(event) {
       const invoice = event.data.object;
       await db.query(
         `UPDATE subscriptions SET status = 'active', current_period_end = NOW() + INTERVAL '30 days', updated_at = NOW()
-         WHERE stripe_subscription_id = $1`,
+         WHERE stripe_subscription_id = $1 AND status <> 'canceled'`,
         [invoice.subscription],
       );
       break;
@@ -593,7 +604,7 @@ async function handleWebhookEvent(event) {
     case "invoice.payment_failed": {
       const invoice = event.data.object;
       await db.query(
-        "UPDATE subscriptions SET status = 'past_due', updated_at = NOW() WHERE stripe_subscription_id = $1",
+        "UPDATE subscriptions SET status = 'past_due', updated_at = NOW() WHERE stripe_subscription_id = $1 AND status <> 'canceled'",
         [invoice.subscription],
       );
       break;

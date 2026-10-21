@@ -70,6 +70,16 @@ Read [CONTRIBUTING.md](CONTRIBUTING.md) for the fix workflow, the brand rules an
 
 LPanel is derived from the open-source Nora platform and stays under the Apache License 2.0. Keep [LICENSE](LICENSE) and [NOTICE](NOTICE) as they are; they carry the required attribution.
 
+## Provisioning identity recovery
+
+The Headmaster accounts page can inspect unresolved provisioning jobs and save the ID of a uniquely matching existing runtime. Proof uses the saved `headmaster` namespace, immutable owner UUID and workspace UUID, plus the runtime family. Display names, container names and the historical `headmaster-provision-<job ID>` request key are not proof: that key was not persisted by the deployment endpoint. Zero matches and duplicates require operator investigation; zero matches never establish that no physical runtime exists.
+
+The existing admin session boundary protects inspection and recovery. The server derives the job identity from the account store, rechecks both job and current owner revisions, and takes the common identity lock followed by the agent lifecycle lock. It then calls the paired service-only `headmaster_recover_provision_job_identity` RPC with the expected job fence and both revisions. Only the existing job's runtime ID is saved; its status, step, fence and entitlement stay unchanged. Retrying the existing job or account deletion is a separate action. The RPC has a 15-second request deadline; both locks release on errors and timeouts.
+
+Managed deploy and identity adoption use the same bounded PostgreSQL advisory lock to prevent a new same-tuple runtime appearing during recovery. Managed deploy requires an admin login session and reuses only an exact same-operator runtime with compatible integration metadata and placement. Reuse returns `reused: true`, and applies no incoming name, credentials, environment or deployment queue request. Existing duplicates fail closed. This adds no registry, request-key ledger, schema or automatic production changes.
+
+The paired site's `20261019144511_headmaster_recover_provision_job_identity.sql` migration must be separately approved, applied and verified before enabling the recovery write action. Hosted Auth/PostgREST and actual runtime acceptance remain rollout gates. Historical recovery records and cleanup stay under the existing job/request authority.
+
 ## Account deletion recovery
 
 Account deletion begins through the site's service-only `headmaster_begin_account_deletion` RPC. The existing account authority locks and fences provisioning, snapshots the owner's bindings and known job targets, saves the existing deletion request and revokes sessions in one transaction. Running provision jobs return `deletion_busy`; wait for the runtime operation to finish and retry. LPanel requires the returned durable snapshot and never falls back to an unfenced lookup/insert. The request and per-target receipts survive sign-in and workspace cascades. Admin cleanup actions execute the existing runtime, memory and relay operations; they never merely mark a step done. Every receipt and step update compares the previous status, steps and receipts, so concurrent retries cannot overwrite each other's progress. Conflicts require a refresh; interrupted `running` requests can be retried.

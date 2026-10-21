@@ -29,7 +29,23 @@ function sameIdentity(row, { namespace, externalId, ownerUuid }) {
  * @returns {Promise<{agent: Object, newlyAdopted: boolean}>}
  * @throws 409 when the agent is bound to a different identity, 404 when gone.
  */
-async function bindExternalIdentity(db, agentId, identity) {
+async function bindExternalIdentity(db, agentId, identity, deps = {}) {
+  if (identity.namespace === "headmaster") {
+    const { withManagedIdentityLock, findManagedIdentityAgents, conflict } = require("./headmasterIdentityLock");
+    const acquireLock = deps.acquireLock || require("./agentProvisionLock").acquireAgentProvisionLock;
+    return withManagedIdentityLock(identity, async () => {
+      const lock = await acquireLock(agentId, { applicationName: "headmaster-identity-adoption" });
+      try {
+        const matches = await findManagedIdentityAgents(db, identity);
+        if (matches[0] && matches[0].id !== agentId) throw conflict();
+        return bindIdentity(db, agentId, identity);
+      } finally { await lock.release(); }
+    }, { acquireLock });
+  }
+  return bindIdentity(db, agentId, identity);
+}
+
+async function bindIdentity(db, agentId, identity) {
   const { namespace, externalId, ownerUuid } = identity;
   const claimed = await db.query(
     `UPDATE agents

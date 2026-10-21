@@ -914,6 +914,33 @@ describe("admin routes", () => {
     );
   });
 
+  it("retains bounded release upgrade log diagnostics without exposing a cut credential or private key", async () => {
+    const { writeState } = require("../releaseUpgrade");
+    const canary = require("crypto").randomBytes(24).toString("hex");
+    const logFile = path.join(process.env.NORA_UPGRADE_STATE_DIR, "tail-fixture.log");
+    await writeState({ job: { id: "tail-fixture", phase: "failed", logFile } });
+    const recent = "RECENT_DIAGNOSTIC_MARKER";
+    const payloads = [
+      `${"Ordinary build progress retained\n".repeat(1000)}token=${canary}\n${recent}\n`,
+      `-----BEGIN PRIVATE KEY-----\n${`${canary}\n`.repeat(500)}-----END PRIVATE KEY-----\n${recent}\n`,
+      `token=${"x".repeat(20000)}${canary}\n${recent}\n`,
+    ];
+    for (const payload of payloads) {
+      fs.writeFileSync(logFile, payload);
+      const res = await withToken(request(app).get("/admin/release-upgrade"), adminToken);
+      expect(res.status).toBe(200);
+      const serialized = JSON.stringify(res.body.logTail);
+      // Booleans keep the synthetic credential out of assertion diagnostics.
+      expect(serialized.includes(canary)).toBe(false);
+      expect(serialized.includes(recent)).toBe(true);
+      expect(serialized.length).toBeLessThan(16384);
+      expect(res.body.logTail.length).toBeLessThanOrEqual(80);
+    }
+    fs.writeFileSync(logFile, `-----BEGIN RSA PRIVATE KEY-----\n${`${canary}\n`.repeat(500)}`);
+    const res = await withToken(request(app).get("/admin/release-upgrade"), adminToken);
+    expect(JSON.stringify(res.body.logTail) === JSON.stringify(["[redacted]"])).toBe(true);
+  });
+
   it("marks direct GitHub release upgrade unavailable without a host repo path", async () => {
     process.env.NORA_CURRENT_VERSION = "1.0.0";
     process.env.NORA_LATEST_VERSION = "1.1.0";
