@@ -213,7 +213,10 @@ describe("provisioner deployment provider selection", () => {
   it("pinned main worker refuses a private protected job before any runtime replacement", async () => {
     const fs = require("node:fs"), path = require("node:path"), { execFileSync } = require("node:child_process");
     const pin = "b022f0c66e253a4727e0944aa45504164b2eb747";
-    const source = execFileSync("git", ["show", `${pin}:workers/provisioner/worker.ts`], { cwd: path.join(__dirname, "../.."), windowsHide: true });
+    const repo = path.join(__dirname, "../.."), git = args => execFileSync("git", args, { cwd: repo, windowsHide: true, stdio: ["ignore", "pipe", "pipe"] });
+    // CI checks out one commit; fetch the pinned main commit when the clone lacks it.
+    try { git(["cat-file", "-e", `${pin}^{commit}`]); } catch { git(["fetch", "--no-tags", "--depth=1", "origin", pin]); }
+    const source = git(["show", `${pin}:workers/provisioner/worker.ts`]);
     const temporary = path.join(__dirname, `../../workers/provisioner/worker-main-${process.pid}.fixture.ts`);
     const current = mockDeploymentProcessor, failed = mockDeploymentFailed;
     try {
