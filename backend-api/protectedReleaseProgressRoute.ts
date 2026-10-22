@@ -21,7 +21,9 @@ function createProtectedReleaseProgressHandler({ db, getJob }) {
       const receipt = release.receipt || null;
       return res.json({ release_id: req.params.releaseId, queue_state: queueState,
         phase: receipt?.phase || (queueState === "failed" ? "failed_before_receipt" : "queued"),
-        lp_committed: receipt?.lp_committed === true, publication_blocked: true });
+        lp_committed: receipt?.lp_committed === true,
+        failure_code: typeof receipt?.failure_code === "string" && /^PROTECTED_RELEASE_[A-Z0-9_]{1,64}$/.test(receipt.failure_code) ? receipt.failure_code : null,
+        publication_blocked: true });
     } catch {
       return res.status(503).json({ code: "release_progress_unconfirmed" });
     }

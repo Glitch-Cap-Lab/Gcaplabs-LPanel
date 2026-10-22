@@ -2,6 +2,12 @@
 // One local, retained-container release path inside the existing deployments worker.
 const { validateManifest, assertAgent, digest, refuse } = require("./protectedReleaseManifest");
 
+/** A refusal code such as PROTECTED_RELEASE_ARCHIVE_INVALID, or null for anything else (free text can hold secrets). */
+function failureCode(error) {
+  const code = [error?.code, error?.message].find(value => typeof value === "string" && /^PROTECTED_RELEASE_[A-Z0-9_]{1,64}$/.test(value));
+  return code || null;
+}
+
 async function runProtectedRuntimeRelease({ manifest: input, action = "apply", adapter, state, receipt = null, deploymentId = null, saveReceipt, dryRun = false }) {
   const { manifest, releaseId, target } = validateManifest(input);
   if (!["apply", "recover"].includes(action)) throw refuse("PROTECTED_RELEASE_ACTION_INVALID");
@@ -120,6 +126,8 @@ async function runProtectedRuntimeRelease({ manifest: input, action = "apply", a
       try { await record("recovery_required", { transport_uncertain: true, lp_committed: false }); } catch { /* last completed canonical boundary remains authoritative */ }
       throw refuse("PROTECTED_RELEASE_RECOVERY_REQUIRED");
     }
+    // Keep only a fixed refusal code (never a Docker/DB message) so a failed swap says which check stopped it.
+    r.failure_code = failureCode(error);
     // Extraction failure is before rename/create: old container can safely resume without a restore.
     if (stopped && !r.staged) {
       await recover();
@@ -135,4 +143,4 @@ async function runProtectedRuntimeRelease({ manifest: input, action = "apply", a
   }
 }
 
-module.exports = { runProtectedRuntimeRelease };
+module.exports = { runProtectedRuntimeRelease, failureCode };
