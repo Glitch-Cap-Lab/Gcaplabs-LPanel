@@ -16,8 +16,11 @@ const name = value => typeof value === "string" && /^[a-zA-Z0-9][a-zA-Z0-9_.-]{0
 function validateManifest(input) {
   // Clone first: callers cannot mutate the captured release input during an await.
   const m = JSON.parse(JSON.stringify(input));
-  keys(m, ["format", "sources", "image", "targets", "env_delta"]);
+  keys(m, ["format", "sources", "image", "targets", "env_delta", "rollout_id"]);
   if (m.format !== "headmaster-protected-runtime-release/v1") throw refuse("PROTECTED_RELEASE_MANIFEST_INVALID");
+  // A fleet rollout tags each bot's release with its own id, so a bot that rolled back gets a fresh
+  // release (new receipt, new names) in the next rollout instead of its spent one.
+  if ("rollout_id" in m && !uuid(m.rollout_id)) throw refuse("PROTECTED_RELEASE_MANIFEST_INVALID");
   keys(m.sources, ["core", "webapp", "lpanel"]);
   if (!["core", "webapp", "lpanel"].every(key => /^[0-9a-f]{40}$/.test(m.sources[key]))) throw refuse("PROTECTED_RELEASE_SOURCE_INVALID");
   keys(m.image, ["id", "binding", "contract_sha256", "dependency_sha256", "uid", "gid"]);
