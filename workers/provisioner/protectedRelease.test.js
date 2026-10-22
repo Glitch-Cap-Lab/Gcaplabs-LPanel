@@ -597,6 +597,7 @@ for (const fault of ["health", "commit", "queue"]) test(`${fault} failure restor
 
 test("extraction failure never renames the old runtime and resumes it without touching chats", async t => {
   const f = await fixture(t); f.faults.stage = true; await assert.rejects(f.run());
+  assert.ok(f.receipts.at(-1).failure_code === null || /^PROTECTED_RELEASE_[A-Z0-9_]+$/.test(f.receipts.at(-1).failure_code));
   assert.ok(!f.events.includes("rename:old")); assert.equal(f.events.filter(x => /^start:(old|candidate)$/.test(x)).at(-1), "start:old");
   assert.deepEqual(await fs.readdir(path.join(f.root, ".worker-tmp")), []);
 });
@@ -675,3 +676,11 @@ for (const boundary of ["stop", "stage", "create", "restore", "restoreName", "ol
   assert.deepEqual(await fs.readdir(path.join(root, ".worker-tmp")), []);
 });
 }
+
+test("a failed swap keeps only a fixed refusal code, never free text", () => {
+  const { failureCode } = require("./protectedRuntimeRelease");
+  assert.equal(failureCode(new Error("PROTECTED_RELEASE_ARCHIVE_INVALID")), "PROTECTED_RELEASE_ARCHIVE_INVALID");
+  assert.equal(failureCode(Object.assign(new Error("x"), { code: "PROTECTED_RELEASE_STAGING_CAPACITY" })), "PROTECTED_RELEASE_STAGING_CAPACITY");
+  assert.equal(failureCode(new Error("connect ECONNREFUSED postgres://user:secret@db")), null);
+  assert.equal(failureCode(null), null);
+});

@@ -57,7 +57,7 @@ test('progress reads the phase the running job journaled, without the agent lock
     db:{query:async()=>({rows:[{id:target.agent_id,user_id:target.owner_id}]})},getJob:async name=>name===job.id?job:null}));
   const server=app.listen(0,'127.0.0.1');await new Promise(r=>server.once('listening',r));t.after(()=>new Promise(r=>server.close(r)));
   const get=async(release=id)=>{const r=await fetch(`http://127.0.0.1:${server.address().port}/api/agents/${target.agent_id}/protected-runtime-releases/${release}/progress`);return [r.status,await r.json()];};
-  assert.deepEqual(await get(),[200,{release_id:id,queue_state:'active',phase:'stopped',lp_committed:false,publication_blocked:true}]);
+  assert.deepEqual(await get(),[200,{release_id:id,queue_state:'active',phase:'stopped',lp_committed:false,failure_code:null,publication_blocked:true}]);
   receipt={release_id:id,phase:'candidate_healthy'};assert.equal((await get())[1].phase,'candidate_healthy','each journaled phase shows as it happens');
   receipt=null;state='failed';assert.equal((await get())[1].phase,'failed_before_receipt');
   state='waiting';assert.equal((await get())[1].phase,'queued');
