@@ -81,9 +81,11 @@ async function readArchive(input, root, { maxBytes = 16 * 1024 * 1024, maxEntrie
       const target = entry.linkname;
       if (typeof target !== "string" || !target || target.includes("\0") || target.includes("\\")) throw bad();
       if (path.posix.isAbsolute(target)) {
-        // PM interpreters may point into the immutable image; never follow these links during restore.
-        if (!/^\/(?:usr\/(?:local\/)?bin|opt\/hermes\/\.venv\/bin)\/[A-Za-z0-9_.-]+$/.test(target)
-            && !path.posix.normalize(target).startsWith("/opt/data/installs/")) throw bad();
+        // PM interpreters may point into the immutable image (including PM venvs whose python links to
+        // the image's tool store, /opt/hermes/tools/<entry>/bin); never follow these links during restore.
+        const imageBinary = /^\/(?:usr\/(?:local\/)?bin|opt\/hermes\/\.venv\/bin|opt\/hermes\/tools\/[A-Za-z0-9_.+-]+\/bin)\/[A-Za-z0-9_.-]+$/.test(target)
+          && path.posix.normalize(target) === target;
+        if (!imageBinary && !path.posix.normalize(target).startsWith("/opt/data/installs/")) throw bad();
       } else {
         const resolved = path.posix.normalize(path.posix.join(path.posix.dirname(entry.name), target));
         if (resolved !== root && !resolved.startsWith(root + "/")) throw bad();

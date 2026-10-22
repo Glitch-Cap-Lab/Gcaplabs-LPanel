@@ -475,7 +475,10 @@ test("real archive validation preserves PM links and rejects traversal, escaping
   const dir = { name: "installs", type: "directory", mode: 0o755, content: Buffer.alloc(0) };
   const link = target => ({ name: "installs/python", type: "symlink", linkname: target, mode: 0o777, content: Buffer.alloc(0) });
   assert.equal((await readArchive(await packArchive([dir, link("/usr/local/bin/python3")]), "installs"))[1].linkname, "/usr/local/bin/python3");
-  for (const rows of [[dir, link("/etc/passwd")], [dir, link("../../outside")], [dir, { ...dir, name: "../escape" }], [dir, link("/usr/bin/python3"), { ...dir, name: "installs/python/child" }], [dir, { ...link("state.db"), type: "link" }]]) {
+  // PM venvs link python to the image's pinned interpreter in the tool store.
+  const toolPython = "/opt/hermes/tools/python-3.14.7+20260901-linux-x64/bin/python3";
+  assert.equal((await readArchive(await packArchive([dir, link(toolPython)]), "installs"))[1].linkname, toolPython);
+  for (const rows of [[dir, link("/etc/passwd")], [dir, link("/opt/hermes/tools/../../../etc/bin/sh")], [dir, link("/opt/hermes/tools/python/lib/x")], [dir, link("../../outside")], [dir, { ...dir, name: "../escape" }], [dir, link("/usr/bin/python3"), { ...dir, name: "installs/python/child" }], [dir, { ...link("state.db"), type: "link" }]]) {
     await assert.rejects(readArchive(await packArchive(rows), "installs"));
   }
 });
