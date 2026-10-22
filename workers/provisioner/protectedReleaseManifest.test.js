@@ -34,7 +34,8 @@ test("a complete release input validates, derives a stable id and is not aliased
   assert.equal(first.manifest.sources.core, release().sources.core);
   // Any single field of the immutable input moves the release id.
   for (const mutate of [m => { m.sources.webapp = hex("e", 40); }, m => { m.image.contract_sha256 = hex("11", 32); }, m => { m.image.dependency_sha256 = hex("22", 32); },
-    m => { m.targets[0].env_sha256 = hex("33", 32); }, m => { m.targets[0].site_binding.deployment_generation = 8; }, m => { m.env_delta.set.HERMES_BOT_DESKTOP = "0"; }]) {
+    m => { m.targets[0].env_sha256 = hex("33", 32); }, m => { m.targets[0].site_binding.deployment_generation = 8; }, m => { m.env_delta.set.HERMES_BOT_DESKTOP = "0"; },
+    m => { m.rollout_id = "4b0c6f1e-2d3a-4c5b-8e9f-0a1b2c3d4e5f"; }]) {
     const next = release(); mutate(next); assert.notEqual(validateManifest(next).releaseId, first.releaseId);
   }
   assert.deepEqual(validateManifest({ ...release(), env_delta: { set: {} } }).manifest.env_delta, { set: {} });
@@ -45,7 +46,8 @@ test("unknown or missing format versions and unknown fields are refused", () => 
     refused(m => { m.format = format; }, "PROTECTED_RELEASE_MANIFEST_INVALID");
   }
   for (const mutate of [m => { m.extra = true; }, m => { delete m.format; }, m => { m.sources.extra = hex("a", 40); }, m => { m.image.tag_only = "latest"; },
-    m => { m.targets[0].extra = 1; }, m => { m.targets[0].runtime.extra = 1; }, m => { m.targets[0].site_binding.extra = 1; }, m => { m.env_delta.unset = ["X"]; }]) {
+    m => { m.targets[0].extra = 1; }, m => { m.targets[0].runtime.extra = 1; }, m => { m.targets[0].site_binding.extra = 1; }, m => { m.env_delta.unset = ["X"]; },
+    m => { m.rollout_id = "not-a-rollout"; }, m => { m.rollout_id = null; }]) {
     refused(mutate, "PROTECTED_RELEASE_MANIFEST_INVALID");
   }
   for (const value of [null, [], "release", 7]) assert.throws(() => validateManifest(value), error => error.code === "PROTECTED_RELEASE_MANIFEST_INVALID");
