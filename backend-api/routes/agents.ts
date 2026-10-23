@@ -2962,7 +2962,7 @@ router.post("/:id/start", async (req, res, next) => {
 });
 
 // Reasons a caller may record with a stop (see below).
-const STOP_SLEEP_REASONS = new Set(["idle_sleep"]);
+const STOP_REASONS = new Set(["wallet_empty"]);
 
 router.post("/:id/stop", async (req, res, next) => {
   try {
@@ -2988,15 +2988,15 @@ router.post("/:id/stop", async (req, res, next) => {
           }
         }
 
-        // A stop may say why: the Headmaster provisioner puts idle organization seats to sleep this
+        // A stop may say why: the Headmaster provisioner switches an organization's seats off for an empty wallet this
         // way. The reason is kept (never over an existing one, such as a budget pause) so the
-        // runtime reads as asleep and not as down; the next start clears it.
-        const sleepReason = STOP_SLEEP_REASONS.has(req.body?.reason) ? req.body.reason : null;
+        // runtime reads as switched off on purpose and not as down; the next start clears it.
+        const stopReason = STOP_REASONS.has(req.body?.reason) ? req.body.reason : null;
         const updated = await db.query(
-          sleepReason
+          stopReason
             ? "UPDATE agents SET status = 'stopped', paused_reason = COALESCE(paused_reason, $2) WHERE id = $1 RETURNING *"
             : "UPDATE agents SET status = 'stopped' WHERE id = $1 RETURNING *",
-          sleepReason ? [agent.id, sleepReason] : [agent.id],
+          stopReason ? [agent.id, stopReason] : [agent.id],
         );
         await monitoring.logEvent(
           "agent_stopped",

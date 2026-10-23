@@ -7185,19 +7185,19 @@ describe("POST /agents/:id/stop", () => {
     expect(res.body).toHaveProperty("status", "stopped");
   });
 
-  it("records an idle sleep reason with the stop, and ignores any other reason", async () => {
-    const stopped = { id: "a1", status: "stopped", paused_reason: "idle_sleep" };
+  it("records a wallet reason with the stop, and ignores any other reason", async () => {
+    const stopped = { id: "a1", status: "stopped", paused_reason: "wallet_empty" };
     const row = { id: "a1", status: "running", container_id: null, user_id: "user-1" };
     mockDb.query
       .mockResolvedValueOnce({ rows: [row] })
       .mockResolvedValueOnce({ rows: [row] })
       .mockResolvedValueOnce({ rows: [stopped] });
-    const res = await auth(request(app).post("/agents/a1/stop").send({ reason: "idle_sleep" }));
+    const res = await auth(request(app).post("/agents/a1/stop").send({ reason: "wallet_empty" }));
     expect(res.status).toBe(200);
-    expect(res.body).toHaveProperty("paused_reason", "idle_sleep");
+    expect(res.body).toHaveProperty("paused_reason", "wallet_empty");
     const [sql, params] = mockDb.query.mock.calls[2];
     expect(sql).toMatch(/COALESCE\(paused_reason, \$2\)/);
-    expect(params).toEqual(["a1", "idle_sleep"]);
+    expect(params).toEqual(["a1", "wallet_empty"]);
 
     mockDb.query.mockReset();
     mockDb.query
