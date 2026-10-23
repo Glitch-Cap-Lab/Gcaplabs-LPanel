@@ -2524,7 +2524,6 @@ async function migrateDB(database = db, env = process.env) {
     `ALTER TABLE agents ADD COLUMN IF NOT EXISTS headmaster_workspace_id TEXT`,
     `ALTER TABLE agents ADD COLUMN IF NOT EXISTS headmaster_memory_bank_id TEXT`,
     `ALTER TABLE agents ADD COLUMN IF NOT EXISTS headmaster_memory_gateway_url TEXT`,
-    `ALTER TABLE agents ADD COLUMN IF NOT EXISTS headmaster_org_id TEXT`,
     `ALTER TABLE agents ADD COLUMN IF NOT EXISTS headmaster_integration_desired_revision INTEGER NOT NULL DEFAULT 0`,
     `ALTER TABLE agents ADD COLUMN IF NOT EXISTS headmaster_integration_applied_revision INTEGER NOT NULL DEFAULT 0`,
     `ALTER TABLE agents ADD COLUMN IF NOT EXISTS headmaster_integration_deployment_status TEXT`,
@@ -2533,6 +2532,8 @@ async function migrateDB(database = db, env = process.env) {
     `ALTER TABLE platform_settings ALTER COLUMN smtp_from_name SET DEFAULT 'Headmaster'`,
     // Session revocation (PR 63): bumped on sign-out, password change and demotion.
     `DO $$ BEGIN ALTER TABLE users ADD COLUMN session_version INTEGER NOT NULL DEFAULT 0; EXCEPTION WHEN duplicate_column THEN NULL; END $$`,
+    // Organization files (WS13): the seat runtime's organization, set by /deploy.
+    `ALTER TABLE agents ADD COLUMN IF NOT EXISTS headmaster_org_id TEXT`,
   ];
 
   return runVersionedMigrations(database, migrations, {
