@@ -29,7 +29,7 @@ export default function Privacy() {
       <div className="site-shell min-h-screen px-4 pb-16 pt-4 text-brand-ink sm:px-6">
         <header className="mx-auto flex max-w-3xl items-center justify-between rounded-2xl border border-brand-cyan/25 bg-white/90 px-4 py-3 shadow-xl shadow-brand-ink/10 backdrop-blur-xl sm:px-5">
           <Link href="/" className="flex items-center gap-3">
-            <img src="/logo-mark.png" alt="Nora" width={40} height={40} className="h-10 w-10" />
+            <img src="/logo-mark.png" alt="Headmaster" width={40} height={40} className="h-10 w-10" />
             <div className="text-sm font-black uppercase tracking-[0.28em] text-brand-ink">
               Nora
             </div>
