@@ -2695,6 +2695,9 @@ if (require.main === module) {
     const server = app.listen(PORT, async () => {
       console.log(`api running on ${PORT}`);
 
+      // New Hermes bots start on the newest finalized runtime release; env is the fallback.
+      require("../agent-runtime/lib/currentRuntimeImage").startCurrentRuntimeImagePoll();
+
       // Headmaster launch exchange: schema, revocation pub/sub, and the
       // bounded-delay session revalidator. No-op unless configured.
       require("./headmasterLaunch")
