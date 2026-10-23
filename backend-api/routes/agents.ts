@@ -2303,6 +2303,13 @@ router.post("/deploy", async (req, res) => {
         return res.json({ ...serializeAgent(current), reused: true, identity_proof: "immutable_owner_workspace" });
       }
     }
+    // A seat runtime of a team organization names the organization so its shared folder is mounted
+    // (WS13). Managed deployments only (admin session, checked above), and only a UUID.
+    const headmasterOrgId = requestBody.headmaster_org_id ?? null;
+    if (headmasterOrgId !== null && (!headmaster || typeof headmasterOrgId !== "string" ||
+        !/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/.test(headmasterOrgId))) {
+      return res.status(400).json({ error: "headmaster_org_id must be an organization UUID on a managed deployment" });
+    }
     const limits = await billing.enforceLimits(req.user.id);
     if (!limits.allowed)
       return res.status(402).json({ error: limits.error, subscription: limits.subscription });
@@ -2382,8 +2389,8 @@ router.post("/deploy", async (req, res) => {
          deploy_target, execution_target_id, sandbox_profile,
          external_namespace, external_id, external_owner_uuid,
          headmaster_owner_id, headmaster_workspace_id, headmaster_memory_bank_id, headmaster_memory_gateway_url,
-         headmaster_integration_desired_revision, headmaster_integration_deployment_status
-       ) VALUES($1, $2, 'queued', $3, $4, $5, $6, $7, $8, $9, $10, $11, $12::jsonb, $13::jsonb, $14, $15, $16, $17, $18, $19, $20, $21, $22, $23, $24, $25, $26) RETURNING *`,
+         headmaster_integration_desired_revision, headmaster_integration_deployment_status, headmaster_org_id
+       ) VALUES($1, $2, 'queued', $3, $4, $5, $6, $7, $8, $9, $10, $11, $12::jsonb, $13::jsonb, $14, $15, $16, $17, $18, $19, $20, $21, $22, $23, $24, $25, $26, $27) RETURNING *`,
       [
         req.user.id,
         name,
@@ -2408,6 +2415,7 @@ router.post("/deploy", async (req, res) => {
         ...(headmaster || [null, null, null, null]),
         headmaster ? 1 : 0,
         headmaster ? "pending" : "unconfigured",
+        headmasterOrgId,
       ],
     );
     const agent = result.rows[0];

@@ -4428,7 +4428,7 @@ const worker = new Worker(
         `SELECT image, template_payload, sandbox_type, backend_type, runtime_family,
             deploy_target, execution_target_id, sandbox_profile, gateway_token, mcp_servers, status,
             container_id, container_name, host, runtime_host, runtime_port, gateway_host,
-            gateway_port, gateway_host_port, dashboard_port, user_id,
+            gateway_port, gateway_host_port, dashboard_port, user_id, headmaster_org_id,
             ${require("../../backend-api/headmasterConfig").HEADMASTER_AGENT_COLUMNS.join(", ")}
        FROM agents
       WHERE id = $1`,
@@ -4818,6 +4818,7 @@ const worker = new Worker(
             gatewayToken: agentRow.gateway_token || undefined,
             templatePayload,
             credentialManagedEnvNames,
+            orgFilesOrgId: agentRow.headmaster_org_id || null,
             runtimeFamily: resolvedRuntimeFields.runtime_family,
             deployTarget: resolvedRuntimeFields.deploy_target,
             executionTargetId: resolvedRuntimeFields.execution_target_id,
