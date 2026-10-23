@@ -233,6 +233,8 @@ export function createInferenceService({
   walletStore = null,
   walletMode = "off",
   walletMarkupBps = 10_000,
+  // Markup for models that are not a Headmaster tier (public prices: at cost).
+  walletOtherMarkupBps = 10_000,
   walletMonthlyGrantMicroUsd = 0,
 } = {}) {
   if (typeof assertionSecret !== "string" || Buffer.byteLength(assertionSecret) < 32)
@@ -243,6 +245,12 @@ export function createInferenceService({
   const hasResolveAssignment = resolveAssignment !== undefined && resolveAssignment !== null;
   if (hasAccountProviderMap === hasResolveAssignment)
     throw new Error("inference_service_dependencies_invalid");
+  // Headmaster tiers carry the wallet markup; every other model is charged at
+  // its own markup (default at cost) because its price is public.
+  const tierBackends = new Set(Object.values(tierModels));
+  function markupFor(model) {
+    return tierBackends.has(model) ? walletMarkupBps : walletOtherMarkupBps;
+  }
   // Settled cost: the reported or table cost; if neither is known, the reserved
   // estimate (never $0 for a request that produced tokens).
   function chargedCost(usage, model, requestId, fallback = 0) {
@@ -566,7 +574,7 @@ export function createInferenceService({
         .reserve({
           ownerId: claims.sub,
           requestId: claims.request_id,
-          amountMicroUsd: Math.max(1, withMarkup(estimatedCost, walletMarkupBps)),
+          amountMicroUsd: Math.max(1, withMarkup(estimatedCost, markupFor(prepared.body?.model))),
           monthlyGrantMicroUsd: walletMonthlyGrantMicroUsd,
         })
         .catch((error) => {
@@ -753,7 +761,7 @@ export function createInferenceService({
           .settle({
             ownerId: claims.sub,
             requestId: claims.request_id,
-            actualMicroUsd: withMarkup(cost, walletMarkupBps),
+            actualMicroUsd: withMarkup(cost, markupFor(prepared.body?.model)),
             detail: {
               model: prepared.body?.model ?? null,
               prompt_tokens: usage.promptTokens,

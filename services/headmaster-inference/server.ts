@@ -147,6 +147,7 @@ async function main() {
     walletStore,
     walletMode,
     walletMarkupBps: positiveInt(process.env.HEADMASTER_INFERENCE_WALLET_MARKUP_BPS, 10_000, 100_000),
+    walletOtherMarkupBps: positiveInt(process.env.HEADMASTER_INFERENCE_WALLET_OTHER_MARKUP_BPS, 10_000, 100_000),
     walletMonthlyGrantMicroUsd: usdToMicro(process.env.HEADMASTER_INFERENCE_USD_PER_MONTH, 2),
     replayStore: createRedisReplayStore(redis),
     maxRequestBytes: positiveInt(
