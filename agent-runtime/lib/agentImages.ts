@@ -9,6 +9,7 @@ const {
 } = require("./backendCatalog");
 const { getNemoClawSandboxImage } = require("./nemoclawDefaults");
 const { DEFAULT_OPENCLAW_PACKAGE_SPEC } = require("./openclawDefaults");
+const { getCurrentRuntimeImage } = require("./currentRuntimeImage");
 
 function getProvisionerBackendName() {
   return getDefaultDeployTarget(process.env, {
@@ -26,7 +27,7 @@ function getStandardDockerPackageSpec() {
 }
 
 function getHermesDockerAgentImage() {
-  return process.env.HERMES_DOCKER_IMAGE || "nousresearch/hermes-agent:latest";
+  return getCurrentRuntimeImage() || process.env.HERMES_DOCKER_IMAGE || "nousresearch/hermes-agent:latest";
 }
 
 function getNemoClawAgentImage() {

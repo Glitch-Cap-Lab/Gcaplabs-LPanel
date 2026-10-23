@@ -5758,6 +5758,9 @@ healthServer.listen(HEALTH_PORT, () => {
   console.log(`Worker health check listening on port ${HEALTH_PORT}`);
 });
 
+// New Hermes bots start on the newest finalized runtime release; env is the fallback.
+require("../../agent-runtime/lib/currentRuntimeImage").startCurrentRuntimeImagePoll();
+
 // Per-agent networks (NORA_AGENT_NETWORK_ISOLATION): a recreated control-plane
 // container loses its attachments, so re-attach the configured peers on start.
 if (process.env.NORA_AGENT_NETWORK_ISOLATION === "per-runtime") {
