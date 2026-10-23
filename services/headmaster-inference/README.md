@@ -250,6 +250,28 @@ together pass the cap. Past it the relay answers 429 `monthly_budget_exceeded`
 ("You have used this month's Headmaster allowance. It resets on the 1st of next
 month (UTC)."). Personal-key traffic is not counted.
 
+## Wallet billing
+
+`HEADMASTER_INFERENCE_WALLET` selects how model spend is charged:
+
+- `off` (default): the Redis monthly allowance above, unchanged.
+- `shadow`: every request also reserves and settles against the paying
+  organization's wallet (Headmaster Supabase, site migration
+  `20261023090000_headmaster_wallets.sql`), but a wallet refusal never blocks.
+  The Redis allowance still decides.
+- `on`: the wallet replaces the Redis monthly cap. An empty wallet answers 402
+  `insufficient_credit`, a switched-off organization 403
+  `organization_suspended`, an unreachable wallet 503 `quota_unavailable`.
+  A personal wallet is topped up to `HEADMASTER_INFERENCE_USD_PER_MONTH` once
+  per UTC month, so the free allowance stays $2. Per-account concurrency, hourly
+  request and daily token limits still apply from Redis.
+
+`HEADMASTER_INFERENCE_WALLET_MARKUP_BPS` (default `10000`, at cost) multiplies the
+provider cost before it is held and charged; 12500 is cost plus 25%. The wallet
+uses the same `HEADMASTER_INFERENCE_SUPABASE_URL` and service-role key as the
+assignments. Starting in `shadow` or `on` without them fails startup. Personal-key
+traffic is never charged. Turn `on` only after the site migrations are applied.
+
 ## Limits and behavior
 
 - Only allowlisted provider/model pairs are returned. The allowed models are
