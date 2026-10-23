@@ -1,4 +1,5 @@
 import http from "node:http";
+import { withMarkup } from "./wallet.mjs";
 import { createReplayCache, verifyAssertion } from "./assertion.mjs";
 import {
   TESTED_MODELS,
@@ -226,6 +227,13 @@ export function createInferenceService({
   // own_key_unavailable and the operator path is unaffected.
   resolveOwnKey = null,
   byoQuotaStore = null,
+  // Wallet billing (wallet.mjs). off: not used. shadow: usage is recorded in the
+  // wallet but never refused for it. on: the wallet replaces the Redis monthly
+  // cap and an empty wallet refuses (402 insufficient_credit).
+  walletStore = null,
+  walletMode = "off",
+  walletMarkupBps = 10_000,
+  walletMonthlyGrantMicroUsd = 0,
 } = {}) {
   if (typeof assertionSecret !== "string" || Buffer.byteLength(assertionSecret) < 32)
     throw new Error("assertion_secret_invalid");
@@ -552,6 +560,51 @@ export function createInferenceService({
       );
     }
 
+    let walletHeld = false;
+    if (walletStore && walletMode !== "off") {
+      const hold = await walletStore
+        .reserve({
+          ownerId: claims.sub,
+          requestId: claims.request_id,
+          amountMicroUsd: Math.max(1, withMarkup(estimatedCost, walletMarkupBps)),
+          monthlyGrantMicroUsd: walletMonthlyGrantMicroUsd,
+        })
+        .catch((error) => {
+          logger.error?.("headmaster-inference wallet reserve failed", {
+            requestId: claims.request_id,
+            code: error?.code || "wallet_unavailable",
+          });
+          return null;
+        });
+      if (walletMode === "on" && (!hold || !hold.allowed)) {
+        await releaseQuota(claims, reservation);
+        if (!hold)
+          return safeError(
+            res,
+            503,
+            "quota_unavailable",
+            "Managed inference is temporarily unavailable.",
+            claims.request_id,
+          );
+        if (hold.reason === "org_suspended")
+          return safeError(
+            res,
+            403,
+            "organization_suspended",
+            "This organization is switched off.",
+            claims.request_id,
+          );
+        return safeError(
+          res,
+          402,
+          "insufficient_credit",
+          "Your Headmaster wallet is out of credit. Add credit to continue.",
+          claims.request_id,
+        );
+      }
+      walletHeld = Boolean(hold?.allowed);
+    }
+
     const controller = new AbortController();
     const timeout = setTimeout(
       () =>
@@ -694,7 +747,47 @@ export function createInferenceService({
             code: error?.code || "quota_store_unavailable",
           }),
         );
+      if (walletHeld) {
+        const cost = chargedCost(usage, prepared.body?.model, claims.request_id, estimatedCost);
+        await walletStore
+          .settle({
+            ownerId: claims.sub,
+            requestId: claims.request_id,
+            actualMicroUsd: withMarkup(cost, walletMarkupBps),
+            detail: {
+              model: prepared.body?.model ?? null,
+              prompt_tokens: usage.promptTokens,
+              completion_tokens: usage.completionTokens,
+            },
+          })
+          .catch((error) =>
+            logger.error?.("headmaster-inference wallet settle failed", {
+              requestId: claims.request_id,
+              code: error?.code || "wallet_unavailable",
+            }),
+          );
+      }
     }
+  }
+
+  // Give back a Redis reservation when the wallet refuses the request.
+  async function releaseQuota(claims, reservation) {
+    await quotaStore
+      .finish({
+        ownerId: claims.sub,
+        requestId: claims.request_id,
+        quotaDay: reservation.day,
+        promptTokens: 0,
+        completionTokens: 0,
+        totalTokens: 0,
+        costMicroUsd: 0,
+      })
+      .catch((error) =>
+        logger.error?.("headmaster-inference quota release failed", {
+          requestId: claims.request_id,
+          code: error?.code || "quota_store_unavailable",
+        }),
+      );
   }
 
   function byoModelList(ids, provider, requestId) {

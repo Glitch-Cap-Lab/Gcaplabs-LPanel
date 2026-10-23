@@ -1076,6 +1076,74 @@ test("Lite and Pro map to their OpenRouter models from config, with env override
   });
 });
 
+function fakeWallet({ allowed = true, reason = null, fail = false } = {}) {
+  const calls = { reserve: [], settle: [] };
+  return {
+    calls,
+    configured: true,
+    async reserve(args) {
+      calls.reserve.push(args);
+      if (fail) throw Object.assign(new Error("wallet_unavailable"), { code: "wallet_unavailable" });
+      return { allowed, reason, balanceMicroUsd: 0, freeMicroUsd: 0 };
+    },
+    async settle(args) {
+      calls.settle.push(args);
+    },
+  };
+}
+
+async function walletCompletion(t, walletOptions, serviceOptions = {}) {
+  const walletStore = fakeWallet(walletOptions);
+  const f = await startService(t, { walletStore, ...serviceOptions });
+  const body = Buffer.from(
+    JSON.stringify({ model: "gpt-5.5", messages: [{ role: "user", content: "hi" }] }),
+  );
+  const response = await postCompletion(
+    f.origin,
+    body,
+    makeToken({ method: "POST", path: "/v1/chat/completions", body }),
+  );
+  return { response, walletStore, f };
+}
+
+test("wallet on: an empty wallet answers 402 insufficient_credit and releases the Redis hold", async (t) => {
+  const { response, walletStore } = await walletCompletion(
+    t,
+    { allowed: false, reason: "insufficient_credit" },
+    { walletMode: "on" },
+  );
+  assert.equal(response.status, 402);
+  const error = (await response.json()).error;
+  assert.equal(error.code, "insufficient_credit");
+  assert.doesNotMatch(error.message, /Hermes|Nous|Nora/i);
+  assert.equal(walletStore.calls.settle.length, 0);
+});
+
+test("wallet on: a suspended organization answers 403 and an unreachable wallet answers 503", async (t) => {
+  const suspended = await walletCompletion(t, { allowed: false, reason: "org_suspended" }, { walletMode: "on" });
+  assert.equal(suspended.response.status, 403);
+  assert.equal((await suspended.response.json()).error.code, "organization_suspended");
+  const down = await walletCompletion(t, { fail: true }, { walletMode: "on" });
+  assert.equal(down.response.status, 503);
+  assert.equal((await down.response.json()).error.code, "quota_unavailable");
+});
+
+test("wallet shadow: a refusal is recorded but never blocks, and nothing is held when it refuses", async (t) => {
+  const { response, walletStore } = await walletCompletion(
+    t,
+    { allowed: false, reason: "insufficient_credit" },
+    { walletMode: "shadow" },
+  );
+  assert.notEqual(response.status, 402);
+  assert.equal(walletStore.calls.reserve.length, 1);
+  assert.equal(walletStore.calls.settle.length, 0);
+});
+
+test("wallet off: the wallet is never called", async (t) => {
+  const { walletStore } = await walletCompletion(t, {}, { walletMode: "off" });
+  assert.equal(walletStore.calls.reserve.length, 0);
+});
+
 test("the monthly spend cap answers 429 monthly_budget_exceeded in plain Headmaster wording", async (t) => {
   const quota = createMemoryQuotaStore({ maxMicroUsdPerMonth: 0, now: () => NOW });
   const f = await startService(t, { quotaStore: quota });
