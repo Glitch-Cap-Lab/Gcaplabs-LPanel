@@ -79,8 +79,20 @@ jobs:
       - run: npm test
         if: steps.changes.outputs.affected == 'true'
         working-directory: workers/provisioner
-      # Real-PostgreSQL cancellation proof. Assumes ubuntu-latest ships PostgreSQL 16
-      # binaries at /usr/lib/postgresql/16/bin; the fixture creates its own new cluster.
+      # Real-PostgreSQL cancellation proof. The fixture needs PostgreSQL 16 binaries at
+      # /usr/lib/postgresql/16/bin and creates its own new cluster. The runner image no longer
+      # always ships them, so install them from the PostgreSQL apt repository when missing.
+      - name: PostgreSQL 16 binaries
+        if: steps.changes.outputs.affected == 'true'
+        run: |
+          set -eu
+          if [ ! -x /usr/lib/postgresql/16/bin/initdb ]; then
+            sudo apt-get update -qq
+            sudo apt-get install -y -qq postgresql-common
+            sudo /usr/share/postgresql-common/pgdg/apt.postgresql.org.sh -y
+            sudo apt-get install -y -qq postgresql-16
+          fi
+          test -x /usr/lib/postgresql/16/bin/initdb
       - name: protected release PostgreSQL fixture
         if: steps.changes.outputs.affected == 'true'
         working-directory: workers/provisioner
