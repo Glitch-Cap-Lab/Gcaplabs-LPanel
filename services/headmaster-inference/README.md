@@ -267,7 +267,9 @@ month (UTC)."). Personal-key traffic is not counted.
   request and daily token limits still apply from Redis.
 
 `HEADMASTER_INFERENCE_WALLET_MARKUP_BPS` (default `10000`, at cost) multiplies the
-provider cost before it is held and charged; 12500 is cost plus 25%. The wallet
+provider cost of the Headmaster tiers (Lite and Pro) before it is held and charged; 12500 is cost plus 25%.
+`HEADMASTER_INFERENCE_WALLET_OTHER_MARKUP_BPS` (default `10000`, at cost) does the same
+for every other model, whose prices are public; the margin there comes from hosting. The wallet
 uses the same `HEADMASTER_INFERENCE_SUPABASE_URL` and service-role key as the
 assignments. Starting in `shadow` or `on` without them fails startup. Personal-key
 traffic is never charged. Turn `on` only after the site migrations are applied.

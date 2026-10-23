@@ -1282,3 +1282,14 @@ test("a model with no known price is refused, not charged $0", async (t) => {
   assert.equal(called, false);
   assert.equal(f.quota.inspect(OWNER_A).active, 0);
 });
+
+test("wallet markup: a model that is not a Headmaster tier uses its own markup, default at cost", async (t) => {
+  const at = async (options) =>
+    (await walletCompletion(t, {}, { walletMode: "on", ...options })).walletStore.calls.reserve[0].amountMicroUsd;
+  const base = await at({});
+  assert.ok(base > 0);
+  // The tier markup does not touch a public-priced model.
+  assert.equal(await at({ walletMarkupBps: 12_500 }), base);
+  // The other-model markup does.
+  assert.ok((await at({ walletOtherMarkupBps: 20_000 })) > base);
+});
