@@ -2524,6 +2524,7 @@ async function migrateDB(database = db, env = process.env) {
     `ALTER TABLE agents ADD COLUMN IF NOT EXISTS headmaster_workspace_id TEXT`,
     `ALTER TABLE agents ADD COLUMN IF NOT EXISTS headmaster_memory_bank_id TEXT`,
     `ALTER TABLE agents ADD COLUMN IF NOT EXISTS headmaster_memory_gateway_url TEXT`,
+    `ALTER TABLE agents ADD COLUMN IF NOT EXISTS headmaster_org_id TEXT`,
     `ALTER TABLE agents ADD COLUMN IF NOT EXISTS headmaster_integration_desired_revision INTEGER NOT NULL DEFAULT 0`,
     `ALTER TABLE agents ADD COLUMN IF NOT EXISTS headmaster_integration_applied_revision INTEGER NOT NULL DEFAULT 0`,
     `ALTER TABLE agents ADD COLUMN IF NOT EXISTS headmaster_integration_deployment_status TEXT`,

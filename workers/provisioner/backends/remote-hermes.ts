@@ -84,7 +84,8 @@ class RemoteHermesBackend extends HermesBackend {
   }
 
   async create(config = {}) {
-    const result = await super.create(config);
+    // The shared organization folder lives on this control plane host, not on a remote one.
+    const result = await super.create({ ...config, orgFilesOrgId: null });
     // Advertise the remote machine's address + the published runtime and dashboard
     // ports so the control plane targets the remote host instead of the container's
     // internal (unreachable) compose IP, readiness probes the right address, and the

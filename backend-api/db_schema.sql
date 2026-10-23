@@ -58,6 +58,7 @@ CREATE TABLE IF NOT EXISTS agents (
   headmaster_workspace_id TEXT,
   headmaster_memory_bank_id TEXT,
   headmaster_memory_gateway_url TEXT,
+  headmaster_org_id TEXT,
   headmaster_integration_desired_revision INTEGER NOT NULL DEFAULT 0,
   headmaster_integration_applied_revision INTEGER NOT NULL DEFAULT 0,
   headmaster_integration_deployment_status TEXT,

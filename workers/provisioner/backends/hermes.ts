@@ -1,6 +1,7 @@
 // @ts-nocheck
 const crypto = require("crypto");
 const DockerBackend = require("./docker");
+const { orgFilesBind } = require("./orgFilesMount");
 const {
   buildDockerTelemetry,
   buildUnavailableTelemetry,
@@ -211,6 +212,7 @@ class HermesBackend extends DockerBackend {
       container_name,
       abortSignal,
       credentialManagedEnvNames = [],
+      orgFilesOrgId = null,
     } = config;
     const containerName = container_name || safeContainerName("nora-hermes", name, id);
     const imgName = image || getHermesDockerAgentImage();
@@ -348,7 +350,8 @@ class HermesBackend extends DockerBackend {
           SecurityOpt: ["no-new-privileges:true"],
           PidsLimit: DEFAULT_AGENT_PIDS_LIMIT,
           Dns: ["8.8.8.8", "8.8.4.4", "1.1.1.1"],
-          Binds: [`${homeVolumeName}:${HERMES_HOME}`],
+          // A team organization's shared folder rides along read-only (WS13).
+          Binds: [`${homeVolumeName}:${HERMES_HOME}`, orgFilesBind(orgFilesOrgId)].filter(Boolean),
           // Local Hermes publishes the runtime + dashboard ports to
           // DOCKER_AGENT_BIND_IP (see _hermesPortBindings above) in addition to
           // being reachable via the container IP on the shared compose network.

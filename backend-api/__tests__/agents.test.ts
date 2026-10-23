@@ -4299,8 +4299,45 @@ describe("POST /agents/deploy", () => {
       "http://headmaster-memory-gateway:8791",
       1,
       "pending",
+      null,
     ]);
     expect(mockAddDeploymentJob).toHaveBeenCalledWith(expect.objectContaining({ id: "a-managed" }));
+  });
+
+  it("records the organization of a seat runtime, only on a managed deployment and only as a UUID", async () => {
+    process.env.ENABLED_RUNTIME_FAMILIES = "openclaw,hermes";
+    process.env.ENABLED_BACKENDS = "docker";
+    const owner = "11111111-1111-4111-8111-111111111111";
+    const workspace = "22222222-2222-4222-8222-222222222222";
+    const org = "0d000000-0000-4000-8000-000000000001";
+    const bank = "hermes-u-" + owner.replaceAll("-", "_");
+    const managed = {
+      name: "Seat",
+      runtime_family: "hermes",
+      external_identity: { namespace: "headmaster", external_id: workspace, owner_uuid: owner },
+      headmaster_integration_config: {
+        owner_uuid: owner,
+        workspace_uuid: workspace,
+        memory_bank_id: bank,
+        memory_gateway_url: "http://headmaster-memory-gateway:8791",
+      },
+    };
+    mockDb.query
+      .mockResolvedValueOnce({ rows: [] })
+      .mockResolvedValueOnce({ rows: [{ id: "a-seat", name: "Seat", status: "queued", user_id: "user-1" }] })
+      .mockResolvedValueOnce({ rows: [] });
+    const ok = await adminAuth(request(app).post("/agents/deploy").send({ ...managed, headmaster_org_id: org }));
+    expect(ok.status).toBe(200);
+    const insert = mockDb.query.mock.calls.find(([sql]) => sql.includes("INSERT INTO agents"));
+    expect(insert[1].at(-1)).toBe(org);
+
+    mockDb.query.mockResolvedValueOnce({ rows: [] });
+    const notUuid = await adminAuth(request(app).post("/agents/deploy").send({ ...managed, headmaster_org_id: "../etc" }));
+    expect(notUuid.status).toBe(400);
+    const unmanaged = await adminAuth(
+      request(app).post("/agents/deploy").send({ name: "Plain", headmaster_org_id: org }),
+    );
+    expect(unmanaged.status).toBe(400);
   });
 
   it("deploys from a migration draft and attaches the draft to the new agent", async () => {
