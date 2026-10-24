@@ -1,0 +1,1 @@
+CREATE INDEX IF NOT EXISTS idx_agent_versions_agent_recent ON agent_versions(agent_id, version_number DESC)

@@ -1,0 +1,1 @@
+DO $$ BEGIN ALTER TABLE users ADD COLUMN managed_backups_enabled_override BOOLEAN; EXCEPTION WHEN duplicate_column THEN NULL; END $$

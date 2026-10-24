@@ -1,0 +1,1 @@
+DO $$ BEGIN ALTER TABLE platform_settings ADD COLUMN backup_local_path TEXT NOT NULL DEFAULT '/var/lib/nora-backups'; EXCEPTION WHEN duplicate_column THEN NULL; END $$

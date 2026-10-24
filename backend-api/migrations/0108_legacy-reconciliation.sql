@@ -1,0 +1,1 @@
+CREATE INDEX IF NOT EXISTS idx_backup_schedules_due ON backup_schedules(enabled, next_run_at) WHERE enabled = true AND next_run_at IS NOT NULL

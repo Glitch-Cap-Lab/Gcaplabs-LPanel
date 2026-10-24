@@ -1,0 +1,1 @@
+CREATE INDEX IF NOT EXISTS idx_alert_rules_workspace_enabled ON alert_rules(workspace_id, enabled)

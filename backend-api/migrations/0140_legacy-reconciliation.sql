@@ -1,0 +1,1 @@
+DO $$ BEGIN ALTER TABLE agent_hub_listings ADD COLUMN central_listing_id TEXT; EXCEPTION WHEN duplicate_column THEN NULL; END $$

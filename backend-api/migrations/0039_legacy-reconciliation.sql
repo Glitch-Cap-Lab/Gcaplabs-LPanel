@@ -1,0 +1,1 @@
+DO $$ BEGIN ALTER TABLE kubernetes_clusters ADD COLUMN supports_network_policy BOOLEAN NOT NULL DEFAULT false; EXCEPTION WHEN duplicate_column THEN NULL; END $$

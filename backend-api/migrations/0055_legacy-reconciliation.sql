@@ -1,0 +1,1 @@
+DO $$ BEGIN ALTER TABLE platform_settings ADD COLUMN default_locale TEXT NOT NULL DEFAULT 'en'; EXCEPTION WHEN duplicate_column THEN NULL; END $$

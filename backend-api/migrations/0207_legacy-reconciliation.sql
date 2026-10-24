@@ -1,0 +1,1 @@
+CREATE INDEX IF NOT EXISTS idx_fleet_migrations_status_created ON fleet_migrations(status, created_at DESC)

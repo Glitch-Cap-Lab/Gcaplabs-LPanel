@@ -1,0 +1,1 @@
+CREATE INDEX IF NOT EXISTS idx_backups_user_agent_created ON backups(user_id, agent_id, created_at DESC)

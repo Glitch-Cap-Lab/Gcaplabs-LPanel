@@ -1,0 +1,1 @@
+DO $$ BEGIN ALTER TABLE platform_settings ADD COLUMN backup_storage_backend TEXT NOT NULL DEFAULT 'local'; EXCEPTION WHEN duplicate_column THEN NULL; END $$

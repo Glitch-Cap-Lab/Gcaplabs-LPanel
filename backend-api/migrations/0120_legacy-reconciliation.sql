@@ -1,0 +1,1 @@
+UPDATE agents SET clawhub_skills = '[]'::jsonb WHERE clawhub_skills IS NULL

@@ -1,0 +1,1 @@
+DO $$ BEGIN ALTER TABLE agents ADD COLUMN runtime_host TEXT; EXCEPTION WHEN duplicate_column THEN NULL; END $$

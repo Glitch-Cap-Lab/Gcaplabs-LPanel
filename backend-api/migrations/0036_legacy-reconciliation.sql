@@ -1,0 +1,1 @@
+ALTER TABLE agents ALTER COLUMN execution_target_id SET NOT NULL

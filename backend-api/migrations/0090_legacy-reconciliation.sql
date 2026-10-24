@@ -1,0 +1,1 @@
+DO $$ BEGIN ALTER TABLE users ADD COLUMN preferred_locale TEXT; EXCEPTION WHEN duplicate_column THEN NULL; END $$

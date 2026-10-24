@@ -1,0 +1,1 @@
+DO $$ BEGIN ALTER TABLE platform_settings ADD COLUMN backup_installation_schedule_hour_utc INTEGER NOT NULL DEFAULT 2; EXCEPTION WHEN duplicate_column THEN NULL; END $$

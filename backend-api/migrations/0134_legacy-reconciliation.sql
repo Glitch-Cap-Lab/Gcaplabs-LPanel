@@ -1,0 +1,1 @@
+DO $$ BEGIN ALTER TABLE agent_hub_listings ADD COLUMN source_type TEXT DEFAULT 'platform'; EXCEPTION WHEN duplicate_column THEN NULL; END $$

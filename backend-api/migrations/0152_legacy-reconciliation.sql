@@ -1,0 +1,1 @@
+UPDATE agent_hub_listings SET visibility = 'public' WHERE visibility IS NULL

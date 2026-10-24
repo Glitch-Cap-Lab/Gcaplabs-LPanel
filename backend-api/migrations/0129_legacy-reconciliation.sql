@@ -1,0 +1,1 @@
+DO $$ BEGIN ALTER TABLE snapshots ADD COLUMN template_key TEXT; EXCEPTION WHEN duplicate_column THEN NULL; END $$

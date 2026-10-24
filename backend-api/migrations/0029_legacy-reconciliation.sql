@@ -1,0 +1,1 @@
+ALTER TABLE agents ALTER COLUMN deploy_target SET DEFAULT 'docker'

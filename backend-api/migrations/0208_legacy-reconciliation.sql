@@ -1,0 +1,1 @@
+CREATE INDEX IF NOT EXISTS idx_fleet_migrations_initiator ON fleet_migrations(initiated_by, created_at DESC)

@@ -1,0 +1,1 @@
+DO $$ BEGIN ALTER TABLE platform_settings ADD COLUMN agent_hub_default_share_target TEXT NOT NULL DEFAULT 'both'; EXCEPTION WHEN duplicate_column THEN NULL; END $$

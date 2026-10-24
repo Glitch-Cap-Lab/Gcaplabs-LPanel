@@ -1,0 +1,1 @@
+CREATE INDEX IF NOT EXISTS idx_agent_hub_listings_source_status ON agent_hub_listings(source_type, status, published_at DESC)

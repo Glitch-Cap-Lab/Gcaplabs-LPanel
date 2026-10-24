@@ -1,0 +1,1 @@
+DO $$ BEGIN ALTER TABLE backup_schedules ADD CONSTRAINT backup_schedules_kind_check CHECK (kind IN ('agent','installation')); EXCEPTION WHEN duplicate_object THEN NULL; END $$

@@ -1,0 +1,1 @@
+DO $$ BEGIN ALTER TABLE platform_settings ADD COLUMN backup_installation_schedule_frequency TEXT NOT NULL DEFAULT 'daily'; EXCEPTION WHEN duplicate_column THEN NULL; END $$

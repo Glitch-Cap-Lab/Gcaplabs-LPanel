@@ -1,0 +1,1 @@
+CREATE INDEX IF NOT EXISTS idx_workspace_invitations_email_pending ON workspace_invitations(email) WHERE status = 'pending'

@@ -1,0 +1,1 @@
+DO $$ BEGIN ALTER TABLE users ADD COLUMN backup_limit_per_agent_override INTEGER; EXCEPTION WHEN duplicate_column THEN NULL; END $$

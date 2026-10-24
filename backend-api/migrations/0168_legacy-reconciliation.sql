@@ -1,0 +1,1 @@
+CREATE INDEX IF NOT EXISTS idx_agent_hub_listing_versions_listing ON agent_hub_listing_versions(listing_id, version_number DESC)
