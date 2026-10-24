@@ -8,6 +8,8 @@ const { demuxDockerExecStream } = require("./backends/dockerExecStream");
 const { createHash } = require("crypto");
 const ROOT = "/opt/data";
 const CONFIG_BYTES = 16 * 1024 * 1024;
+const INSTALLS_GC_THRESHOLD_BYTES = 1024 ** 3;
+const INSTALLS_GC_TIMEOUT_MS = 10 * 60_000;
 // Existing retained-image Python, not a worker dependency. No shell or caller-supplied program text.
 const MOVE_AND_SYNC = "import os,sys\nsrc,dst=sys.argv[1:]\nos.rename(src,dst)\nfor parent in sorted({os.path.dirname(src),os.path.dirname(dst)}):\n fd=os.open(parent,os.O_RDONLY|os.O_DIRECTORY)\n try: os.fsync(fd)\n finally: os.close(fd)";
 const PUBLISH_RECEIPT = [
@@ -150,7 +152,7 @@ class ProtectedReleaseDocker {
         || digest(networkIdentity(c)) !== digest(networkIdentity(old))
         || ["Entrypoint", "Cmd", "User", "WorkingDir"].some(key => digest(c.Config[key] ?? null) !== digest(old.Config[key] ?? null))) throw refuse("PROTECTED_RELEASE_CANDIDATE_CHANGED");
   }
-  async exec(container, cmd, user = "10000:10000") {
+  async exec(container, cmd, user = "10000:10000", timeoutMs = this.probeTimeoutMs) {
     return this.call(async signal => {
       let raw, stream; const abort = () => { stream?.destroy(signal.reason); raw?.destroy(); };
       signal.addEventListener("abort", abort, { once: true });
@@ -162,7 +164,24 @@ class ProtectedReleaseDocker {
         signal.throwIfAborted(); if ((await exec.inspect({ abortSignal: signal })).ExitCode !== 0) throw refuse("PROTECTED_RELEASE_PROBE_FAILED");
         signal.throwIfAborted(); return Buffer.concat(chunks).toString("utf8").trim();
       } finally { signal.removeEventListener("abort", abort); stream?.destroy(); raw?.destroy(); }
-    });
+    }, timeoutMs);
+  }
+  /**
+   * Staging copies the whole installs store and refuses past MAX_BYTES, so a bot whose store
+   * grew with unreferenced installs would stop a fleet rollout (24 Oct, 2ec3b822). Run the
+   * runtime's own collector as the bot user first. It removes only entries nothing references,
+   * so it is safe on a running bot and on a dry run. A collector failure is not a release
+   * failure: the capacity check that follows still decides.
+   */
+  async measureInstalls(t) {
+    const usage = await this.exec(this.docker.getContainer(t.container_id), ["du", "-sk", "/opt/data/installs"]);
+    return Number(usage.split(/\s/)[0]) * 1024;
+  }
+  async collectInstalls(t, bytes) {
+    if (!Number.isSafeInteger(bytes) || bytes < INSTALLS_GC_THRESHOLD_BYTES) return bytes;
+    try { await this.exec(this.docker.getContainer(t.container_id), ["/opt/hermes/.venv/bin/hermes", "pm", "gc"], "10000:10000", INSTALLS_GC_TIMEOUT_MS); }
+    catch { this.guard(); return bytes; }
+    return this.measureInstalls(t);
   }
   async preflight(m, row, { dryRun }) {
     await this.verifyImageBinding(m);
@@ -178,8 +197,7 @@ class ProtectedReleaseDocker {
     if (!old.State.Running) throw refuse("PROTECTED_RELEASE_RUNNING_REQUIRED");
     const user = await this.ownership(this.docker.getContainer(t.container_id));
     if (user.uid !== 10000 || user.gid !== 10000) throw refuse("PROTECTED_RELEASE_UID_CHANGED");
-    const usage = await this.exec(this.docker.getContainer(t.container_id), ["du", "-sk", "/opt/data/installs"]);
-    const bytes = Number(usage.split(/\s/)[0]) * 1024;
+    const bytes = await this.collectInstalls(t, await this.measureInstalls(t));
     const disk = await fs.statfs(this.stagingRoot);
     if (!Number.isSafeInteger(bytes) || bytes < 0 || bytes > MAX_BYTES - 2 * CONFIG_BYTES || disk.bavail * disk.bsize < bytes * 2 + 1024 ** 3) throw refuse("PROTECTED_RELEASE_STAGING_CAPACITY");
     // Application commands run as the bot user; archive work itself uses Node/tar-stream.
