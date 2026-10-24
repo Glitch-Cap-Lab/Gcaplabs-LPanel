@@ -93,3 +93,25 @@ export function createWalletStore({
 export function withMarkup(microUsd, markupBps) {
   return Math.ceil((microUsd * markupBps) / 10_000);
 }
+
+const MAX_MARKUP_BPS = 100_000;
+
+function requiredMarkupBps(env, name) {
+  const raw = String(env[name] ?? "").trim();
+  if (!/^\d+$/.test(raw)) throw new Error(`${name}_required`);
+  const bps = Number.parseInt(raw, 10);
+  // Below 10000 would sell under provider cost.
+  if (bps < 10_000 || bps > MAX_MARKUP_BPS) throw new Error(`${name}_invalid`);
+  return bps;
+}
+
+// The wallet is always on and both markups are mandatory: there is no at-cost default.
+export function walletConfigFromEnv(env) {
+  const mode = String(env.HEADMASTER_INFERENCE_WALLET ?? "on").trim().toLowerCase();
+  if (mode !== "on") throw new Error("HEADMASTER_INFERENCE_WALLET_must_be_on");
+  return {
+    walletMode: "on",
+    walletMarkupBps: requiredMarkupBps(env, "HEADMASTER_INFERENCE_WALLET_MARKUP_BPS"),
+    walletOtherMarkupBps: requiredMarkupBps(env, "HEADMASTER_INFERENCE_WALLET_OTHER_MARKUP_BPS"),
+  };
+}

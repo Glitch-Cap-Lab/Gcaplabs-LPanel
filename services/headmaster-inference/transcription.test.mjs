@@ -146,13 +146,6 @@ test("a failed vendor call releases the hold at no charge and leaks nothing", as
   assert.equal(wallet.log.settles[0].actualMicroUsd, 0);
 });
 
-test("shadow mode never refuses but still records usage", async (t) => {
-  const wallet = fakeWallet({ allowed: false, reason: "insufficient_credit" });
-  const { origin } = await start(t, { vendor: vendorOk(10), wallet, walletMode: "shadow" });
-  assert.equal((await upload(origin)).status, 200);
-  assert.equal(wallet.log.settles.length, 0, "no hold was granted, so nothing to settle");
-});
-
 test("route is absent without a vendor key", async (t) => {
   const { origin } = await start(t, { vendor: vendorOk(), transcription: null });
   assert.equal((await upload(origin)).status, 404);

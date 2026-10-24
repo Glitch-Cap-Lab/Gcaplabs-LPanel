@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { createWalletStore, withMarkup } from "./wallet.mjs";
+import { createWalletStore, walletConfigFromEnv, withMarkup } from "./wallet.mjs";
 
 const OWNER = "11111111-1111-4111-8111-111111111111";
 
@@ -58,4 +58,24 @@ test("markup is in basis points and rounds up", () => {
   assert.equal(withMarkup(1000, 10_000), 1000);
   assert.equal(withMarkup(1000, 12_500), 1250);
   assert.equal(withMarkup(3, 12_500), 4);
+});
+
+test("wallet config needs both markups and refuses shadow, off and below-cost values", () => {
+  const ok = {
+    HEADMASTER_INFERENCE_WALLET_MARKUP_BPS: "12500",
+    HEADMASTER_INFERENCE_WALLET_OTHER_MARKUP_BPS: "11000",
+  };
+  assert.deepEqual(walletConfigFromEnv(ok), { walletMode: "on", walletMarkupBps: 12500, walletOtherMarkupBps: 11000 });
+  assert.equal(walletConfigFromEnv({ ...ok, HEADMASTER_INFERENCE_WALLET: "on" }).walletMode, "on");
+  for (const bad of [
+    {},
+    { HEADMASTER_INFERENCE_WALLET_MARKUP_BPS: "12500" },
+    { HEADMASTER_INFERENCE_WALLET_OTHER_MARKUP_BPS: "11000" },
+    { ...ok, HEADMASTER_INFERENCE_WALLET: "shadow" },
+    { ...ok, HEADMASTER_INFERENCE_WALLET: "off" },
+    { ...ok, HEADMASTER_INFERENCE_WALLET_OTHER_MARKUP_BPS: "9000" },
+    { ...ok, HEADMASTER_INFERENCE_WALLET_MARKUP_BPS: "abc" },
+    { ...ok, HEADMASTER_INFERENCE_WALLET_MARKUP_BPS: "100001" },
+  ])
+    assert.throws(() => walletConfigFromEnv(bad));
 });
