@@ -885,7 +885,7 @@ export function createInferenceService({
           requestId,
           amountMicroUsd: Math.max(
             1,
-            withMarkup(transcriptionReserveMicroUsd(prepared.fileBytes, transcription), walletOtherMarkupBps),
+            withMarkup(transcriptionReserveMicroUsd(prepared.fileBytes, prepared.vendor), walletOtherMarkupBps),
           ),
           monthlyGrantMicroUsd: walletMonthlyGrantMicroUsd,
         })
@@ -913,7 +913,7 @@ export function createInferenceService({
     }
     const result = await callVendor({
       form: prepared.form,
-      config: transcription,
+      config: prepared.vendor,
       fetchImpl,
       signal: AbortSignal.timeout(requestTimeoutMs),
     });
@@ -922,13 +922,13 @@ export function createInferenceService({
       const seconds = result.error ? 0 : Number.isFinite(result.seconds) ? result.seconds : estimatedSeconds(prepared.fileBytes);
       const charged = result.error
         ? 0
-        : withMarkup(transcriptionCostMicroUsd(seconds, transcription), walletOtherMarkupBps);
+        : withMarkup(transcriptionCostMicroUsd(seconds, prepared.vendor), walletOtherMarkupBps);
       await walletStore
         .settle({
           ownerId,
           requestId,
           actualMicroUsd: charged,
-          detail: { kind: "transcription", model: transcription.model, audio_seconds: Number.isFinite(seconds) ? seconds : null },
+          detail: { kind: "transcription", model: prepared.vendor.model, audio_seconds: Number.isFinite(seconds) ? seconds : null },
         })
         .catch((error) =>
           logger.error?.("headmaster-inference wallet settle failed", {

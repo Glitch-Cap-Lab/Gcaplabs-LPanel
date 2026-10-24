@@ -283,6 +283,11 @@ under the same signed assertion as chat; personal-key (byo) assertions are refus
 - Transcription (`transcription.mjs`): `HEADMASTER_STT_API_KEY` turns it on; `HEADMASTER_STT_BASE_URL`
   (default Groq), `HEADMASTER_STT_MODEL`, `HEADMASTER_STT_USD_PER_HOUR`. Held from the upload size,
   settled on the measured audio seconds.
+  Arabic: with `HEADMASTER_MUNSIT_API_KEY` set, a request whose `language` is one of
+  `HEADMASTER_MUNSIT_LANGUAGES` (default `ar`, matched on the primary subtag) goes to Munsit
+  (`HEADMASTER_MUNSIT_BASE_URL`, default `https://api.munsit.com/api/v1`, `x-api-key` auth,
+  `HEADMASTER_MUNSIT_MODEL`, `HEADMASTER_MUNSIT_USD_PER_HOUR`, default 0). The runtime sends its
+  own `stt.language`, so the dictation language picks the engine.
 - Speech (`speech.mjs`): `HEADMASTER_TTS_BASE_URL` turns it on, for example the private Kokoro
   container at `http://headmaster-kokoro:8880/v1`. Plain http is accepted only for a compose service
   name or a private address. `HEADMASTER_TTS_MODEL` (default `kokoro`), `HEADMASTER_TTS_VOICE`

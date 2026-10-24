@@ -3,6 +3,9 @@
 // assertion as chat. The relay holds the vendor key, reserves wallet credit before the vendor call
 // and settles the real audio duration after it, like chat. Only the audio file and an optional
 // language/prompt reach the vendor; the model is always the operator's choice.
+//
+// Arabic goes to Munsit when its key is set: the runtime's own dictation language (stt.language,
+// sent as the OpenAI `language` field) picks the vendor, so there is no second setting to learn.
 
 export const TRANSCRIPTION_PATH = "/v1/audio/transcriptions";
 export const TRANSCRIPTION_MAX_BYTES = 25 * 1024 * 1024;
@@ -13,28 +16,66 @@ const MAX_BILLED_SECONDS = 3 * 60 * 60;
 const LANGUAGE = /^[A-Za-z]{2,3}(?:-[A-Za-z0-9]{2,8})?$/;
 const MAX_PROMPT_CHARS = 1000;
 
-export function transcriptionConfigFromEnv(env = process.env) {
-  const apiKey = String(env.HEADMASTER_STT_API_KEY || "").trim();
-  if (!apiKey) return null;
-  let baseUrl;
+function httpsBase(raw) {
   try {
-    const parsed = new URL(String(env.HEADMASTER_STT_BASE_URL || "https://api.groq.com/openai/v1"));
+    const parsed = new URL(raw);
     if (parsed.protocol !== "https:" || parsed.username || parsed.password || parsed.search || parsed.hash)
       return null;
-    baseUrl = `${parsed.origin}${parsed.pathname}`.replace(/\/+$/, "");
+    return `${parsed.origin}${parsed.pathname}`.replace(/\/+$/, "");
   } catch {
     return null;
   }
-  const price = Number.parseFloat(String(env.HEADMASTER_STT_USD_PER_HOUR ?? ""));
+}
+
+function microUsdPerHour(raw, fallback) {
+  const price = Number.parseFloat(String(raw ?? ""));
+  return Math.round((Number.isFinite(price) && price >= 0 ? price : fallback) * 1_000_000);
+}
+
+// Munsit (Arabic): x-api-key auth, POST {base}/audio/transcribe, answer { data: { transcription } }.
+function munsitConfigFromEnv(env) {
+  const apiKey = String(env.HEADMASTER_MUNSIT_API_KEY || "").trim();
+  if (!apiKey) return null;
+  const baseUrl = httpsBase(String(env.HEADMASTER_MUNSIT_BASE_URL || "https://api.munsit.com/api/v1"));
+  if (!baseUrl) return null;
+  const languages = String(env.HEADMASTER_MUNSIT_LANGUAGES || "ar")
+    .split(",")
+    .map((tag) => tag.trim().toLowerCase())
+    .filter(Boolean);
   return {
+    kind: "munsit",
+    apiKey,
+    baseUrl,
+    model: String(env.HEADMASTER_MUNSIT_MODEL || "munsit").trim(),
+    microUsdPerHour: microUsdPerHour(env.HEADMASTER_MUNSIT_USD_PER_HOUR, 0),
+    languages,
+  };
+}
+
+export function transcriptionConfigFromEnv(env = process.env) {
+  const apiKey = String(env.HEADMASTER_STT_API_KEY || "").trim();
+  if (!apiKey) return null;
+  const baseUrl = httpsBase(String(env.HEADMASTER_STT_BASE_URL || "https://api.groq.com/openai/v1"));
+  if (!baseUrl) return null;
+  return {
+    kind: "openai",
     apiKey,
     baseUrl,
     model: String(env.HEADMASTER_STT_MODEL || "whisper-large-v3-turbo").trim(),
     // verbose_json carries the measured duration on Groq and OpenAI; OpenRouter answers plain "json" with a usage object.
     responseFormat: String(env.HEADMASTER_STT_RESPONSE_FORMAT || "verbose_json").trim(),
     // Vendor price, USD per audio hour (Groq whisper-large-v3-turbo: 0.04). Charged at the wallet's other-model markup.
-    microUsdPerHour: Math.round((Number.isFinite(price) && price >= 0 ? price : 0.04) * 1_000_000),
+    microUsdPerHour: microUsdPerHour(env.HEADMASTER_STT_USD_PER_HOUR, 0.04),
+    munsit: munsitConfigFromEnv(env),
   };
+}
+
+/** The vendor for one request: Munsit for a language it serves (primary subtag match), else the default. */
+export function transcriptionVendor(config, language) {
+  const tag = typeof language === "string" ? language.toLowerCase() : "";
+  const munsit = config.munsit;
+  if (munsit && tag && munsit.languages.some((l) => tag === l || tag.startsWith(`${l}-`))) return munsit;
+  return config;
 }
 
 // Used to bill a successful call whose vendor reported no duration: the clip's size at a typical compressed bitrate.
@@ -52,7 +93,7 @@ export function transcriptionReserveMicroUsd(byteLength, config) {
   return transcriptionCostMicroUsd(byteLength / RESERVE_BYTES_PER_SECOND, config);
 }
 
-/** Parse the upload. Resolves { form } (vendor request body) or { error: "bad_request" }. */
+/** Parse the upload. Resolves { form, fileBytes, vendor } (vendor request body) or { error: "bad_request" }. */
 export async function prepareTranscription(body, contentType, config) {
   let incoming;
   try {
@@ -62,20 +103,23 @@ export async function prepareTranscription(body, contentType, config) {
   }
   const file = incoming.get("file");
   if (!file || typeof file === "string" || file.size === 0) return { error: "bad_request" };
+  const rawLanguage = incoming.get("language");
+  const language = typeof rawLanguage === "string" && LANGUAGE.test(rawLanguage) ? rawLanguage : null;
+  const vendor = transcriptionVendor(config, language);
   const form = new FormData();
   form.set("file", file, file.name || "audio.webm");
-  form.set("model", config.model);
+  form.set("model", vendor.model);
+  if (vendor.kind === "munsit") return { form, fileBytes: file.size, vendor };
   form.set("response_format", config.responseFormat);
-  const language = incoming.get("language");
-  if (typeof language === "string" && LANGUAGE.test(language)) form.set("language", language);
+  if (language) form.set("language", language);
   const prompt = incoming.get("prompt");
   if (typeof prompt === "string" && prompt) form.set("prompt", prompt.slice(0, MAX_PROMPT_CHARS));
-  return { form, fileBytes: file.size };
+  return { form, fileBytes: file.size, vendor };
 }
 
 // The vendor's own measurement of the audio, whichever shape it uses; NaN when it gave none.
 function measuredSeconds(json) {
-  for (const value of [json.duration, json.usage?.seconds, json.usage?.duration, json.usage?.audio_seconds]) {
+  for (const value of [json.duration, json.usage?.seconds, json.usage?.duration, json.usage?.audio_seconds, json.data?.duration]) {
     const n = Number(value);
     if (Number.isFinite(n) && n >= 0) return n;
   }
@@ -85,9 +129,10 @@ function measuredSeconds(json) {
 /** Resolves { text, seconds } or { error: "bad_request" | "unavailable" | "timeout" }. Never throws. */
 export async function callVendor({ form, config, fetchImpl = fetch, signal }) {
   try {
-    const upstream = await fetchImpl(`${config.baseUrl}/audio/transcriptions`, {
+    const munsit = config.kind === "munsit";
+    const upstream = await fetchImpl(`${config.baseUrl}/audio/${munsit ? "transcribe" : "transcriptions"}`, {
       method: "POST",
-      headers: { authorization: `Bearer ${config.apiKey}` },
+      headers: munsit ? { "x-api-key": config.apiKey } : { authorization: `Bearer ${config.apiKey}` },
       body: form,
       signal,
       redirect: "error",
@@ -95,8 +140,9 @@ export async function callVendor({ form, config, fetchImpl = fetch, signal }) {
     if (!upstream.ok)
       return { error: upstream.status >= 500 || upstream.status === 429 ? "unavailable" : "bad_request" };
     const json = await upstream.json();
-    if (typeof json?.text !== "string") return { error: "unavailable" };
-    return { text: json.text, seconds: measuredSeconds(json) };
+    const text = munsit ? json?.data?.transcription : json?.text;
+    if (typeof text !== "string") return { error: "unavailable" };
+    return { text, seconds: measuredSeconds(json) };
   } catch (error) {
     return { error: signal?.aborted || error?.name === "TimeoutError" ? "timeout" : "unavailable" };
   }
