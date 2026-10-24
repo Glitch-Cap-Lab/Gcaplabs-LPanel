@@ -2,10 +2,12 @@
 // multipart request; admission authenticates the account and forwards it here under the same signed
 // assertion as chat. The relay holds the vendor key, reserves wallet credit before the vendor call
 // and settles the real audio duration after it, like chat. Only the audio file and an optional
-// language/prompt reach the vendor; the model is always the operator's choice.
+// language/prompt reach the vendor; the requested model only picks the engine, whose own model is the operator's.
 //
-// Arabic goes to Munsit when its key is set: the runtime's own dictation language (stt.language,
-// sent as the OpenAI `language` field) picks the vendor, so there is no second setting to learn.
+// The person picks the engine the upstream way, with the provider's model setting (stt.openai.model,
+// sent as the OpenAI `model` field): "munsit" goes to Munsit when its key is set, anything else to the
+// default engine. The operator may also send chosen languages to Munsit (HEADMASTER_MUNSIT_LANGUAGES,
+// off by default), so a language never limits which engine a person can choose.
 
 export const TRANSCRIPTION_PATH = "/v1/audio/transcriptions";
 export const TRANSCRIPTION_MAX_BYTES = 25 * 1024 * 1024;
@@ -38,7 +40,7 @@ function munsitConfigFromEnv(env) {
   if (!apiKey) return null;
   const baseUrl = httpsBase(String(env.HEADMASTER_MUNSIT_BASE_URL || "https://api.munsit.com/api/v1"));
   if (!baseUrl) return null;
-  const languages = String(env.HEADMASTER_MUNSIT_LANGUAGES || "ar")
+  const languages = String(env.HEADMASTER_MUNSIT_LANGUAGES || "")
     .split(",")
     .map((tag) => tag.trim().toLowerCase())
     .filter(Boolean);
@@ -70,11 +72,14 @@ export function transcriptionConfigFromEnv(env = process.env) {
   };
 }
 
-/** The vendor for one request: Munsit for a language it serves (primary subtag match), else the default. */
-export function transcriptionVendor(config, language) {
-  const tag = typeof language === "string" ? language.toLowerCase() : "";
+/** The vendor for one request: Munsit when its model is asked for or the operator routes the language there, else the default. */
+export function transcriptionVendor(config, language, model = "") {
   const munsit = config.munsit;
-  if (munsit && tag && munsit.languages.some((l) => tag === l || tag.startsWith(`${l}-`))) return munsit;
+  if (!munsit) return config;
+  const wanted = typeof model === "string" ? model.trim().toLowerCase() : "";
+  if (wanted && (wanted === "munsit" || wanted === munsit.model.toLowerCase())) return munsit;
+  const tag = typeof language === "string" ? language.toLowerCase() : "";
+  if (tag && munsit.languages.some((l) => tag === l || tag.startsWith(`${l}-`))) return munsit;
   return config;
 }
 
@@ -105,7 +110,7 @@ export async function prepareTranscription(body, contentType, config) {
   if (!file || typeof file === "string" || file.size === 0) return { error: "bad_request" };
   const rawLanguage = incoming.get("language");
   const language = typeof rawLanguage === "string" && LANGUAGE.test(rawLanguage) ? rawLanguage : null;
-  const vendor = transcriptionVendor(config, language);
+  const vendor = transcriptionVendor(config, language, incoming.get("model"));
   const form = new FormData();
   form.set("file", file, file.name || "audio.webm");
   form.set("model", vendor.model);
