@@ -28,6 +28,7 @@ const {
   removeAgentNetwork,
   volumeQuotaOptions,
 } = require("./agentIsolation");
+const { assertHostMemoryBudget } = require("./hostMemoryBudget");
 
 const HERMES_RUNTIME_PORT = 8642;
 const HERMES_HOME = "/opt/data";
@@ -207,6 +208,11 @@ class HermesBackend extends DockerBackend {
     assertRuntimeIsolation();
   }
 
+  // Refuses a new runtime past the host's memory budget (NORA_HOST_MEMORY_BUDGET_MB).
+  async _assertHostMemoryBudget(agentId, requestedMb) {
+    await assertHostMemoryBudget(this.docker, { agentId, requestedMb });
+  }
+
   async create(config) {
     const {
       id,
@@ -322,6 +328,7 @@ class HermesBackend extends DockerBackend {
     // Per-agent mode puts the runtime alone on its own network (plus the
     // configured control-plane peers), so runtimes cannot reach each other.
     this._assertNetworkIsolation();
+    await this._assertHostMemoryBudget(id, ram_mb || 2048);
     const isolated = perRuntimeNetworkEnabled();
     const composeNetwork = isolated
       ? await ensureAgentNetwork(this.docker, id)
