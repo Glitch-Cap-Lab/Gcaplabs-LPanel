@@ -236,9 +236,9 @@ export function createInferenceService({
   // own_key_unavailable and the operator path is unaffected.
   resolveOwnKey = null,
   byoQuotaStore = null,
-  // Wallet billing (wallet.mjs). off: not used. shadow: usage is recorded in the
-  // wallet but never refused for it. on: the wallet replaces the Redis monthly
-  // cap and an empty wallet refuses (402 insufficient_credit).
+  // Wallet billing (wallet.mjs). off: not used (tests only; the server always runs
+  // on). on: the wallet replaces the Redis monthly cap and an empty wallet refuses
+  // (402 insufficient_credit).
   walletStore = null,
   walletMode = "off",
   walletMarkupBps = 10_000,
@@ -597,7 +597,7 @@ export function createInferenceService({
           });
           return null;
         });
-      if (walletMode === "on" && (!hold || !hold.allowed)) {
+      if (!hold || !hold.allowed) {
         await releaseQuota(claims, reservation);
         if (!hold)
           return safeError(
@@ -891,7 +891,7 @@ export function createInferenceService({
           });
           return null;
         });
-      if (walletMode === "on" && (!hold || !hold.allowed)) {
+      if (!hold || !hold.allowed) {
         if (!hold)
           return safeError(res, 503, "quota_unavailable", "Managed inference is temporarily unavailable.", requestId);
         if (hold.reason === "org_suspended")

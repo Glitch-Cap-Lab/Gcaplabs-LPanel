@@ -1128,17 +1128,6 @@ test("wallet on: a suspended organization answers 403 and an unreachable wallet 
   assert.equal((await down.response.json()).error.code, "quota_unavailable");
 });
 
-test("wallet shadow: a refusal is recorded but never blocks, and nothing is held when it refuses", async (t) => {
-  const { response, walletStore } = await walletCompletion(
-    t,
-    { allowed: false, reason: "insufficient_credit" },
-    { walletMode: "shadow" },
-  );
-  assert.notEqual(response.status, 402);
-  assert.equal(walletStore.calls.reserve.length, 1);
-  assert.equal(walletStore.calls.settle.length, 0);
-});
-
 test("wallet off: the wallet is never called", async (t) => {
   const { walletStore } = await walletCompletion(t, {}, { walletMode: "off" });
   assert.equal(walletStore.calls.reserve.length, 0);

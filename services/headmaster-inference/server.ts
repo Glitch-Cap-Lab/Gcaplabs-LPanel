@@ -19,7 +19,7 @@ const { createRedisReplayStore } = require("./assertion.mjs");
 const { createRedisQuotaStore, createRedisByoQuotaStore } = require("./quota.mjs");
 const { createProviderKeyResolver } = require("./byo.mjs");
 const { createInferenceService } = require("./lib.mjs");
-const { createWalletStore } = require("./wallet.mjs");
+const { createWalletStore, walletConfigFromEnv } = require("./wallet.mjs");
 const { transcriptionConfigFromEnv } = require("./transcription.mjs");
 const { tierModelsFromEnv, priceTableFromEnv } = require("./policy.mjs");
 
@@ -84,14 +84,13 @@ async function main() {
   await redis.ping();
   await db.query("SELECT 1");
 
-  // off (default) | shadow | on. See wallet.mjs.
-  const requestedWalletMode = String(process.env.HEADMASTER_INFERENCE_WALLET || "off").toLowerCase();
-  const walletMode = ["shadow", "on"].includes(requestedWalletMode) ? requestedWalletMode : "off";
+  // Always on; throws without both markups. See wallet.mjs.
+  const walletConfig = walletConfigFromEnv(process.env);
   const walletStore = createWalletStore({
     supabaseUrl: process.env.HEADMASTER_INFERENCE_SUPABASE_URL,
     serviceRoleKey: process.env.HEADMASTER_INFERENCE_SUPABASE_SERVICE_ROLE_KEY,
   });
-  if (walletMode !== "off" && !walletStore.configured)
+  if (!walletStore.configured)
     throw new Error("wallet_not_configured");
   const quotaStore = createRedisQuotaStore(redis, {
     maxConcurrentPerAccount: positiveInt(process.env.HEADMASTER_INFERENCE_MAX_CONCURRENT, 3, 100),
@@ -108,7 +107,7 @@ async function main() {
     // Per-account monthly spend cap in USD (UTC calendar month), stored in micro-USD.
     // With the wallet on it replaces this cap, so the Redis one is lifted.
     maxMicroUsdPerMonth:
-      walletMode === "on" ? 1_000_000 * 1_000_000 : usdToMicro(process.env.HEADMASTER_INFERENCE_USD_PER_MONTH, 2),
+      1_000_000 * 1_000_000,
   });
   // Personal provider keys. Always constructed (never throws): with an unset or
   // short HEADMASTER_PROVIDER_KEY_SECRET, or without the Headmaster Supabase
@@ -146,9 +145,7 @@ async function main() {
       resolveInferenceProvider(noraUserId, providerId, db),
     quotaStore,
     walletStore,
-    walletMode,
-    walletMarkupBps: positiveInt(process.env.HEADMASTER_INFERENCE_WALLET_MARKUP_BPS, 10_000, 100_000),
-    walletOtherMarkupBps: positiveInt(process.env.HEADMASTER_INFERENCE_WALLET_OTHER_MARKUP_BPS, 10_000, 100_000),
+    ...walletConfig,
     transcription: transcriptionConfigFromEnv(process.env),
     walletMonthlyGrantMicroUsd: usdToMicro(process.env.HEADMASTER_INFERENCE_USD_PER_MONTH, 2),
     replayStore: createRedisReplayStore(redis),

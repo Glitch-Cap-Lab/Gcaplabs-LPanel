@@ -252,27 +252,27 @@ month (UTC)."). Personal-key traffic is not counted.
 
 ## Wallet billing
 
-`HEADMASTER_INFERENCE_WALLET` selects how model spend is charged:
+The wallet is always on: the relay charges every managed request to the paying
+organization's wallet (Headmaster Supabase, site migration
+`20261023090000_headmaster_wallets.sql`). `HEADMASTER_INFERENCE_WALLET`, if set,
+must be `on`; `off` and `shadow` are gone. An empty wallet answers 402
+`insufficient_credit`, a switched-off organization 403 `organization_suspended`,
+an unreachable wallet 503 `quota_unavailable`. A personal wallet is topped up to
+`HEADMASTER_INFERENCE_USD_PER_MONTH` once per UTC month, so the free allowance
+stays $2. Per-account concurrency, hourly request and daily token limits still
+apply from Redis.
 
-- `off` (default): the Redis monthly allowance above, unchanged.
-- `shadow`: every request also reserves and settles against the paying
-  organization's wallet (Headmaster Supabase, site migration
-  `20261023090000_headmaster_wallets.sql`), but a wallet refusal never blocks.
-  The Redis allowance still decides.
-- `on`: the wallet replaces the Redis monthly cap. An empty wallet answers 402
-  `insufficient_credit`, a switched-off organization 403
-  `organization_suspended`, an unreachable wallet 503 `quota_unavailable`.
-  A personal wallet is topped up to `HEADMASTER_INFERENCE_USD_PER_MONTH` once
-  per UTC month, so the free allowance stays $2. Per-account concurrency, hourly
-  request and daily token limits still apply from Redis.
+Both markups are required and the relay refuses to start without them (no at-cost
+default; values below `10000` or above `100000` are refused too):
 
-`HEADMASTER_INFERENCE_WALLET_MARKUP_BPS` (default `10000`, at cost) multiplies the
-provider cost of the Headmaster tiers (Lite and Pro) before it is held and charged; 12500 is cost plus 25%.
-`HEADMASTER_INFERENCE_WALLET_OTHER_MARKUP_BPS` (default `10000`, at cost) does the same
-for every other model, whose prices are public; the margin there comes from hosting. The wallet
-uses the same `HEADMASTER_INFERENCE_SUPABASE_URL` and service-role key as the
-assignments. Starting in `shadow` or `on` without them fails startup. Personal-key
-traffic is never charged. Turn `on` only after the site migrations are applied.
+- `HEADMASTER_INFERENCE_WALLET_MARKUP_BPS=12500` multiplies the provider cost of
+  the Headmaster tiers (Lite and Pro) before it is held and charged: cost plus 25%.
+- `HEADMASTER_INFERENCE_WALLET_OTHER_MARKUP_BPS=11000` does the same for every other
+  model and the speech-to-text route: cost plus 10%.
+
+The wallet uses the same `HEADMASTER_INFERENCE_SUPABASE_URL` and service-role key
+as the assignments; startup fails without them. Personal-key traffic is never
+charged.
 
 ## Limits and behavior
 
