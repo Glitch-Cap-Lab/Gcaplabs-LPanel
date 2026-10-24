@@ -1921,6 +1921,14 @@ describe("provisioning runtime/gateway contracts", () => {
 });
 
 describe("Hermes dashboard provisioning", () => {
+  // These tests exercise container config, not network isolation (agentIsolation.test.ts does).
+  beforeAll(() => {
+    process.env.NORA_ALLOW_SHARED_AGENT_NETWORK = "true";
+  });
+  afterAll(() => {
+    delete process.env.NORA_ALLOW_SHARED_AGENT_NETWORK;
+  });
+
   it("enables the image-supervised Hermes dashboard alongside the gateway", async () => {
     const HermesBackend = require("../../workers/provisioner/backends/hermes");
     const backend = new HermesBackend();

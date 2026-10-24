@@ -68,6 +68,62 @@ function timingSafeEqual(a, b) {
   return crypto.timingSafeEqual(bufA, bufB);
 }
 
+// ── Signed Redis records ─────────────────────────────────────────────────────
+//
+// Launch codes and session records live in Redis. Anything that can write to
+// Redis (a runtime on a shared network, a leaked password) could otherwise mint
+// an hm:code key and redeem it for an administrator session. Every record is
+// sealed with an HMAC bound to its Redis key, so a forged, edited or copied
+// record is refused even when the attacker can write the key.
+//
+// The key is HEADMASTER_LAUNCH_HMAC_KEY when set; otherwise it is derived from
+// JWT_SECRET (HKDF, own context), which Redis writers never see either.
+
+function signingKey() {
+  const explicit = String(process.env.HEADMASTER_LAUNCH_HMAC_KEY || "").trim();
+  if (explicit) {
+    if (explicit.length < 32) {
+      throw httpError(503, "signing_unavailable", "HEADMASTER_LAUNCH_HMAC_KEY is too short.");
+    }
+    return Buffer.from(explicit);
+  }
+  const base = String(process.env.JWT_SECRET || "");
+  if (!base) {
+    throw httpError(503, "signing_unavailable", "Launch signing key is not configured.");
+  }
+  return Buffer.from(
+    crypto.hkdfSync("sha256", base, "headmaster-launch", "hm-launch-record-signing-v1", 32),
+  );
+}
+
+function recordMac(redisKey, body) {
+  return crypto.createHmac("sha256", signingKey()).update(`${redisKey}\n${body}`).digest("hex");
+}
+
+/** Serialize a record for Redis with a MAC bound to the key it is stored under. */
+function sealRecord(redisKey, record) {
+  const body = JSON.stringify(record);
+  return JSON.stringify({ b: body, m: recordMac(redisKey, body) });
+}
+
+/** The record, or null when it is missing, malformed, unsigned or signed for another key. */
+function openRecord(redisKey, raw) {
+  if (!raw) return null;
+  let envelope;
+  try {
+    envelope = JSON.parse(raw);
+  } catch {
+    return null;
+  }
+  if (!envelope || typeof envelope.b !== "string" || typeof envelope.m !== "string") return null;
+  if (!timingSafeEqual(envelope.m, recordMac(redisKey, envelope.b))) return null;
+  try {
+    return JSON.parse(envelope.b);
+  } catch {
+    return null;
+  }
+}
+
 function requireS2SToken() {
   return process.env.HEADMASTER_S2S_TOKEN || "";
 }
@@ -316,7 +372,8 @@ async function createLaunchCode({ gcapUserId, gcapSessionId, browserNonce, paren
   const link = await resolveHeadmasterLink(gcapUserId);
 
   const code = crypto.randomBytes(32).toString("hex");
-  const payload = JSON.stringify({
+  const codeKey = KEY.code(sha256Hex(code));
+  const payload = sealRecord(codeKey, {
     g: gcapUserId,
     s: gcapSessionId,
     n: sha256Hex(browserNonce),
@@ -324,7 +381,7 @@ async function createLaunchCode({ gcapUserId, gcapSessionId, browserNonce, paren
     o: configuredParentOrigin().toLowerCase(),
   });
   const set = await getRedis().set(
-    KEY.code(sha256Hex(code)),
+    codeKey,
     payload,
     "EX",
     CODE_TTL_SECONDS,
@@ -357,13 +414,13 @@ async function consumeLaunchCode({ code, browserNonceCookie }) {
   const redis = getRedis();
   const codeHash = sha256Hex(code);
   // GETDEL is atomic: a replayed code finds nothing on the second attempt.
-  const raw = await redis.getdel(KEY.code(codeHash));
+  const codeKey = KEY.code(codeHash);
+  const raw = await redis.getdel(codeKey);
   if (!raw)
     throw httpError(403, "code_invalid", "Launch code is invalid, expired, or already used.");
-  let binding;
-  try {
-    binding = JSON.parse(raw);
-  } catch {
+  const binding = openRecord(codeKey, raw);
+  if (!binding) {
+    await audit("redeem_rejected", "denied", { detail: { reason: "record_signature_invalid" } });
     throw httpError(403, "code_invalid", "Launch code is invalid.");
   }
   if (binding.o !== configuredParentOrigin().toLowerCase()) {
@@ -418,7 +475,7 @@ async function consumeLaunchCode({ code, browserNonceCookie }) {
 
 async function createHeadmasterSession({ gcapUserId, gcapSessionId, noraUserId, email, role }) {
   const jti = crypto.randomUUID();
-  const record = JSON.stringify({
+  const record = sealRecord(KEY.sess(jti), {
     g: gcapUserId,
     s: gcapSessionId,
     u: noraUserId,
@@ -447,7 +504,7 @@ async function createHeadmasterSession({ gcapUserId, gcapSessionId, noraUserId, 
 /** True when the hm session still exists. Throws (fail closed) on storage errors. */
 async function sessionExists(jti) {
   try {
-    return Boolean(await getRedis().exists(KEY.sess(jti)));
+    return Boolean(openRecord(KEY.sess(jti), await getRedis().get(KEY.sess(jti))));
   } catch (error) {
     console.error("headmaster session check failed closed:", error.message);
     throw httpError(
@@ -492,14 +549,10 @@ async function revokeHeadmasterSessions({ gcapSessionId, gcapUserId, noraUserId,
     const keys = await scanKeys(redis, "hm:sess:*");
     for (const key of keys || []) {
       if (key.startsWith("hm:sess:user:")) continue;
-      const raw = await redis.get(key);
-      if (!raw) continue;
-      let record;
-      try {
-        record = JSON.parse(raw);
-      } catch {
-        continue;
-      }
+      // An unsigned or forged record is never honoured by sessionExists, so it
+      // has nothing to revoke.
+      const record = openRecord(key, await redis.get(key));
+      if (!record) continue;
       if (
         (gcapUserId && record.g === gcapUserId) ||
         (gcapSessionId && record.s === gcapSessionId)
@@ -515,12 +568,10 @@ async function revokeHeadmasterSessions({ gcapSessionId, gcapUserId, noraUserId,
     const raw = await redis.getdel(KEY.sess(jti));
     if (raw) {
       revoked += 1;
-      try {
-        const record = JSON.parse(raw);
+      const record = openRecord(KEY.sess(jti), raw);
+      if (record) {
         noraUserIds.add(record.u);
         await redis.srem(KEY.userSess(record.u), jti);
-      } catch {
-        // Record already gone or unreadable — the GETDEL above did its job.
       }
     }
   }
@@ -703,12 +754,11 @@ function startSessionRevalidator() {
           const jti = key.slice("hm:sess:".length);
           let record;
           try {
-            const raw = await getRedis().get(key);
-            if (!raw) return;
-            record = JSON.parse(raw);
+            record = openRecord(key, await getRedis().get(key));
           } catch {
             return;
           }
+          if (!record) return;
           try {
             const response = await fetch(checkUrl, {
               method: "POST",
@@ -724,7 +774,7 @@ function startSessionRevalidator() {
               if (data && data.active === true) {
                 await getRedis().set(
                   key,
-                  JSON.stringify({ ...record, checked: Date.now() }),
+                  sealRecord(key, { ...record, checked: Date.now() }),
                   "KEEPTTL",
                 );
                 return;
@@ -834,6 +884,8 @@ module.exports = {
   requireS2SToken,
   timingSafeEqual,
   sha256Hex,
+  sealRecord,
+  openRecord,
   CODE_PATTERN,
   BROWSER_NONCE_PATTERN,
   REVALIDATE_SECONDS,

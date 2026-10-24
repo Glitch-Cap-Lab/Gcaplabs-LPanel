@@ -62,6 +62,9 @@ class RemoteHermesBackend extends HermesBackend {
     return null;
   }
 
+  // Remote hosts do not share the control plane's Docker networks.
+  _assertNetworkIsolation() {}
+
   // Publish the Hermes RUNTIME port (readiness/API) and DASHBOARD port (embed UI)
   // on their worker-allocated host ports so both are reachable across the network
   // ({runtime_host}:{runtime_port}/health for readiness; the dashboard via its own

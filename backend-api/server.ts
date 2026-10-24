@@ -160,6 +160,9 @@ if (!process.env.JWT_SECRET) {
   }
 }
 
+// ─── Redis authentication ─────────────────────────────────────────
+if (!IS_TEST_ENV) require("./lib/connectionConfig").enforceRedisAuth();
+
 // ─── App Setup ────────────────────────────────────────────────────
 const app = express();
 const EMBED_SESSION_TTL_MS = 15 * 60 * 1000;

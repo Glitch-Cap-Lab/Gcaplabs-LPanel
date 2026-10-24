@@ -1,7 +1,7 @@
 const HermesBackend = require("../../workers/provisioner/backends/hermes");
 const isolation = require("../../workers/provisioner/backends/agentIsolation");
 
-const ENV_KEYS = ["NORA_AGENT_NETWORK_RECONCILE_SECONDS", "NORA_AGENT_NETWORK_ISOLATION", "NORA_AGENT_NETWORK_PEERS", "NORA_AGENT_VOLUME_QUOTA", "NORA_AGENT_NETWORK"];
+const ENV_KEYS = ["NORA_ALLOW_SHARED_AGENT_NETWORK", "NORA_AGENT_NETWORK_RECONCILE_SECONDS", "NORA_AGENT_NETWORK_ISOLATION", "NORA_AGENT_NETWORK_PEERS", "NORA_AGENT_VOLUME_QUOTA", "NORA_AGENT_NETWORK"];
 
 function mockBackend() {
   const backend = new HermesBackend();
@@ -35,7 +35,25 @@ describe("Cloud runtime isolation (opt-in)", () => {
   beforeEach(() => ENV_KEYS.forEach((k) => delete process.env[k]));
   afterAll(() => ENV_KEYS.forEach((k) => delete process.env[k]));
 
-  it("changes nothing when the settings are unset", async () => {
+  it("refuses to start a runtime when isolation is unset", async () => {
+    const { backend } = mockBackend();
+    await expect(backend.create({ id: "7", env: {}, disk_gb: 5 })).rejects.toThrow(
+      /without per-runtime network isolation/,
+    );
+    expect(backend.docker.createContainer).not.toHaveBeenCalled();
+  });
+
+  it("refuses when isolation is set to anything but per-runtime", async () => {
+    process.env.NORA_AGENT_NETWORK_ISOLATION = "shared";
+    const { backend } = mockBackend();
+    await expect(backend.create({ id: "7", env: {}, disk_gb: 5 })).rejects.toThrow(
+      /without per-runtime network isolation/,
+    );
+    expect(backend.docker.createContainer).not.toHaveBeenCalled();
+  });
+
+  it("uses the shared network only on the explicit override", async () => {
+    process.env.NORA_ALLOW_SHARED_AGENT_NETWORK = "true";
     const { backend } = mockBackend();
     await backend.create({ id: "7", env: {}, disk_gb: 5 });
     expect(backend.docker.createNetwork).not.toHaveBeenCalled();
@@ -115,6 +133,7 @@ describe("Cloud runtime isolation (opt-in)", () => {
 
   it("sizes the home volume from disk_gb only when quota is enforced", async () => {
     process.env.NORA_AGENT_VOLUME_QUOTA = "enforce";
+    process.env.NORA_ALLOW_SHARED_AGENT_NETWORK = "true";
     const { backend } = mockBackend();
     await backend.create({ id: "7", env: {}, disk_gb: 5 });
     expect(backend.docker.createVolume).toHaveBeenCalledWith({

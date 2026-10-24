@@ -1999,6 +1999,20 @@ DB_MIGRATION_STATEMENT_TIMEOUT_MS="$(read_env_value "$ENV_FILE" "DB_MIGRATION_ST
 REDIS_URL="$(read_env_value "$ENV_FILE" "REDIS_URL" "")"
 REDIS_USERNAME="$(read_env_value "$ENV_FILE" "REDIS_USERNAME" "")"
 REDIS_PASSWORD="$(read_env_value "$ENV_FILE" "REDIS_PASSWORD" "")"
+# The bundled Redis holds queue jobs and session records, so it always gets a password.
+# An external REDIS_URL carries its own credentials.
+if [ -z "$REDIS_PASSWORD" ] && [ -z "$REDIS_URL" ]; then
+  REDIS_PASSWORD="$(openssl rand -hex 24)"
+fi
+# Runtime network isolation: the provisioner refuses to start a runtime without it.
+# Fresh single-host installs have no per-runtime peers configured, so they accept the
+# shared network; production sets NORA_AGENT_NETWORK_ISOLATION=per-runtime instead.
+NORA_AGENT_NETWORK_ISOLATION="$(read_env_value "$ENV_FILE" "NORA_AGENT_NETWORK_ISOLATION" "")"
+NORA_AGENT_NETWORK_PEERS="$(read_env_value "$ENV_FILE" "NORA_AGENT_NETWORK_PEERS" "")"
+NORA_ALLOW_SHARED_AGENT_NETWORK="$(read_env_value "$ENV_FILE" "NORA_ALLOW_SHARED_AGENT_NETWORK" "")"
+if [ -z "$NORA_AGENT_NETWORK_ISOLATION" ] && [ -z "$NORA_ALLOW_SHARED_AGENT_NETWORK" ]; then
+  NORA_ALLOW_SHARED_AGENT_NETWORK="true"
+fi
 REDIS_DB="$(read_env_value "$ENV_FILE" "REDIS_DB" "")"
 REDIS_TLS="$(read_env_value "$ENV_FILE" "REDIS_TLS" "false")"
 REDIS_TLS_CA="$(read_env_value "$ENV_FILE" "REDIS_TLS_CA" "")"
@@ -2072,6 +2086,10 @@ REDIS_PORT=6379
 REDIS_URL=${REDIS_URL}
 REDIS_USERNAME=${REDIS_USERNAME}
 REDIS_PASSWORD=${REDIS_PASSWORD}
+NORA_REQUIRE_REDIS_AUTH=true
+NORA_AGENT_NETWORK_ISOLATION=${NORA_AGENT_NETWORK_ISOLATION}
+NORA_AGENT_NETWORK_PEERS=${NORA_AGENT_NETWORK_PEERS}
+NORA_ALLOW_SHARED_AGENT_NETWORK=${NORA_ALLOW_SHARED_AGENT_NETWORK}
 REDIS_DB=${REDIS_DB}
 REDIS_TLS=${REDIS_TLS}
 REDIS_TLS_CA=${REDIS_TLS_CA}
