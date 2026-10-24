@@ -24,6 +24,14 @@ import {
   prepareRealtimeRequest,
 } from "./realtime.mjs";
 
+import {
+  TRANSCRIPTION_PATH,
+  callVendor,
+  prepareTranscription,
+  transcriptionCostMicroUsd,
+  transcriptionReserveMicroUsd,
+} from "./transcription.mjs";
+
 export const MAX_REQUEST_BYTES = 36 * 1024 * 1024;
 export const MAX_RESPONSE_BYTES = 32 * 1024 * 1024;
 const MODEL_PATH = "/v1/models";
@@ -236,6 +244,8 @@ export function createInferenceService({
   // Markup for models that are not a Headmaster tier (public prices: at cost).
   walletOtherMarkupBps = 10_000,
   walletMonthlyGrantMicroUsd = 0,
+  // From transcriptionConfigFromEnv, or null: the transcription route is absent (404).
+  transcription = null,
 } = {}) {
   if (typeof assertionSecret !== "string" || Buffer.byteLength(assertionSecret) < 32)
     throw new Error("assertion_secret_invalid");
@@ -291,7 +301,8 @@ export function createInferenceService({
       !(
         (req.method === "GET" && url.pathname === MODEL_PATH) ||
         (req.method === "POST" && url.pathname === COMPLETION_PATH) ||
-        (req.method === "POST" && url.pathname === REALTIME_SESSION_PATH)
+        (req.method === "POST" && url.pathname === REALTIME_SESSION_PATH) ||
+        (req.method === "POST" && url.pathname === TRANSCRIPTION_PATH && transcription)
       )
     ) {
       return safeError(res, 404, "not_found", "Route not found.", null);
@@ -353,6 +364,7 @@ export function createInferenceService({
     // A verified byo_provider claim selects the personal-key path. It never
     // reads assignments, operator provider rows, or operator quota counters.
     if (url.pathname === REALTIME_SESSION_PATH) return handleRealtime(res, body, claims);
+    if (url.pathname === TRANSCRIPTION_PATH) return handleTranscription(req, res, body, claims);
     if (claims.byo_provider !== undefined) return handleByo(req, res, body, claims);
     let mapping;
     try {
@@ -846,6 +858,94 @@ export function createInferenceService({
   // Realtime voice session tokens: personal keys only (a v2 assertion naming the
   // provider). Never reads assignments, operator keys, or spending-cap counters;
   // it does take the own-key hourly request budget, like own-key chat.
+  // Managed speech-to-text: wallet hold sized from the upload, vendor call, settle on the measured
+  // duration. A byo claim is refused: personal keys do not go through the platform vendor.
+  async function handleTranscription(req, res, body, claims) {
+    const requestId = claims.request_id;
+    if (claims.byo_provider !== undefined)
+      return safeError(res, 400, "transcription_not_for_own_key", "Transcription uses the Headmaster service.", requestId);
+    const contentType = String(req.headers["content-type"] || "");
+    if (!/^multipart\/form-data;\s*boundary=/i.test(contentType))
+      return safeError(res, 415, "content_type_unsupported", "Transcription requests must use multipart/form-data.", requestId);
+    const prepared = await prepareTranscription(body, contentType, transcription);
+    if (prepared.error)
+      return safeError(res, 400, "audio_invalid", "The audio could not be transcribed.", requestId);
+    const ownerId = claims.sub;
+    let walletHeld = false;
+    if (walletStore && walletMode !== "off") {
+      const hold = await walletStore
+        .reserve({
+          ownerId,
+          requestId,
+          amountMicroUsd: Math.max(
+            1,
+            withMarkup(transcriptionReserveMicroUsd(prepared.fileBytes, transcription), walletOtherMarkupBps),
+          ),
+          monthlyGrantMicroUsd: walletMonthlyGrantMicroUsd,
+        })
+        .catch((error) => {
+          logger.error?.("headmaster-inference wallet reserve failed", {
+            requestId,
+            code: error?.code || "wallet_unavailable",
+          });
+          return null;
+        });
+      if (walletMode === "on" && (!hold || !hold.allowed)) {
+        if (!hold)
+          return safeError(res, 503, "quota_unavailable", "Managed inference is temporarily unavailable.", requestId);
+        if (hold.reason === "org_suspended")
+          return safeError(res, 403, "organization_suspended", "This organization is switched off.", requestId);
+        return safeError(
+          res,
+          402,
+          "insufficient_credit",
+          "Your Headmaster wallet is out of credit. Add credit to continue.",
+          requestId,
+        );
+      }
+      walletHeld = Boolean(hold?.allowed);
+    }
+    const result = await callVendor({
+      form: prepared.form,
+      config: transcription,
+      fetchImpl,
+      signal: AbortSignal.timeout(requestTimeoutMs),
+    });
+    if (walletHeld) {
+      // A failed vendor call releases the hold at no charge; a successful one is billed on measured audio.
+      const seconds = result.error ? 0 : result.seconds;
+      const charged = result.error
+        ? 0
+        : withMarkup(transcriptionCostMicroUsd(seconds, transcription), walletOtherMarkupBps);
+      await walletStore
+        .settle({
+          ownerId,
+          requestId,
+          actualMicroUsd: charged,
+          detail: { kind: "transcription", model: transcription.model, audio_seconds: Number.isFinite(seconds) ? seconds : null },
+        })
+        .catch((error) =>
+          logger.error?.("headmaster-inference wallet settle failed", {
+            requestId,
+            code: error?.code || "wallet_unavailable",
+          }),
+        );
+    }
+    if (result.error === "bad_request")
+      return safeError(res, 400, "audio_invalid", "The audio could not be transcribed.", requestId);
+    if (result.error) {
+      logger.warn?.("headmaster-inference transcription unavailable", { requestId, code: result.error });
+      return safeError(
+        res,
+        result.error === "timeout" ? 504 : 503,
+        "transcription_unavailable",
+        "Speech-to-text is temporarily unavailable.",
+        requestId,
+      );
+    }
+    return sendJson(res, 200, { text: result.text }, requestId);
+  }
+
   async function handleRealtime(res, body, claims) {
     const requestId = claims.request_id;
     const provider = claims.byo_provider;
