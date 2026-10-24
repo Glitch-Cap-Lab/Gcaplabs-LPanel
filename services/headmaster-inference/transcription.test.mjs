@@ -166,3 +166,41 @@ test("config needs a key and an https base", () => {
   assert.equal(cfg.baseUrl, "https://api.groq.com/openai/v1");
   assert.equal(cfg.microUsdPerHour, 40_000);
 });
+
+const MUNSIT = { kind: "munsit", apiKey: "munsit-secret-key", baseUrl: "https://api.munsit.example/api/v1", model: "munsit", microUsdPerHour: 0, languages: ["ar"] };
+
+test("Arabic dictation goes to Munsit with its own auth and answer shape; other languages stay on the default", async (t) => {
+  const vendor = (init) => init.headers["x-api-key"]
+    ? new Response(JSON.stringify({ statusCode: 200, data: { transcriptionId: "t1", transcription: "مرحبا" } }), { status: 200 })
+    : vendorOk(5)();
+  const { origin, vendorCalls } = await start(t, { vendor, transcription: { ...CONFIG, munsit: MUNSIT } });
+
+  const arabic = await upload(origin, { fields: { language: "ar", prompt: "names" } });
+  assert.equal(arabic.status, 200);
+  assert.deepEqual(await arabic.json(), { text: "مرحبا" });
+  assert.equal(vendorCalls[0].url, "https://api.munsit.example/api/v1/audio/transcribe");
+  assert.equal(vendorCalls[0].init.headers["x-api-key"], "munsit-secret-key");
+  assert.equal(vendorCalls[0].init.headers.authorization, undefined);
+  assert.equal(vendorCalls[0].init.body.get("model"), "munsit");
+  assert.equal(vendorCalls[0].init.body.get("prompt"), null);
+
+  const english = await upload(origin, { fields: { language: "en" } });
+  assert.equal(english.status, 200);
+  assert.equal(vendorCalls[1].url, "https://stt.vendor.example/openai/v1/audio/transcriptions");
+  assert.equal(vendorCalls[1].init.headers["x-api-key"], undefined);
+});
+
+test("without a Munsit key Arabic stays on the default vendor", async (t) => {
+  const { origin, vendorCalls } = await start(t, { vendor: vendorOk(5) });
+  assert.equal((await upload(origin, { fields: { language: "ar" } })).status, 200);
+  assert.equal(vendorCalls[0].url, "https://stt.vendor.example/openai/v1/audio/transcriptions");
+  assert.equal(vendorCalls[0].init.body.get("language"), "ar");
+});
+
+test("Munsit config needs its key and an https base; languages are a list", () => {
+  assert.equal(transcriptionConfigFromEnv({ HEADMASTER_STT_API_KEY: "k" }).munsit, null);
+  const config = transcriptionConfigFromEnv({ HEADMASTER_STT_API_KEY: "k", HEADMASTER_MUNSIT_API_KEY: "m", HEADMASTER_MUNSIT_LANGUAGES: "ar, ar-SA" });
+  assert.equal(config.munsit.baseUrl, "https://api.munsit.com/api/v1");
+  assert.deepEqual(config.munsit.languages, ["ar", "ar-sa"]);
+  assert.equal(transcriptionConfigFromEnv({ HEADMASTER_STT_API_KEY: "k", HEADMASTER_MUNSIT_API_KEY: "m", HEADMASTER_MUNSIT_BASE_URL: "http://x.example" }).munsit, null);
+});
