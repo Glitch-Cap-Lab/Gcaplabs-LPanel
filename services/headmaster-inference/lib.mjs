@@ -32,6 +32,7 @@ import {
   transcriptionCostMicroUsd,
   transcriptionReserveMicroUsd,
 } from "./transcription.mjs";
+import { SPEECH_PATH, callSpeechServer, prepareSpeech, speechCostMicroUsd } from "./speech.mjs";
 
 export const MAX_REQUEST_BYTES = 36 * 1024 * 1024;
 export const MAX_RESPONSE_BYTES = 32 * 1024 * 1024;
@@ -247,6 +248,8 @@ export function createInferenceService({
   walletMonthlyGrantMicroUsd = 0,
   // From transcriptionConfigFromEnv, or null: the transcription route is absent (404).
   transcription = null,
+  // From speechConfigFromEnv, or null: the speech route is absent (404).
+  speech = null,
 } = {}) {
   if (typeof assertionSecret !== "string" || Buffer.byteLength(assertionSecret) < 32)
     throw new Error("assertion_secret_invalid");
@@ -303,7 +306,8 @@ export function createInferenceService({
         (req.method === "GET" && url.pathname === MODEL_PATH) ||
         (req.method === "POST" && url.pathname === COMPLETION_PATH) ||
         (req.method === "POST" && url.pathname === REALTIME_SESSION_PATH) ||
-        (req.method === "POST" && url.pathname === TRANSCRIPTION_PATH && transcription)
+        (req.method === "POST" && url.pathname === TRANSCRIPTION_PATH && transcription) ||
+        (req.method === "POST" && url.pathname === SPEECH_PATH && speech)
       )
     ) {
       return safeError(res, 404, "not_found", "Route not found.", null);
@@ -366,6 +370,7 @@ export function createInferenceService({
     // reads assignments, operator provider rows, or operator quota counters.
     if (url.pathname === REALTIME_SESSION_PATH) return handleRealtime(res, body, claims);
     if (url.pathname === TRANSCRIPTION_PATH) return handleTranscription(req, res, body, claims);
+    if (url.pathname === SPEECH_PATH) return handleSpeech(req, res, body, claims);
     if (claims.byo_provider !== undefined) return handleByo(req, res, body, claims);
     let mapping;
     try {
@@ -945,6 +950,87 @@ export function createInferenceService({
       );
     }
     return sendJson(res, 200, { text: result.text }, requestId);
+  }
+
+  // Managed text-to-speech: the cost is known from the text before the call, so the hold is the
+  // charge; a failed call releases it. A free speech server (the default) never touches the wallet.
+  async function handleSpeech(req, res, body, claims) {
+    const requestId = claims.request_id;
+    if (claims.byo_provider !== undefined)
+      return safeError(res, 400, "speech_not_for_own_key", "Text-to-speech uses the Headmaster service.", requestId);
+    if (!/^application\/json(?:\s*;|$)/i.test(String(req.headers["content-type"] || "")))
+      return safeError(res, 415, "content_type_unsupported", "Text-to-speech requests must use application/json.", requestId);
+    const prepared = prepareSpeech(body, speech);
+    if (prepared.error)
+      return safeError(res, 400, "speech_invalid", "The text could not be spoken.", requestId);
+    const ownerId = claims.sub;
+    const cost = withMarkup(speechCostMicroUsd(prepared.chars, speech), walletOtherMarkupBps);
+    let walletHeld = false;
+    if (cost > 0 && walletStore && walletMode !== "off") {
+      const hold = await walletStore
+        .reserve({ ownerId, requestId, amountMicroUsd: cost, monthlyGrantMicroUsd: walletMonthlyGrantMicroUsd })
+        .catch((error) => {
+          logger.error?.("headmaster-inference wallet reserve failed", {
+            requestId,
+            code: error?.code || "wallet_unavailable",
+          });
+          return null;
+        });
+      if (walletMode === "on" && (!hold || !hold.allowed)) {
+        if (!hold)
+          return safeError(res, 503, "quota_unavailable", "Managed inference is temporarily unavailable.", requestId);
+        if (hold.reason === "org_suspended")
+          return safeError(res, 403, "organization_suspended", "This organization is switched off.", requestId);
+        return safeError(
+          res,
+          402,
+          "insufficient_credit",
+          "Your Headmaster wallet is out of credit. Add credit to continue.",
+          requestId,
+        );
+      }
+      walletHeld = Boolean(hold?.allowed);
+    }
+    const result = await callSpeechServer({
+      body: prepared.body,
+      config: speech,
+      fetchImpl,
+      signal: AbortSignal.timeout(requestTimeoutMs),
+    });
+    if (walletHeld) {
+      await walletStore
+        .settle({
+          ownerId,
+          requestId,
+          actualMicroUsd: result.error ? 0 : cost,
+          detail: { kind: "speech", model: speech.model, characters: prepared.chars },
+        })
+        .catch((error) =>
+          logger.error?.("headmaster-inference wallet settle failed", {
+            requestId,
+            code: error?.code || "wallet_unavailable",
+          }),
+        );
+    }
+    if (result.error === "bad_request")
+      return safeError(res, 400, "speech_invalid", "The text could not be spoken.", requestId);
+    if (result.error) {
+      logger.warn?.("headmaster-inference speech unavailable", { requestId, code: result.error });
+      return safeError(
+        res,
+        result.error === "timeout" ? 504 : 503,
+        "speech_unavailable",
+        "Text-to-speech is temporarily unavailable.",
+        requestId,
+      );
+    }
+    res.writeHead(200, {
+      "content-type": result.contentType,
+      "cache-control": "no-store",
+      "content-length": String(result.audio.length),
+      "x-request-id": requestId,
+    });
+    res.end(result.audio);
   }
 
   async function handleRealtime(res, body, claims) {
