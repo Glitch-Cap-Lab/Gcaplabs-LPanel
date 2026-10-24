@@ -1,0 +1,1 @@
+CREATE INDEX IF NOT EXISTS idx_agent_budgets_agent ON agent_budgets(agent_id)

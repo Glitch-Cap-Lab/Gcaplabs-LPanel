@@ -1,0 +1,1 @@
+ALTER TABLE agents ADD COLUMN IF NOT EXISTS headmaster_integration_desired_revision INTEGER NOT NULL DEFAULT 0

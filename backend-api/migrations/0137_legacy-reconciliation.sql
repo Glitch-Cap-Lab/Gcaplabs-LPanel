@@ -1,0 +1,1 @@
+DO $$ BEGIN ALTER TABLE agent_hub_listings ADD COLUMN share_target TEXT DEFAULT 'internal'; EXCEPTION WHEN duplicate_column THEN NULL; END $$

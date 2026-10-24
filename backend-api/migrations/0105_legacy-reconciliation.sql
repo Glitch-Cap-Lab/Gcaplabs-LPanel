@@ -1,0 +1,1 @@
+CREATE INDEX IF NOT EXISTS idx_backups_kind_created ON backups(kind, created_at DESC)

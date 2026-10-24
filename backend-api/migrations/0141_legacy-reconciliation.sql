@@ -1,0 +1,1 @@
+DO $$ BEGIN ALTER TABLE agent_hub_listings ADD COLUMN central_last_synced_at TIMESTAMP; EXCEPTION WHEN duplicate_column THEN NULL; END $$

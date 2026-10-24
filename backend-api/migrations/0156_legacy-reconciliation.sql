@@ -1,0 +1,1 @@
+UPDATE agent_hub_listings SET price = 'Free' WHERE price IS DISTINCT FROM 'Free'

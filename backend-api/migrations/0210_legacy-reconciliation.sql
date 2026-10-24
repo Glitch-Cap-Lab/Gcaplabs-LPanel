@@ -1,0 +1,1 @@
+DO $$ BEGIN ALTER TABLE platform_settings ADD COLUMN smtp_port INTEGER NOT NULL DEFAULT 587; EXCEPTION WHEN duplicate_column THEN NULL; END $$

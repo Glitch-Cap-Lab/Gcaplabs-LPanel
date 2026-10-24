@@ -1,0 +1,1 @@
+CREATE INDEX IF NOT EXISTS idx_agent_schedules_agent ON agent_schedules(agent_id)

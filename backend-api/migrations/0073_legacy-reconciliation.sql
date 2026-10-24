@@ -1,0 +1,1 @@
+DO $$ BEGIN ALTER TABLE platform_settings ADD COLUMN backup_ssh_remote_path TEXT NOT NULL DEFAULT '/backups/nora'; EXCEPTION WHEN duplicate_column THEN NULL; END $$

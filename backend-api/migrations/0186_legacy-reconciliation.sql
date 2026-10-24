@@ -1,0 +1,1 @@
+CREATE INDEX IF NOT EXISTS idx_workspace_invitations_workspace ON workspace_invitations(workspace_id, status, created_at DESC)

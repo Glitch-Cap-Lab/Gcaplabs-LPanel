@@ -1,0 +1,1 @@
+UPDATE agents SET template_payload = '{}'::jsonb WHERE template_payload IS NULL

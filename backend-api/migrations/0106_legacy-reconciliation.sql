@@ -1,0 +1,1 @@
+CREATE INDEX IF NOT EXISTS idx_backups_expires ON backups(expires_at) WHERE expires_at IS NOT NULL AND status <> 'deleted'

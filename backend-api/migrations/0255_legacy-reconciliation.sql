@@ -1,0 +1,1 @@
+ALTER TABLE platform_settings ALTER COLUMN smtp_from_name SET DEFAULT 'Headmaster'

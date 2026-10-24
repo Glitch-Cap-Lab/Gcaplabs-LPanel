@@ -1,0 +1,1 @@
+ALTER TABLE agents ALTER COLUMN sandbox_profile SET NOT NULL

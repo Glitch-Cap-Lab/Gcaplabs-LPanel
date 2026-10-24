@@ -1,0 +1,1 @@
+ALTER TABLE agents ALTER COLUMN runtime_family SET DEFAULT 'openclaw'

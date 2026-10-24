@@ -1,0 +1,1 @@
+UPDATE agent_hub_listings SET current_version = 1 WHERE current_version IS NULL

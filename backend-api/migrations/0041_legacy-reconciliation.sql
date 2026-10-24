@@ -1,0 +1,1 @@
+DO $$ BEGIN ALTER TABLE kubernetes_clusters ADD COLUMN policy_settings JSONB NOT NULL DEFAULT '{}'::jsonb; EXCEPTION WHEN duplicate_column THEN NULL; END $$

@@ -1,0 +1,1 @@
+DO $$ BEGIN ALTER TABLE container_stats ADD COLUMN disk_read_rate_mbps NUMERIC NOT NULL DEFAULT 0; EXCEPTION WHEN duplicate_column THEN NULL; END $$

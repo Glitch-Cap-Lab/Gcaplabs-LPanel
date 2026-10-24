@@ -1,0 +1,1 @@
+UPDATE agent_hub_listings SET runtime_family = 'openclaw' WHERE runtime_family IS NULL

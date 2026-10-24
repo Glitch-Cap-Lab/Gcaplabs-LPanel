@@ -1,0 +1,1 @@
+CREATE INDEX IF NOT EXISTS idx_usage_metrics_token_model ON usage_metrics(metric_type, (metadata->>'model'), recorded_at)

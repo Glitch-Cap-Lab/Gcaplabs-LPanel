@@ -1,0 +1,1 @@
+DO $$ BEGIN ALTER TABLE kubernetes_clusters ADD COLUMN policy_engine TEXT NOT NULL DEFAULT ''; EXCEPTION WHEN duplicate_column THEN NULL; END $$

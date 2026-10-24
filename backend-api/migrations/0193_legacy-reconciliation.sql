@@ -1,0 +1,1 @@
+CREATE INDEX IF NOT EXISTS idx_alert_rules_pattern_enabled ON alert_rules(event_pattern) WHERE enabled = true

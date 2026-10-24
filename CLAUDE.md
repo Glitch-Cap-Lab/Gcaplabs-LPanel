@@ -118,6 +118,10 @@ Two consequences that routinely confuse agents:
 
 Treat `workers/provisioner/backends/` and `agent-runtime/` as **shared-blast-radius zones**: an edit there changes both backend-api and the worker, so verify both consumers.
 
+### Database migrations
+
+Versioned schema migrations are numbered files in `backend-api/migrations/NNNN_name.sql`, pinned by `migrations.lock.json`. The runner records version = position, so never insert, rename, reorder or edit a locked file (a mid-list insert crashed backend-api on 23 Oct). To add one: create the next-numbered file, run `npm run migrations:lock` in `backend-api`, commit both. `__tests__/migrationFiles.test.ts` fails CI on any divergence from the lock.
+
 ### Key backend modules
 
 `backend-api/server.ts` wires: helmet, rate limiting, CORS, auth middleware (`middleware/auth.ts`), correlation IDs (`middleware/errorHandler.ts`), route modules under `routes/` (auth, agents, billing, channels, integrations, llmProviders, Agent Hub, monitoring, nemoclaw, workspaces, admin), gateway proxy (`gatewayProxy.ts` — exposes `createGatewayRouter` + `attachGatewayWS` for WebSocket upgrade), and background telemetry (`backgroundTasks.ts`, `scheduler.ts`).

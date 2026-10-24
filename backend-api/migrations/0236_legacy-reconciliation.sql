@@ -1,0 +1,1 @@
+DROP TRIGGER IF EXISTS trg_agents_remote_host_target ON agents
