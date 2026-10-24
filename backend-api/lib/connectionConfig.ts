@@ -290,6 +290,26 @@ function buildRedisConfig(env = process.env, overrides = {}) {
   return { url, options };
 }
 
+// Redis holds queue jobs and Headmaster launch/session records, so an open Redis is a
+// route to control-plane admin. Returns a problem description, or "" when the
+// configuration is acceptable. An external REDIS_URL brings its own credentials.
+function redisAuthProblem(env = process.env) {
+  if (String(env.REDIS_URL || "").trim() || String(env.REDIS_PASSWORD || "").trim()) return "";
+  return "REDIS_PASSWORD is not set, so Redis accepts unauthenticated commands.";
+}
+
+// Exits when NORA_REQUIRE_REDIS_AUTH=true and Redis is open; otherwise warns in production.
+function enforceRedisAuth(env = process.env, log = console, exit = process.exit) {
+  const problem = redisAuthProblem(env);
+  if (!problem) return;
+  if (parseBoolean(env.NORA_REQUIRE_REDIS_AUTH)) {
+    log.error(`FATAL: ${problem} Set REDIS_PASSWORD (and the same value on the redis service).`);
+    exit(1);
+  } else if (env.NODE_ENV === "production") {
+    log.warn(`WARNING: ${problem} Set NORA_REQUIRE_REDIS_AUTH=true to refuse to boot this way.`);
+  }
+}
+
 function createRedisClient(IORedis, env = process.env, overrides = {}) {
   const { url, options } = buildRedisConfig(env, overrides);
   return url ? new IORedis(url, options) : new IORedis(options);
@@ -302,6 +322,8 @@ module.exports = {
   buildRedisConfig,
   buildRedisTls,
   createRedisClient,
+  redisAuthProblem,
+  enforceRedisAuth,
   hasExplicitPostgresSslMode,
   normalizePostgresConnectionString,
   parseBoolean,

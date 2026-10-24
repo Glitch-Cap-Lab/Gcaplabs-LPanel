@@ -10,13 +10,30 @@
 //     The runtime home volume (the whole account, all of its bots) is limited to the agent record's disk_gb.
 //     Needs /var/lib/docker on XFS mounted with pquota; leave unset otherwise.
 //
-// Both are off by default, so an unconfigured install behaves exactly as before.
+// Per-runtime networks are required: a provisioner without them refuses to start a
+// runtime (assertRuntimeIsolation), so one forgotten env var cannot put every account on
+// a shared network. NORA_ALLOW_SHARED_AGENT_NETWORK=true is the explicit override for
+// development and single-tenant installs. Volume quota stays off unless configured.
 
 const NETWORK_LABEL = "nora.runtime.network";
 const AGENT_LABEL = "nora.agent.id";
 
 function perRuntimeNetworkEnabled(env = process.env) {
   return String(env.NORA_AGENT_NETWORK_ISOLATION || "").trim().toLowerCase() === "per-runtime";
+}
+
+function sharedNetworkAllowed(env = process.env) {
+  return String(env.NORA_ALLOW_SHARED_AGENT_NETWORK || "").trim().toLowerCase() === "true";
+}
+
+// Called before a runtime's network is chosen. Throws instead of falling back to the
+// shared network, so the failure is visible and the runtime is never created.
+function assertRuntimeIsolation(env = process.env) {
+  if (perRuntimeNetworkEnabled(env) || sharedNetworkAllowed(env)) return;
+  throw new Error(
+    "Refusing to start a runtime without per-runtime network isolation. " +
+      "Set NORA_AGENT_NETWORK_ISOLATION=per-runtime (or NORA_ALLOW_SHARED_AGENT_NETWORK=true to accept a shared network).",
+  );
 }
 
 function volumeQuotaMode(env = process.env) {
@@ -156,6 +173,8 @@ async function removeAgentNetwork(docker, agentId, peers = agentNetworkPeers()) 
 
 module.exports = {
   perRuntimeNetworkEnabled,
+  sharedNetworkAllowed,
+  assertRuntimeIsolation,
   volumeQuotaEnabled,
   volumeQuotaMode,
   findOverQuotaVolumes,

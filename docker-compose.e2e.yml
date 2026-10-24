@@ -118,8 +118,16 @@ services:
 
   redis:
     image: redis:7
+    # Password-protected: queue jobs and Headmaster session records live here. Without
+    # REDIS_PASSWORD (a throwaway dev stack) it starts open and the backend warns.
+    env_file:
+      - ${NORA_ENV_FILE:-.env}
+    command:
+      - sh
+      - -c
+      - 'if [ -n "$$REDIS_PASSWORD" ]; then exec redis-server --requirepass "$$REDIS_PASSWORD"; else exec redis-server; fi'
     healthcheck:
-      test: ["CMD", "redis-cli", "ping"]
+      test: ["CMD-SHELL", 'REDISCLI_AUTH="$$REDIS_PASSWORD" redis-cli ping | grep -q PONG']
       interval: 10s
       timeout: 5s
       retries: 5

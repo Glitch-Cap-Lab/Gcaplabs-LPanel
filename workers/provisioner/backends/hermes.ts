@@ -24,6 +24,7 @@ const {
 const {
   ensureAgentNetwork,
   perRuntimeNetworkEnabled,
+  assertRuntimeIsolation,
   removeAgentNetwork,
   volumeQuotaOptions,
 } = require("./agentIsolation");
@@ -200,6 +201,12 @@ class HermesBackend extends DockerBackend {
     return Object.keys(bindings).length ? bindings : undefined;
   }
 
+  // Every local runtime must sit on its own network; a remote Docker host has no
+  // control-plane peers to attach, so RemoteHermesBackend overrides this.
+  _assertNetworkIsolation() {
+    assertRuntimeIsolation();
+  }
+
   async create(config) {
     const {
       id,
@@ -314,6 +321,7 @@ class HermesBackend extends DockerBackend {
 
     // Per-agent mode puts the runtime alone on its own network (plus the
     // configured control-plane peers), so runtimes cannot reach each other.
+    this._assertNetworkIsolation();
     const isolated = perRuntimeNetworkEnabled();
     const composeNetwork = isolated
       ? await ensureAgentNetwork(this.docker, id)
