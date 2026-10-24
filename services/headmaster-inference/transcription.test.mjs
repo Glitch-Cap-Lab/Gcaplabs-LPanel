@@ -16,7 +16,7 @@ const SECRET = "s".repeat(48);
 const OWNER = "11111111-1111-4111-8111-111111111111";
 const NOW = 1_800_000_000_000;
 const VENDOR_KEY = "vendor-secret-key";
-const CONFIG = { apiKey: VENDOR_KEY, baseUrl: "https://stt.vendor.example/openai/v1", model: "whisper-large-v3-turbo", microUsdPerHour: 40_000 };
+const CONFIG = { apiKey: VENDOR_KEY, baseUrl: "https://stt.vendor.example/openai/v1", model: "whisper-large-v3-turbo", microUsdPerHour: 40_000, responseFormat: "verbose_json" };
 
 function token(body, extra = {}) {
   const iat = Math.floor(NOW / 1000);
@@ -94,6 +94,25 @@ test("holds from the upload size, settles on measured seconds at the other-model
   const expected = Math.ceil(transcriptionCostMicroUsd(30, CONFIG) * 1.1);
   assert.equal(wallet.log.settles[0].actualMicroUsd, expected);
   assert.equal(wallet.log.settles[0].detail.kind, "transcription");
+});
+
+test("a vendor that reports usage.seconds (OpenRouter shape) is billed on it", async (t) => {
+  const wallet = fakeWallet();
+  const { origin, vendorCalls } = await start(t, {
+    vendor: () => new Response(JSON.stringify({ text: "hi", usage: { seconds: 60 } }), { status: 200 }),
+    wallet,
+    transcription: { ...CONFIG, responseFormat: "json" },
+  });
+  assert.equal((await upload(origin)).status, 200);
+  assert.equal(vendorCalls[0].init.body.get("response_format"), "json");
+  assert.equal(wallet.log.settles[0].actualMicroUsd, Math.ceil(transcriptionCostMicroUsd(60, CONFIG) * 1.1));
+});
+
+test("a vendor that reports no duration is billed on the clip size, never zero", async (t) => {
+  const wallet = fakeWallet();
+  const { origin } = await start(t, { vendor: () => new Response(JSON.stringify({ text: "hi" }), { status: 200 }), wallet });
+  assert.equal((await upload(origin)).status, 200);
+  assert.ok(wallet.log.settles[0].actualMicroUsd > 0);
 });
 
 test("short clips are billed the vendor minimum", () => {

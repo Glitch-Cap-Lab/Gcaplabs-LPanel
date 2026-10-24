@@ -27,6 +27,7 @@ import {
 import {
   TRANSCRIPTION_PATH,
   callVendor,
+  estimatedSeconds,
   prepareTranscription,
   transcriptionCostMicroUsd,
   transcriptionReserveMicroUsd,
@@ -913,7 +914,7 @@ export function createInferenceService({
     });
     if (walletHeld) {
       // A failed vendor call releases the hold at no charge; a successful one is billed on measured audio.
-      const seconds = result.error ? 0 : result.seconds;
+      const seconds = result.error ? 0 : Number.isFinite(result.seconds) ? result.seconds : estimatedSeconds(prepared.fileBytes);
       const charged = result.error
         ? 0
         : withMarkup(transcriptionCostMicroUsd(seconds, transcription), walletOtherMarkupBps);

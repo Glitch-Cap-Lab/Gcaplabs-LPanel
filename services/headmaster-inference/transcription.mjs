@@ -30,9 +30,16 @@ export function transcriptionConfigFromEnv(env = process.env) {
     apiKey,
     baseUrl,
     model: String(env.HEADMASTER_STT_MODEL || "whisper-large-v3-turbo").trim(),
+    // verbose_json carries the measured duration on Groq and OpenAI; OpenRouter answers plain "json" with a usage object.
+    responseFormat: String(env.HEADMASTER_STT_RESPONSE_FORMAT || "verbose_json").trim(),
     // Vendor price, USD per audio hour (Groq whisper-large-v3-turbo: 0.04). Charged at the wallet's other-model markup.
     microUsdPerHour: Math.round((Number.isFinite(price) && price >= 0 ? price : 0.04) * 1_000_000),
   };
+}
+
+// Used to bill a successful call whose vendor reported no duration: the clip's size at a typical compressed bitrate.
+export function estimatedSeconds(byteLength) {
+  return byteLength / 4_000;
 }
 
 export function transcriptionCostMicroUsd(seconds, config) {
@@ -58,13 +65,21 @@ export async function prepareTranscription(body, contentType, config) {
   const form = new FormData();
   form.set("file", file, file.name || "audio.webm");
   form.set("model", config.model);
-  // verbose_json carries the measured duration, which is what we bill.
-  form.set("response_format", "verbose_json");
+  form.set("response_format", config.responseFormat);
   const language = incoming.get("language");
   if (typeof language === "string" && LANGUAGE.test(language)) form.set("language", language);
   const prompt = incoming.get("prompt");
   if (typeof prompt === "string" && prompt) form.set("prompt", prompt.slice(0, MAX_PROMPT_CHARS));
   return { form, fileBytes: file.size };
+}
+
+// The vendor's own measurement of the audio, whichever shape it uses; NaN when it gave none.
+function measuredSeconds(json) {
+  for (const value of [json.duration, json.usage?.seconds, json.usage?.duration, json.usage?.audio_seconds]) {
+    const n = Number(value);
+    if (Number.isFinite(n) && n >= 0) return n;
+  }
+  return Number.NaN;
 }
 
 /** Resolves { text, seconds } or { error: "bad_request" | "unavailable" | "timeout" }. Never throws. */
@@ -81,7 +96,7 @@ export async function callVendor({ form, config, fetchImpl = fetch, signal }) {
       return { error: upstream.status >= 500 || upstream.status === 429 ? "unavailable" : "bad_request" };
     const json = await upstream.json();
     if (typeof json?.text !== "string") return { error: "unavailable" };
-    return { text: json.text, seconds: Number(json.duration) };
+    return { text: json.text, seconds: measuredSeconds(json) };
   } catch (error) {
     return { error: signal?.aborted || error?.name === "TimeoutError" ? "timeout" : "unavailable" };
   }
