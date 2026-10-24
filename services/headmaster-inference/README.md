@@ -274,6 +274,24 @@ uses the same `HEADMASTER_INFERENCE_SUPABASE_URL` and service-role key as the
 assignments. Starting in `shadow` or `on` without them fails startup. Personal-key
 traffic is never charged. Turn `on` only after the site migrations are applied.
 
+## Speech (managed STT and TTS)
+
+Cloud runtimes use their stock `stt.openai` and `tts.openai` providers pointed at the account
+inference host. Admission forwards `POST /v1/audio/transcriptions` and `POST /v1/audio/speech` here
+under the same signed assertion as chat; personal-key (byo) assertions are refused on both.
+
+- Transcription (`transcription.mjs`): `HEADMASTER_STT_API_KEY` turns it on; `HEADMASTER_STT_BASE_URL`
+  (default Groq), `HEADMASTER_STT_MODEL`, `HEADMASTER_STT_USD_PER_HOUR`. Held from the upload size,
+  settled on the measured audio seconds.
+- Speech (`speech.mjs`): `HEADMASTER_TTS_BASE_URL` turns it on, for example the private Kokoro
+  container at `http://headmaster-kokoro:8880/v1`. Plain http is accepted only for a compose service
+  name or a private address. `HEADMASTER_TTS_MODEL` (default `kokoro`), `HEADMASTER_TTS_VOICE`
+  (default `af_heart`, used when the request names no valid voice), `HEADMASTER_TTS_API_KEY` for a
+  hosted server, `HEADMASTER_TTS_USD_PER_MILLION_CHARS` (default 0: no wallet hold). Only the text,
+  voice, format and speed reach the server; the model is always the operator's.
+
+Both are charged at the other-model markup when priced.
+
 ## Limits and behavior
 
 - Only allowlisted provider/model pairs are returned. The allowed models are

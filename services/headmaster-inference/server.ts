@@ -21,6 +21,7 @@ const { createProviderKeyResolver } = require("./byo.mjs");
 const { createInferenceService } = require("./lib.mjs");
 const { createWalletStore } = require("./wallet.mjs");
 const { transcriptionConfigFromEnv } = require("./transcription.mjs");
+const { speechConfigFromEnv } = require("./speech.mjs");
 const { tierModelsFromEnv, priceTableFromEnv } = require("./policy.mjs");
 
 function positiveInt(value, fallback, max) {
@@ -150,6 +151,7 @@ async function main() {
     walletMarkupBps: positiveInt(process.env.HEADMASTER_INFERENCE_WALLET_MARKUP_BPS, 10_000, 100_000),
     walletOtherMarkupBps: positiveInt(process.env.HEADMASTER_INFERENCE_WALLET_OTHER_MARKUP_BPS, 10_000, 100_000),
     transcription: transcriptionConfigFromEnv(process.env),
+    speech: speechConfigFromEnv(process.env),
     walletMonthlyGrantMicroUsd: usdToMicro(process.env.HEADMASTER_INFERENCE_USD_PER_MONTH, 2),
     replayStore: createRedisReplayStore(redis),
     maxRequestBytes: positiveInt(
