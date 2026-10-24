@@ -283,6 +283,29 @@ test("public Docker RPC and exec phases cancel the actual transport instead of w
   }
 });
 
+test("preflight collects unreferenced installs on a large store and re-measures, but leaves a small one alone", async t => {
+  const f = await fixture(t), GB = 1024 ** 3;
+  const adapter = (sizesKb, gcFails = false) => {
+    const calls = []; const a = new ProtectedReleaseDocker({ docker: { getContainer: () => ({}) } });
+    a.exec = async (_c, cmd, _u, timeoutMs) => {
+      calls.push(cmd.join(" "));
+      if (cmd[0] === "du") return `${sizesKb.shift()} /opt/data/installs`;
+      if (gcFails) throw new Error("PROTECTED_RELEASE_PROBE_FAILED");
+      assert.ok(timeoutMs > 60000); return "";
+    };
+    return { a, calls };
+  };
+  const big = adapter([2 * GB / 1024]);
+  assert.equal(await big.a.collectInstalls({ container_id: "c" }, 8 * GB), 2 * GB);
+  assert.deepEqual(big.calls, ["/opt/hermes/.venv/bin/hermes pm gc", "du -sk /opt/data/installs"]);
+  const small = adapter([]);
+  assert.equal(await small.a.collectInstalls({ container_id: "c" }, GB / 2), GB / 2);
+  assert.deepEqual(small.calls, []);
+  const broken = adapter([], true);
+  assert.equal(await broken.a.collectInstalls({ container_id: "c" }, 8 * GB), 8 * GB);
+  assert.equal(f.adapter instanceof ProtectedReleaseDocker, true);
+});
+
 test("a lost candidate-create ACK never starts or creates again until fresh explicit recovery", async t => {
   const f = await fixture(t), original = f.docker.createContainer.bind(f.docker);
   // Shorten only the candidate-create call; a global 25 ms budget flakes on a loaded host.
