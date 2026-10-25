@@ -1,0 +1,32 @@
+name: Repo hygiene
+
+# Fails a PR that adds a root-level .md beyond README, LICENSE, NOTICE, CONTRIBUTING, SECURITY,
+# AGENTS.md, CLAUDE.md, GEMINI.md and CHANGELOG, a file over 1 MB, a components-*.md or
+# Ultimate-*.md dump, or an _archive folder. About 10 seconds, no install.
+# Not path-filtered: a PR that only adds a root .md is exactly what it exists to catch.
+
+on:
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: repo-hygiene-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  hygiene:
+    name: no new clutter
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          fetch-depth: 2
+          persist-credentials: false
+      - name: Check what the PR adds
+        run: python3 scripts/check-repo-hygiene.py --base HEAD^1
