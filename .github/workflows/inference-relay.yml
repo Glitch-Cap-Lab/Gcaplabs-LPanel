@@ -8,6 +8,10 @@ name: Inference relay
 on:
   pull_request:
     types: [opened, synchronize, reopened, ready_for_review]
+    # Docs-only edits run nothing here. repo-hygiene.yml still runs on every PR.
+    paths-ignore:
+      - '**/*.md'
+      - 'docs/**'
   workflow_dispatch:
 
 permissions:
