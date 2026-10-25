@@ -1,7 +1,7 @@
 // Schema contract for the declarative immutable release input (plan W7). Realistic values only.
 const test = require("node:test");
 const assert = require("node:assert/strict");
-const { validateManifest } = require("./protectedReleaseManifest");
+const { validateManifest, expectedCandidateEnv, envFingerprint } = require("./protectedReleaseManifest");
 
 const clone = value => JSON.parse(JSON.stringify(value));
 const hex = (char, n) => char.repeat(n);
@@ -89,4 +89,16 @@ test("service env delta is a closed allowlist that cannot carry secrets", () => 
   // The error carries only a fixed code, never the offending value.
   try { const input = release(); input.env_delta.set = { API_SERVER_KEY: "sk-live-0123456789abcdef" }; validateManifest(input); assert.fail("must refuse"); }
   catch (error) { assert.ok(!String(error.message).includes("sk-live")); }
+});
+
+test("a new image may add env defaults of its own, never override the bot's env, and never add loader hooks", () => {
+  const old = ["HERMES_HOME=/opt/data", "PATH=/usr/bin"];
+  const image = ["PATH=/image/bin", "HERMES_DASHBOARD_FILES_ROOT=/opt/data/workspace", "LD_PRELOAD=/opt/data/private.so", "PYTHONPATH=/opt/data", "PYTHONHOME=/x", "LD_AUDIT=/a"];
+  const expected = expectedCandidateEnv(old, image, { HERMES_BOT_DESKTOP: "1" });
+  assert.deepEqual([...expected].sort(), ["HERMES_BOT_DESKTOP=1", "HERMES_DASHBOARD_FILES_ROOT=/opt/data/workspace", "HERMES_HOME=/opt/data", "PATH=/usr/bin"]);
+  // What Docker would give the container for that create call differs from the expectation only when a hook sneaks in.
+  const docker = ["HERMES_HOME=/opt/data", "PATH=/usr/bin", "HERMES_DASHBOARD_FILES_ROOT=/opt/data/workspace", "HERMES_BOT_DESKTOP=1"];
+  assert.equal(envFingerprint(docker), envFingerprint(expected));
+  assert.notEqual(envFingerprint([...docker, "LD_PRELOAD=/opt/data/private.so"]), envFingerprint(expected));
+  assert.notEqual(envFingerprint([...docker, "HERMES_EXTRA=1"]), envFingerprint(expected));
 });
