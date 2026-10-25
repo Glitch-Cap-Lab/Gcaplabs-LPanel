@@ -278,7 +278,8 @@ charged.
 
 Cloud runtimes use their stock `stt.openai` and `tts.openai` providers pointed at the account
 inference host. Admission forwards `POST /v1/audio/transcriptions` and `POST /v1/audio/speech` here
-under the same signed assertion as chat; personal-key (byo) assertions are refused on both.
+under the same signed assertion as chat; personal-key (byo) assertions are refused on both. Admission
+also forwards `GET /v1/audio/voices` (the speech catalog below).
 
 - Transcription (`transcription.mjs`): `HEADMASTER_STT_API_KEY` turns it on; `HEADMASTER_STT_BASE_URL`
   (default Groq), `HEADMASTER_STT_MODEL`, `HEADMASTER_STT_USD_PER_HOUR`. Held from the upload size,
@@ -296,8 +297,29 @@ under the same signed assertion as chat; personal-key (byo) assertions are refus
   hosted server, `HEADMASTER_TTS_USD_PER_MILLION_CHARS` (default 0: no wallet hold). Only the text,
   voice, format and speed reach the server; the model is always the operator's. Any voice the
   server knows passes through, so every Kokoro voice (all its languages) is selectable.
+  Munsit (Arabic): with `HEADMASTER_MUNSIT_API_KEY` set (the dictation key; `HEADMASTER_MUNSIT_BASE_URL`
+  is shared too), a request whose `model` is `munsit` (the runtime's own `tts.openai.model`) goes to
+  Munsit's `/text-to-speech/{model}` with the voice as its `voice_id`. No model or voice is built in:
+  `HEADMASTER_MUNSIT_TTS_MODEL` and `HEADMASTER_MUNSIT_TTS_VOICE` are optional, and when unset the request
+  gets the first model and the first Arabic voice of the catalog below. A requested voice the catalog does
+  not know (for example a Kokoro voice left over from another engine) also gets that default.
+  `HEADMASTER_MUNSIT_TTS_STABILITY` (0 to 1, default 0.5) and `HEADMASTER_MUNSIT_TTS_USD_PER_MILLION_CHARS`
+  (default 0: no wallet hold). Munsit answers WAV only, so the relay converts it with ffmpeg
+  (`transcode.mjs`; the image installs it) to the format the runtime asked for: mp3, Ogg Opus (`opus`, for
+  Telegram and WhatsApp voice bubbles), aac, flac or raw pcm; `wav` passes through. Speed is held to
+  Munsit's 0.7 to 1.2 range. The route exists when either engine is configured; without the speech server,
+  any other model is refused.
+- Speech catalog (`speech-catalog.mjs`): `GET /v1/audio/voices`, same signed assertion, no body. Returns
+  `{ data: { engines: [{ id, label, voices, models, default_voice }], default_engine } }`: each engine's
+  voices read from the engine itself (Munsit `GET /voices` and `/models`; a speech server's
+  `GET {base}/audio/voices`), every voice with `id, name, gender, dialects, languages, sample_url`, Arabic
+  first. Cached for ten minutes; a failed refresh serves the last good answer. Clients render their voice
+  and engine pickers from it, so no client lists a voice or an engine.
 
-Both are charged at the other-model markup when priced.
+Munsit (dictation and speech) is charged at the Headmaster markup (`walletMarkupBps`, the Lite and Pro
+tier markup), applied once; every other engine at the other-model markup when priced. The owner's rates
+(Munsit Basic plan, $0.00004 a credit): `HEADMASTER_MUNSIT_USD_PER_HOUR=0.24` (100 credits a minute) and
+`HEADMASTER_MUNSIT_TTS_USD_PER_MILLION_CHARS=80` (2 credits a character), raw cost before the markup.
 
 ## Limits and behavior
 

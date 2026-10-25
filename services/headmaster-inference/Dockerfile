@@ -1,5 +1,8 @@
 FROM node:24-alpine
 
+# Speech engines that answer WAV only are converted to mp3 or Ogg Opus here (transcode.mjs).
+RUN apk add --no-cache ffmpeg
+
 WORKDIR /app
 COPY services/headmaster-inference/package.json services/headmaster-inference/package-lock.json services/headmaster-inference/
 RUN npm ci --prefix /app/services/headmaster-inference --omit=dev --no-audit --no-fund

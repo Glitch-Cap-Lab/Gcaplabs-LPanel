@@ -33,6 +33,8 @@ import {
   transcriptionReserveMicroUsd,
 } from "./transcription.mjs";
 import { SPEECH_PATH, callSpeechServer, prepareSpeech, speechCostMicroUsd } from "./speech.mjs";
+import { SPEECH_CATALOG_PATH, createSpeechCatalog } from "./speech-catalog.mjs";
+import { transcodeWav } from "./transcode.mjs";
 
 export const MAX_REQUEST_BYTES = 36 * 1024 * 1024;
 export const MAX_RESPONSE_BYTES = 32 * 1024 * 1024;
@@ -250,6 +252,8 @@ export function createInferenceService({
   transcription = null,
   // From speechConfigFromEnv, or null: the speech route is absent (404).
   speech = null,
+  // Converts an engine's WAV to the requested format (ffmpeg); injectable for tests.
+  transcode = transcodeWav,
 } = {}) {
   if (typeof assertionSecret !== "string" || Buffer.byteLength(assertionSecret) < 32)
     throw new Error("assertion_secret_invalid");
@@ -294,6 +298,9 @@ export function createInferenceService({
     ? async (ownerId) => accountProviderMap.get(ownerId) ?? null
     : resolveAssignment;
   const replay = replayStore || createReplayCache({ now });
+  const speechCatalog = speech ? createSpeechCatalog({ config: speech, fetchImpl, now }) : null;
+  // Munsit is billed at the Headmaster markup (dictation and speech alike); every other engine at its own.
+  const speechMarkupBps = (kind) => (kind === "munsit" ? walletMarkupBps : walletOtherMarkupBps);
 
   async function handle(req, res) {
     const url = new URL(req.url || "/", "http://inference.internal");
@@ -307,7 +314,8 @@ export function createInferenceService({
         (req.method === "POST" && url.pathname === COMPLETION_PATH) ||
         (req.method === "POST" && url.pathname === REALTIME_SESSION_PATH) ||
         (req.method === "POST" && url.pathname === TRANSCRIPTION_PATH && transcription) ||
-        (req.method === "POST" && url.pathname === SPEECH_PATH && speech)
+        (req.method === "POST" && url.pathname === SPEECH_PATH && speech) ||
+        (req.method === "GET" && url.pathname === SPEECH_CATALOG_PATH && speech)
       )
     ) {
       return safeError(res, 404, "not_found", "Route not found.", null);
@@ -371,6 +379,7 @@ export function createInferenceService({
     if (url.pathname === REALTIME_SESSION_PATH) return handleRealtime(res, body, claims);
     if (url.pathname === TRANSCRIPTION_PATH) return handleTranscription(req, res, body, claims);
     if (url.pathname === SPEECH_PATH) return handleSpeech(req, res, body, claims);
+    if (url.pathname === SPEECH_CATALOG_PATH) return sendJson(res, 200, { data: await speechCatalog.load() });
     if (claims.byo_provider !== undefined) return handleByo(req, res, body, claims);
     let mapping;
     try {
@@ -885,7 +894,7 @@ export function createInferenceService({
           requestId,
           amountMicroUsd: Math.max(
             1,
-            withMarkup(transcriptionReserveMicroUsd(prepared.fileBytes, prepared.vendor), walletOtherMarkupBps),
+            withMarkup(transcriptionReserveMicroUsd(prepared.fileBytes, prepared.vendor), speechMarkupBps(prepared.vendor.kind)),
           ),
           monthlyGrantMicroUsd: walletMonthlyGrantMicroUsd,
         })
@@ -922,7 +931,7 @@ export function createInferenceService({
       const seconds = result.error ? 0 : Number.isFinite(result.seconds) ? result.seconds : estimatedSeconds(prepared.fileBytes);
       const charged = result.error
         ? 0
-        : withMarkup(transcriptionCostMicroUsd(seconds, prepared.vendor), walletOtherMarkupBps);
+        : withMarkup(transcriptionCostMicroUsd(seconds, prepared.vendor), speechMarkupBps(prepared.vendor.kind));
       await walletStore
         .settle({
           ownerId,
@@ -964,7 +973,15 @@ export function createInferenceService({
     if (prepared.error)
       return safeError(res, 400, "speech_invalid", "The text could not be spoken.", requestId);
     const ownerId = claims.sub;
-    const cost = withMarkup(speechCostMicroUsd(prepared.chars, speech), walletOtherMarkupBps);
+    let { engine, body: speechBody } = prepared;
+    if (engine.kind === "munsit") {
+      const resolved = await speechCatalog.munsitResolve(speechBody.voice_id);
+      if (!resolved.model || !resolved.voice)
+        return safeError(res, 503, "speech_unavailable", "Text-to-speech is temporarily unavailable.", requestId);
+      engine = { ...engine, model: resolved.model };
+      speechBody = { ...speechBody, voice_id: resolved.voice };
+    }
+    const cost = withMarkup(speechCostMicroUsd(prepared.chars, engine), speechMarkupBps(engine.kind));
     let walletHeld = false;
     if (cost > 0 && walletStore && walletMode !== "off") {
       const hold = await walletStore
@@ -992,10 +1009,12 @@ export function createInferenceService({
       walletHeld = Boolean(hold?.allowed);
     }
     const result = await callSpeechServer({
-      body: prepared.body,
-      config: speech,
+      body: speechBody,
+      config: engine,
+      format: prepared.format,
       fetchImpl,
       signal: AbortSignal.timeout(requestTimeoutMs),
+      transcode,
     });
     if (walletHeld) {
       await walletStore
@@ -1003,7 +1022,7 @@ export function createInferenceService({
           ownerId,
           requestId,
           actualMicroUsd: result.error ? 0 : cost,
-          detail: { kind: "speech", model: speech.model, characters: prepared.chars },
+          detail: { kind: "speech", model: engine.model, characters: prepared.chars },
         })
         .catch((error) =>
           logger.error?.("headmaster-inference wallet settle failed", {

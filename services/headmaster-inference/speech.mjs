@@ -4,8 +4,13 @@
 // (Kokoro on the private network by default, any OpenAI-compatible /audio/speech otherwise) and
 // returns the audio. The model is always the operator's choice. A priced server is metered to the
 // wallet per input character, like transcription per second.
+//
+// The person picks the engine the upstream way, with the provider's model setting (tts.openai.model,
+// sent as the OpenAI `model` field), like dictation: "munsit" goes to Munsit (Arabic) when its key is
+// set, anything else to the speech server above. The voice is then a Munsit voice id.
 
 import { isIP } from "node:net";
+import { needsTranscode, transcodeWav } from "./transcode.mjs";
 
 export const SPEECH_PATH = "/v1/audio/speech";
 export const SPEECH_MAX_INPUT_CHARS = 4096;
@@ -21,34 +26,69 @@ function privateHost(hostname) {
   return a === 10 || a === 127 || (a === 172 && b >= 16 && b <= 31) || (a === 192 && b === 168);
 }
 
-export function speechConfigFromEnv(env = process.env) {
+function microUsdPerMillion(raw) {
+  const price = Number.parseFloat(String(raw ?? ""));
+  return Math.round((Number.isFinite(price) && price >= 0 ? price : 0) * 1_000_000);
+}
+
+function speechServerFromEnv(env) {
   const raw = String(env.HEADMASTER_TTS_BASE_URL || "").trim();
   if (!raw) return null;
-  let baseUrl;
   try {
     const parsed = new URL(raw);
     if (parsed.username || parsed.password || parsed.search || parsed.hash) return null;
     if (parsed.protocol !== "https:" && !(parsed.protocol === "http:" && privateHost(parsed.hostname))) return null;
+    return {
+      baseUrl: `${parsed.origin}${parsed.pathname}`.replace(/\/+$/, ""),
+      apiKey: String(env.HEADMASTER_TTS_API_KEY || "").trim() || null,
+      model: String(env.HEADMASTER_TTS_MODEL || "kokoro").trim(),
+      voice: String(env.HEADMASTER_TTS_VOICE || "af_heart").trim(),
+      // Kokoro on our own server costs nothing per request; a paid server sets its USD per million characters.
+      microUsdPerMillionChars: microUsdPerMillion(env.HEADMASTER_TTS_USD_PER_MILLION_CHARS),
+    };
+  } catch {
+    return null;
+  }
+}
+
+// Munsit (Arabic): shares the dictation key and base URL. x-api-key auth, POST {base}/text-to-speech/{model},
+// JSON { voice_id, text, stability, speed? }, answer a complete WAV file. Voice ids come from its own voice
+// list (the catalog); a request that names none, or one the catalog does not know, gets the default.
+function munsitFromEnv(env) {
+  const apiKey = String(env.HEADMASTER_MUNSIT_API_KEY || "").trim();
+  if (!apiKey) return null;
+  let baseUrl;
+  try {
+    const parsed = new URL(String(env.HEADMASTER_MUNSIT_BASE_URL || "https://api.munsit.com/api/v1").trim());
+    if (parsed.protocol !== "https:" || parsed.username || parsed.password || parsed.search || parsed.hash) return null;
     baseUrl = `${parsed.origin}${parsed.pathname}`.replace(/\/+$/, "");
   } catch {
     return null;
   }
-  const price = Number.parseFloat(String(env.HEADMASTER_TTS_USD_PER_MILLION_CHARS ?? ""));
+  const stability = Number.parseFloat(String(env.HEADMASTER_MUNSIT_TTS_STABILITY ?? ""));
   return {
     baseUrl,
-    apiKey: String(env.HEADMASTER_TTS_API_KEY || "").trim() || null,
-    model: String(env.HEADMASTER_TTS_MODEL || "kokoro").trim(),
-    voice: String(env.HEADMASTER_TTS_VOICE || "af_heart").trim(),
-    // Kokoro on our own server costs nothing per request; a paid server sets its USD per million characters.
-    microUsdPerMillionChars: Math.round((Number.isFinite(price) && price >= 0 ? price : 0) * 1_000_000),
+    apiKey,
+    // Unset means the first model and voice of the engine's own catalog (speech-catalog.mjs).
+    model: String(env.HEADMASTER_MUNSIT_TTS_MODEL || "").trim() || null,
+    voice: String(env.HEADMASTER_MUNSIT_TTS_VOICE || "").trim() || null,
+    stability: Number.isFinite(stability) && stability >= 0 && stability <= 1 ? stability : 0.5,
+    microUsdPerMillionChars: microUsdPerMillion(env.HEADMASTER_MUNSIT_TTS_USD_PER_MILLION_CHARS),
   };
+}
+
+/** { server, munsit }, either of which may be null; null when neither is configured (the route is absent). */
+export function speechConfigFromEnv(env = process.env) {
+  const server = speechServerFromEnv(env);
+  const munsit = munsitFromEnv(env);
+  return server || munsit ? { server, munsit } : null;
 }
 
 export function speechCostMicroUsd(chars, config) {
   return Math.ceil((chars * config.microUsdPerMillionChars) / 1_000_000);
 }
 
-/** Validate the runtime's request. Returns { body, chars } (vendor JSON) or { error: "bad_request" }. */
+/** Validate the runtime's request. Returns { engine, body, chars } (vendor JSON) or { error: "bad_request" }. */
 export function prepareSpeech(buffer, config) {
   let incoming;
   try {
@@ -61,25 +101,45 @@ export function prepareSpeech(buffer, config) {
   if (typeof input !== "string" || !input.trim() || input.length > SPEECH_MAX_INPUT_CHARS) return { error: "bad_request" };
   const format = incoming.response_format === undefined ? "mp3" : incoming.response_format;
   if (!FORMATS.has(format)) return { error: "bad_request" };
-  const voice = typeof incoming.voice === "string" && VOICE.test(incoming.voice) ? incoming.voice : config.voice;
-  const body = { model: config.model, input, voice, response_format: format };
+  let speed;
   if (incoming.speed !== undefined) {
-    const speed = Number(incoming.speed);
+    speed = Number(incoming.speed);
     if (!Number.isFinite(speed) || speed < 0.25 || speed > 4) return { error: "bad_request" };
-    body.speed = speed;
   }
-  return { body, chars: input.length };
+  const engine =
+    incoming.model === "munsit" && config.munsit
+      ? { kind: "munsit", ...config.munsit }
+      : config.server
+        ? { kind: "server", ...config.server }
+        : null;
+  if (!engine) return { error: "bad_request" };
+  const voice = typeof incoming.voice === "string" && VOICE.test(incoming.voice) ? incoming.voice : null;
+  if (engine.kind === "munsit") {
+    // The model and voice are filled in from the catalog by the caller. Munsit takes speed only between
+    // 0.7 and 1.2 and answers WAV, which the caller converts to `format`.
+    const body = { voice_id: voice, text: input, stability: engine.stability };
+    if (speed !== undefined) body.speed = Math.min(1.2, Math.max(0.7, speed));
+    return { engine, body, chars: input.length, format };
+  }
+  const body = { model: engine.model, input, voice: voice ?? engine.voice, response_format: format };
+  if (speed !== undefined) body.speed = speed;
+  return { engine, body, chars: input.length, format };
 }
 
-/** Resolves { audio, contentType } or { error: "bad_request" | "unavailable" | "timeout" }. Never throws. */
-export async function callSpeechServer({ body, config, fetchImpl = fetch, signal }) {
+/**
+ * Resolves { audio, contentType } or { error: "bad_request" | "unavailable" | "timeout" }. Never throws.
+ * An engine that answers WAV only (Munsit) is converted to `format` by `transcode`.
+ */
+export async function callSpeechServer({ body, config, format = "wav", fetchImpl = fetch, signal, transcode = transcodeWav }) {
+  const munsit = config.kind === "munsit";
+  const url = munsit
+    ? `${config.baseUrl}/text-to-speech/${encodeURIComponent(config.model)}`
+    : `${config.baseUrl}/audio/speech`;
+  const auth = munsit ? { "x-api-key": config.apiKey } : config.apiKey ? { authorization: `Bearer ${config.apiKey}` } : {};
   try {
-    const upstream = await fetchImpl(`${config.baseUrl}/audio/speech`, {
+    const upstream = await fetchImpl(url, {
       method: "POST",
-      headers: {
-        "content-type": "application/json",
-        ...(config.apiKey ? { authorization: `Bearer ${config.apiKey}` } : {}),
-      },
+      headers: { "content-type": "application/json", ...auth },
       body: JSON.stringify(body),
       signal,
       redirect: "error",
@@ -90,6 +150,7 @@ export async function callSpeechServer({ body, config, fetchImpl = fetch, signal
     if (declared > SPEECH_MAX_AUDIO_BYTES) return { error: "unavailable" };
     const audio = Buffer.from(await upstream.arrayBuffer());
     if (!audio.length || audio.length > SPEECH_MAX_AUDIO_BYTES) return { error: "unavailable" };
+    if (munsit && needsTranscode(format)) return await transcode(audio, format);
     const type = String(upstream.headers.get("content-type") || "").split(";", 1)[0].trim().toLowerCase();
     return { audio, contentType: /^audio\/[a-z0-9.+-]+$/.test(type) ? type : "application/octet-stream" };
   } catch (error) {

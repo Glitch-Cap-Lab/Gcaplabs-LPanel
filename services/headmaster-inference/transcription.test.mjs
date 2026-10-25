@@ -29,7 +29,7 @@ function token(body, extra = {}) {
   );
 }
 
-async function start(t, { vendor, wallet = null, walletMode = "on", transcription = CONFIG, otherBps = 11_000 } = {}) {
+async function start(t, { vendor, wallet = null, walletMode = "on", transcription = CONFIG, otherBps = 11_000, markupBps = 10_000 } = {}) {
   const vendorCalls = [];
   const service = createInferenceService({
     assertionSecret: SECRET,
@@ -44,6 +44,7 @@ async function start(t, { vendor, wallet = null, walletMode = "on", transcriptio
     },
     walletStore: wallet,
     walletMode,
+    walletMarkupBps: markupBps,
     walletOtherMarkupBps: otherBps,
     transcription,
   });
@@ -191,6 +192,24 @@ test("choosing the munsit model sends dictation in any language to Munsit with i
     assert.equal(vendorCalls.at(-1).init.headers["x-api-key"], undefined);
     assert.equal(vendorCalls.at(-1).init.body.get("model"), CONFIG.model);
   }
+});
+
+test("Munsit dictation is billed at the Headmaster markup, other engines at their own, never both", async (t) => {
+  // The owner's rate: 100 credits a minute at $0.00004 a credit = $0.24 an hour.
+  const priced = { ...MUNSIT, microUsdPerHour: 240_000 };
+  const timed = (init) => (init.headers["x-api-key"]
+    ? new Response(JSON.stringify({ data: { transcription: "مرحبا", duration: 60 } }), { status: 200 })
+    : vendorOk(60)());
+  const wallet = fakeWallet();
+  const { origin } = await start(t, { vendor: timed, wallet, markupBps: 12_500, otherBps: 11_000, transcription: { ...CONFIG, munsit: priced } });
+  assert.equal((await upload(origin, { fields: { model: "munsit" } })).status, 200);
+  // One minute is $0.004 raw; +25% is $0.005.
+  assert.equal(transcriptionCostMicroUsd(60, priced), 4_000);
+  assert.equal(wallet.log.settles[0].actualMicroUsd, 5_000);
+  assert.equal(wallet.log.reserves[0].amountMicroUsd, Math.ceil(transcriptionReserveMicroUsd(60_000, priced) * 1.25));
+
+  assert.equal((await upload(origin, { fields: { model: "whisper-1" } })).status, 200);
+  assert.equal(wallet.log.settles[1].actualMicroUsd, Math.ceil(transcriptionCostMicroUsd(60, CONFIG) * 1.1));
 });
 
 test("an operator may route chosen languages to Munsit", async (t) => {
