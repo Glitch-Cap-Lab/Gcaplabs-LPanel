@@ -43,6 +43,8 @@ function speechServerFromEnv(env) {
       apiKey: String(env.HEADMASTER_TTS_API_KEY || "").trim() || null,
       model: String(env.HEADMASTER_TTS_MODEL || "kokoro").trim(),
       voice: String(env.HEADMASTER_TTS_VOICE || "af_heart").trim(),
+      // What the apps' pickers call this engine; unset shows the model name.
+      label: String(env.HEADMASTER_TTS_LABEL || "").trim() || null,
       // Kokoro on our own server costs nothing per request; a paid server sets its USD per million characters.
       microUsdPerMillionChars: microUsdPerMillion(env.HEADMASTER_TTS_USD_PER_MILLION_CHARS),
     };
@@ -69,6 +71,8 @@ function munsitFromEnv(env) {
   return {
     baseUrl,
     apiKey,
+    // What the apps' pickers call this engine: the language, not the vendor.
+    label: String(env.HEADMASTER_MUNSIT_TTS_LABEL || "").trim() || "Arabic",
     // Unset means the first model and voice of the engine's own catalog (speech-catalog.mjs).
     model: String(env.HEADMASTER_MUNSIT_TTS_MODEL || "").trim() || null,
     voice: String(env.HEADMASTER_MUNSIT_TTS_VOICE || "").trim() || null,

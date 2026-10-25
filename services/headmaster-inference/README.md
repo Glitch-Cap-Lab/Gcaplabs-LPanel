@@ -314,7 +314,9 @@ also forwards `GET /v1/audio/voices` (the speech catalog below).
   voices read from the engine itself (Munsit `GET /voices` and `/models`; a speech server's
   `GET {base}/audio/voices`), every voice with `id, name, gender, dialects, languages, sample_url`, Arabic
   first. Cached for ten minutes; a failed refresh serves the last good answer. Clients render their voice
-  and engine pickers from it, so no client lists a voice or an engine.
+  and engine pickers from it, so no client lists a voice or an engine. The engine `label` is what people
+  see: `HEADMASTER_MUNSIT_TTS_LABEL` (default `Arabic`, never the vendor's name) and `HEADMASTER_TTS_LABEL`
+  (default: the speech server's model name).
 
 Munsit (dictation and speech) is charged at the Headmaster markup (`walletMarkupBps`, the Lite and Pro
 tier markup), applied once; every other engine at the other-model markup when priced. The owner's rates
