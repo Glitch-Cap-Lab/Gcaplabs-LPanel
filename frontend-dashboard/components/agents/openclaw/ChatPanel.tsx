@@ -758,7 +758,7 @@ function MessageBubble({ message }) {
       <div
         className={`shrink-0 w-8 h-8 rounded-xl flex items-center justify-center shadow-sm ${
           isUser
-            ? "bg-[var(--brand-cyan)] text-[var(--brand-ink)] shadow-[0_10px_24px_rgba(138,230,255,0.28)]"
+            ? "bg-[var(--brand-cyan)] text-[var(--brand-foreground)] shadow-[0_10px_24px_rgba(138,230,255,0.28)]"
             : "bg-gradient-to-br from-slate-100 to-slate-200 text-slate-600"
         }`}
       >
@@ -850,7 +850,7 @@ function MessageBubble({ message }) {
           <div
             className={`inline-block px-3.5 py-2.5 rounded-2xl text-sm leading-relaxed ${
               isUser
-                ? "bg-[var(--brand-cyan)] text-[var(--brand-ink)] border border-[var(--brand-cyan-border)] shadow-[0_14px_34px_rgba(138,230,255,0.22)]"
+                ? "bg-[var(--brand-cyan)] text-[var(--brand-foreground)] border border-[var(--brand-cyan-border)] shadow-[0_14px_34px_rgba(138,230,255,0.22)]"
                 : "bg-slate-50 border border-slate-200 text-slate-800"
             }`}
           >

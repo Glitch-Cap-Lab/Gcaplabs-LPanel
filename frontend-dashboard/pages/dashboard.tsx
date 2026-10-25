@@ -172,13 +172,6 @@ function EmptyState() {
         </div>
         <div className="flex flex-wrap items-center gap-3">
           <a
-            href="/app/getting-started"
-            className="inline-flex items-center gap-2 px-4 py-2.5 bg-white border border-blue-200 text-blue-700 rounded-xl text-sm font-bold hover:bg-blue-50 transition-all"
-          >
-            <ListChecks size={15} />
-            Open activation guide
-          </a>
-          <a
             href="/app/deploy"
             className="px-4 py-2.5 bg-blue-600 hover:bg-blue-700 text-white rounded-xl text-sm font-bold transition-all"
           >

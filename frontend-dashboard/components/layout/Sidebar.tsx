@@ -7,13 +7,10 @@ import {
   Rocket,
   BarChart3,
   FolderOpen,
-  ListChecks,
   Settings,
-  Server,
   ScrollText,
   PanelLeftClose,
   PanelLeftOpen,
-  ShoppingBag,
   X,
 } from "lucide-react";
 import { clsx } from "clsx";
@@ -36,16 +33,8 @@ type NavItem = {
 
 const NAV_ITEMS: NavItem[] = [
   { name: "Dashboard", icon: LayoutDashboard, href: "/app/dashboard" },
-  { name: "Getting Started", icon: ListChecks, href: "/app/getting-started" },
   { name: "Agents", icon: Bot, href: "/app/agents" },
-  { name: "Agent Hub", icon: ShoppingBag, href: "/app/agent-hub" },
   { name: "Deploy", icon: Rocket, href: "/app/deploy" },
-  {
-    name: "Remote Hosts",
-    icon: Server,
-    href: "/app/remote-hosts",
-    selfHostedOnly: true,
-  },
   { name: "Workspaces", icon: FolderOpen, href: "/app/workspaces" },
   { name: "Monitoring", icon: BarChart3, href: "/app/monitoring" },
   { name: "Logs", icon: ScrollText, href: "/app/logs" },
@@ -90,7 +79,7 @@ export default function Sidebar({
     <aside
       aria-label={t("Primary navigation")}
       className={clsx(
-        "bg-brand-ink text-brand-foreground hm-admin-sidebar flex flex-col border-r border-brand-cyan/10 shadow-2xl z-50 overflow-y-auto transition-all duration-300",
+        "bg-white text-brand-ink hm-admin-sidebar flex flex-col border-r border-brand-cyan/10 z-50 overflow-y-auto transition-all duration-300",
         collapsed ? "w-[68px]" : "w-64",
       )}
     >
@@ -107,7 +96,7 @@ export default function Sidebar({
         {!collapsed && (
           <div className="hm-brand flex flex-col min-w-0">
             <span className="hm-brand-name">headmaster</span>
-            <span className="hm-brand-caption">{t("Deploy intelligence anywhere.")}</span>
+            <span className="hm-brand-caption">{t("Control plane")}</span>
           </div>
         )}
         {/* Mobile close button */}
@@ -116,7 +105,7 @@ export default function Sidebar({
             type="button"
             onClick={onClose}
             aria-label={t("Close navigation menu")}
-            className="ml-auto rounded-lg p-1.5 text-brand-foreground/50 transition-colors hover:bg-brand-cyan/10 hover:text-brand-foreground lg:hidden"
+            className="ml-auto rounded-lg p-1.5 text-brand-ink/55 transition-colors hover:bg-black/5 hover:text-brand-ink lg:hidden"
           >
             <X size={18} />
           </button>
@@ -146,8 +135,8 @@ export default function Sidebar({
                 "flex items-center gap-3 rounded-xl text-sm font-medium transition-all group relative",
                 collapsed ? "justify-center px-2 py-3" : "px-4 py-3",
                 isActive(item.href)
-                  ? "bg-brand-cyan text-brand-ink shadow-lg shadow-brand-cyan/20"
-                  : "text-brand-foreground/62 hover:bg-brand-cyan/10 hover:text-brand-foreground",
+                  ? "bg-brand-ink text-brand-foreground"
+                  : "text-brand-ink/62 hover:bg-black/5 hover:text-brand-ink",
               )}
             >
               <item.icon
@@ -155,8 +144,8 @@ export default function Sidebar({
                 className={clsx(
                   "transition-transform group-hover:scale-110 shrink-0",
                   isActive(item.href)
-                    ? "text-brand-ink"
-                    : "text-brand-foreground/42 group-hover:text-brand-cyan",
+                    ? "text-brand-foreground"
+                    : "text-brand-ink/55 group-hover:text-brand-cyan",
                 )}
               />
               {!collapsed && t(item.name)}
@@ -164,7 +153,7 @@ export default function Sidebar({
               {isActive(item.href) && (
                 <div
                   aria-hidden="true"
-                  className="absolute left-0 top-1/2 h-6 w-1 -translate-y-1/2 rounded-r-full bg-brand-ink"
+                  className="absolute left-0 top-1/2 h-6 w-1 -translate-y-1/2 rounded-r-full bg-brand-cyan"
                 ></div>
               )}
             </div>
@@ -191,8 +180,8 @@ export default function Sidebar({
               "flex items-center gap-3 rounded-xl text-sm font-medium transition-all group",
               collapsed ? "justify-center px-2 py-3" : "px-4 py-3",
               isActive("/app/settings")
-                ? "bg-brand-cyan/16 text-brand-foreground"
-                : "text-brand-foreground/50 hover:bg-brand-cyan/10 hover:text-brand-foreground",
+                ? "bg-brand-cyan/16 text-brand-ink"
+                : "text-brand-ink/55 hover:bg-black/5 hover:text-brand-ink",
             )}
           >
             <Settings size={18} className="shrink-0" />
@@ -208,7 +197,7 @@ export default function Sidebar({
             aria-expanded={!collapsed}
             aria-label={collapsed ? t("Expand sidebar") : t("Collapse sidebar")}
             className={clsx(
-              "flex items-center gap-3 rounded-xl text-sm font-medium transition-all w-full text-brand-foreground/50 hover:bg-brand-cyan/10 hover:text-brand-foreground",
+              "flex items-center gap-3 rounded-xl text-sm font-medium transition-all w-full text-brand-ink/55 hover:bg-black/5 hover:text-brand-ink",
               collapsed ? "justify-center px-2 py-3" : "px-4 py-3",
             )}
             title={collapsed ? t("Expand sidebar") : t("Collapse sidebar")}

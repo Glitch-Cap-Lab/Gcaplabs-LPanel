@@ -19,34 +19,48 @@
   font-display: swap;
 }
 
+@font-face {
+  font-family: "Manrope";
+  src: url("/app/fonts/Manrope-Variable.ttf") format("truetype");
+  font-weight: 200 800;
+  font-display: swap;
+}
+
+@font-face {
+  font-family: "General Sans";
+  src: url("/app/fonts/GeneralSans-600.woff2") format("woff2");
+  font-weight: 600;
+  font-display: swap;
+}
+
 /* Headmaster operator theme. Keep runtime/API names and upstream attribution intact. */
 @theme {
-  --font-sans: "Inter", ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
-  --color-brand-ink: #111310;
-  --color-brand-foreground: #f3f4ef;
-  --color-brand-cyan: #cfefa5;
-  --color-brand-gold: #e5d8a7;
-  --color-brand-orange: #edaa86;
+  --font-sans: "Manrope", "Inter", ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+  --color-brand-ink: #111111;
+  --color-brand-foreground: #ffffff;
+  --color-brand-cyan: #1a4d2e;
+  --color-brand-gold: #8a5a00;
+  --color-brand-orange: #a3341f;
 }
 
 :root {
-  color-scheme: dark;
-  --hm-bg: #111310;
-  --hm-surface: #191e16;
-  --hm-raised: #22291d;
-  --hm-line: #414d37;
-  --hm-fg: #f3f4ef;
-  --hm-muted: #b7c2ac;
-  --brand-ink: #111310;
-  --brand-foreground: #f3f4ef;
-  --brand-cyan: #cfefa5;
-  --brand-gold: #e5d8a7;
-  --brand-orange: #edaa86;
-  --brand-cyan-surface: rgba(207, 239, 165, 0.08);
-  --brand-cyan-surface-strong: rgba(207, 239, 165, 0.16);
-  --brand-cyan-border: rgba(207, 239, 165, 0.29);
-  --brand-cyan-readable: #cfefa5;
-  --brand-cyan-hover: #e1f4c8;
+  color-scheme: light;
+  --hm-bg: #f5f5f5;
+  --hm-surface: #ffffff;
+  --hm-raised: #ffffff;
+  --hm-line: #e8e7e2;
+  --hm-fg: #111111;
+  --hm-muted: #6e6e68;
+  --brand-ink: #111111;
+  --brand-foreground: #ffffff;
+  --brand-cyan: #1a4d2e;
+  --brand-gold: #8a5a00;
+  --brand-orange: #a3341f;
+  --brand-cyan-surface: rgba(26, 77, 46, 0.08);
+  --brand-cyan-surface-strong: rgba(26, 77, 46, 0.16);
+  --brand-cyan-border: rgba(26, 77, 46, 0.29);
+  --brand-cyan-readable: #1a4d2e;
+  --brand-cyan-hover: #24663d;
   --background: var(--hm-bg);
   --foreground: var(--hm-fg);
 }
@@ -61,11 +75,18 @@ body {
   margin: 0;
   color: var(--hm-fg);
   background:
-    radial-gradient(ellipse at 50% 0%, rgba(54, 66, 43, 0.38), transparent 62%), var(--hm-bg);
+    var(--hm-bg);
   font-family: var(--font-sans);
 }
 
 @layer base {
+  h1,
+  h2,
+  h3 {
+    font-family: "General Sans", var(--font-sans);
+    letter-spacing: -0.02em;
+  }
+
   button,
   input,
   select,
@@ -75,12 +96,12 @@ body {
 }
 
 ::selection {
-  background: rgba(207, 239, 165, 0.22);
+  background: rgba(26, 77, 46, 0.22);
   color: var(--hm-fg);
 }
 
 :focus-visible {
-  outline: 2px solid #cfefa5;
+  outline: 2px solid #1a4d2e;
   outline-offset: 3px;
 }
 
@@ -111,14 +132,14 @@ body {
   .bg-white,
   .bg-slate-50,
   .bg-gray-50,
-  [class~="bg-[#eef4fb]"] {
+  [class~="bg-[#111111]"] {
     background-color: var(--hm-surface);
   }
 
   [class~="bg-white/82"],
   [class~="bg-white/80"],
   [class~="bg-white/90"] {
-    background-color: rgba(25, 30, 22, 0.93);
+    background-color: rgba(255, 255, 255, 0.93);
   }
 
   .bg-slate-100,
@@ -144,7 +165,7 @@ body {
   }
 
   .text-slate-400 {
-    color: #a7b29d;
+    color: #6e6e68;
   }
 
   .border-slate-100,
@@ -190,7 +211,7 @@ body {
   .bg-blue-500 .text-white,
   .bg-blue-600 .text-white,
   .bg-blue-700 .text-white {
-    color: var(--brand-ink);
+    color: var(--brand-foreground);
   }
 
   .bg-brand-cyan\/16 {
@@ -202,6 +223,8 @@ body {
     color: var(--brand-cyan);
   }
 
+  [class*="text-blue-700/"],
+  [class*="text-blue-600/"],
   .text-blue-500,
   .text-blue-600,
   .text-blue-700,
@@ -231,7 +254,7 @@ body {
   .shadow-blue-500\/20,
   .shadow-blue-500\/30,
   .shadow-blue-600\/20 {
-    --tw-shadow-color: rgba(207, 239, 165, 0.24);
+    --tw-shadow-color: rgba(26, 77, 46, 0.24);
   }
 
   .hover\:bg-blue-50:hover,
@@ -240,7 +263,7 @@ body {
   .hover\:bg-blue-600:hover,
   .hover\:bg-blue-700:hover {
     background-color: var(--brand-cyan-hover);
-    color: var(--brand-ink);
+    color: var(--brand-foreground);
   }
 
   .hover\:text-blue-500:hover,
@@ -272,7 +295,7 @@ body {
   .from-blue-500,
   .from-blue-600 {
     --tw-gradient-from: var(--brand-cyan) var(--tw-gradient-from-position);
-    --tw-gradient-to: rgba(207, 239, 165, 0) var(--tw-gradient-to-position);
+    --tw-gradient-to: rgba(26, 77, 46, 0) var(--tw-gradient-to-position);
     --tw-gradient-stops: var(--tw-gradient-from), var(--tw-gradient-to);
   }
 
@@ -285,42 +308,42 @@ body {
   /* Semantic states keep distinct hues on the dark surfaces. */
   .bg-red-50,
   .bg-red-100 {
-    background-color: #43291f;
+    background-color: #111111;
   }
 
   .text-red-600,
   .text-red-700,
   .text-red-800 {
-    color: #ffbca8;
+    color: #e8e7e2;
   }
 
   .bg-amber-50,
   .bg-amber-100 {
-    background-color: #37301c;
+    background-color: #111111;
   }
 
   .text-amber-600,
   .text-amber-700,
   .text-amber-800,
   .text-amber-900 {
-    color: #f0da98;
+    color: #c8c7c2;
   }
 
   .bg-emerald-50,
   .bg-emerald-100,
   .bg-green-50,
   .bg-green-100 {
-    background-color: #233525;
+    background-color: #111111;
   }
 
   .text-emerald-600,
   .text-emerald-700,
   .text-green-700 {
-    color: #b1dfb3;
+    color: #e8e7e2;
   }
 
   .bg-amber-500.text-slate-950 {
-    color: #171b12;
+    color: #ffffff;
   }
 
   .font-black {
@@ -353,10 +376,10 @@ body {
   flex-shrink: 0;
   display: grid;
   place-items: center;
-  border: 1px solid rgba(207, 239, 165, 0.29);
+  border: 1px solid rgba(26, 77, 46, 0.29);
   border-radius: 10px;
-  color: #cfefa5;
-  background: rgba(207, 239, 165, 0.04);
+  color: #1a4d2e;
+  background: rgba(26, 77, 46, 0.04);
   font-size: 25px;
   font-weight: 600;
   letter-spacing: -0.08em;
@@ -368,13 +391,13 @@ body {
   font-weight: 550;
   letter-spacing: -0.055em;
   line-height: 1.1;
-  color: #f3f4ef;
+  color: #111111;
 }
 
 .hm-brand-caption {
   display: block;
   margin-top: 5px;
-  color: #b7c2ac;
+  color: #6e6e68;
   font-size: 10px;
   letter-spacing: 0.12em;
   text-transform: uppercase;
@@ -383,35 +406,35 @@ body {
 .hm-attribution {
   display: block;
   margin: 12px 8px 0;
-  color: #a7b29d;
+  color: #6e6e68;
   font-size: 11px;
   text-decoration: none;
 }
 
 .hm-attribution:hover {
-  color: #cfefa5;
+  color: #1a4d2e;
 }
 
 .hm-admin-active {
-  background: #cfefa5;
-  color: #111310;
+  background: #1a4d2e;
+  color: #f5f5f5;
   box-shadow: none;
 }
 
 .hm-admin-sidebar {
-  border-right: 1px solid #414d37;
+  border-right: 1px solid #e8e7e2;
 }
 
 .hm-topbar {
-  background: rgba(25, 30, 22, 0.93);
-  border-color: #414d37;
+  background: rgba(255, 255, 255, 0.93);
+  border-color: #e8e7e2;
 }
 
 .hm-console-label {
   font-size: 10px;
   letter-spacing: 0.12em;
   text-transform: uppercase;
-  color: #b7c2ac;
+  color: #6e6e68;
 }
 
 html[data-headmaster-embedded="true"] .hm-brand-name {
