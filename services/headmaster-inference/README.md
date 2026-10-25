@@ -262,6 +262,15 @@ an unreachable wallet 503 `quota_unavailable`. A personal wallet is topped up to
 stays $2. Per-account concurrency, hourly request and daily token limits still
 apply from Redis.
 
+When the provider answered 2xx but no usage reached the relay (a stream that ended
+without a usage frame, or a client that disconnected mid-stream), the charge is the
+prompt estimate (request bytes / 4 at the prompt price) plus the output actually
+relayed to the client (generated-text bytes / 4 at the completion price), capped at
+the hold. So the prompt is never free, and a reply stopped early is not billed the
+whole output reservation. The wallet and the Redis monthly counter record the same
+cost. A response that reports usage is charged exactly by that usage; a provider
+error is not charged the estimate.
+
 Both markups are required and the relay refuses to start without them (no at-cost
 default; values below `10000` or above `100000` are refused too):
 
