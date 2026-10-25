@@ -76,7 +76,8 @@ export function createSpeechCatalog({ config, fetchImpl = fetch, now = Date.now,
       const ids = Array.isArray(body) ? body.map((entry) => text(entry?.model_id)).filter(Boolean) : [];
       return ids.length ? ids : null;
     });
-    return { id: "munsit", label: titled("munsit"), voices: voices ?? [], models: models ?? [] };
+    // The label is what people see in the apps' pickers: the operator's wording, never the vendor's name.
+    return { id: "munsit", label: munsit.label, voices: voices ?? [], models: models ?? [] };
   }
 
   async function serverEngine() {
@@ -90,7 +91,7 @@ export function createSpeechCatalog({ config, fetchImpl = fetch, now = Date.now,
       const ids = Array.isArray(body) ? body : Array.isArray(body?.voices) ? body.voices : null;
       return ids ? sortVoices(ids.map(serverVoice).filter(Boolean)) : null;
     });
-    return { id: server.model, label: titled(server.model), voices: voices ?? [], models: [server.model] };
+    return { id: server.model, label: server.label ?? titled(server.model), voices: voices ?? [], models: [server.model] };
   }
 
   /** { engines: [{ id, label, voices, models, default_voice }], default_engine }. */

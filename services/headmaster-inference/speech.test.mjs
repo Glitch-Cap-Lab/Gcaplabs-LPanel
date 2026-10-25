@@ -14,7 +14,7 @@ const NOW = 1_800_000_000_000;
 const FREE = { baseUrl: "http://headmaster-kokoro:8880/v1", apiKey: null, model: "kokoro", voice: "af_heart", microUsdPerMillionChars: 0 };
 const PAID = { ...FREE, baseUrl: "https://tts.vendor.example/v1", apiKey: "vendor-secret-key", microUsdPerMillionChars: 22_000_000 };
 // No model or voice here: the relay takes them from the engine's own catalog unless the operator sets them.
-const MUNSIT = { baseUrl: "https://api.munsit.com/api/v1", apiKey: "munsit-secret-key", model: null, voice: null, stability: 0.5, microUsdPerMillionChars: 0 };
+const MUNSIT = { baseUrl: "https://api.munsit.com/api/v1", apiKey: "munsit-secret-key", model: null, voice: null, label: "Arabic", stability: 0.5, microUsdPerMillionChars: 0 };
 const MUNSIT_VOICES = [
   { voice_id: "en-first", name: "Adam", languages: ["en", "ar"], dialect: ["american"], gender: "male", sample_url: "https://x/en.mp3" },
   { voice_id: "ar-second", name: "Zaid", languages: ["ar", "en"], dialect: ["najdi"], gender: "male", sample_url: "https://x/z.mp3" },
@@ -281,6 +281,10 @@ test("the catalog lists every voice, Arabic first, with the first Arabic voice a
   const munsit = data.engines[1];
   assert.deepEqual(munsit.voices.map((voice) => voice.id), ["ar-first", "ar-second", "en-first"]);
   assert.equal(munsit.default_voice, "ar-first");
+  // People see the language, never the vendor; a speech server shows its model name unless labelled.
+  assert.equal(munsit.label, "Arabic");
+  assert.equal(data.engines[0].label, "Kokoro");
+  assert.equal(JSON.stringify(data.engines.map((engine) => engine.label)).toLowerCase().includes("munsit"), false);
   assert.deepEqual(munsit.models, ["model-one"]);
   assert.equal(munsit.voices[0].sample_url, "https://x/a.mp3");
   assert.equal(JSON.stringify(data).includes("munsit-secret-key"), false);
@@ -307,6 +311,9 @@ test("speechConfigFromEnv: Munsit needs its key and https, shares the dictation 
   assert.equal(config.munsit.baseUrl, "https://api.munsit.com/api/v1");
   assert.equal(config.munsit.model, null);
   assert.equal(config.munsit.voice, null);
+  assert.equal(config.munsit.label, "Arabic");
+  const labelled = speechConfigFromEnv({ HEADMASTER_MUNSIT_API_KEY: "k", HEADMASTER_MUNSIT_TTS_LABEL: "Gulf Arabic", HEADMASTER_TTS_BASE_URL: "http://headmaster-kokoro:8880/v1", HEADMASTER_TTS_LABEL: "English and more" });
+  assert.deepEqual([labelled.munsit.label, labelled.server.label], ["Gulf Arabic", "English and more"]);
   assert.equal(config.munsit.stability, 0.5);
   assert.equal(config.munsit.microUsdPerMillionChars, 0);
   const set = speechConfigFromEnv({ HEADMASTER_MUNSIT_API_KEY: "k", HEADMASTER_MUNSIT_TTS_MODEL: "m", HEADMASTER_MUNSIT_TTS_VOICE: "v", HEADMASTER_MUNSIT_TTS_USD_PER_MILLION_CHARS: "80" });
