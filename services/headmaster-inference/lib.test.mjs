@@ -1119,6 +1119,19 @@ test("wallet on: an empty wallet answers 402 insufficient_credit and releases th
   assert.equal(walletStore.calls.settle.length, 0);
 });
 
+test("wallet on: a member over their monthly cap answers 402 monthly_cap_exceeded and settles nothing", async (t) => {
+  const { response, walletStore } = await walletCompletion(
+    t,
+    { allowed: false, reason: "monthly_cap_exceeded" },
+    { walletMode: "on" },
+  );
+  assert.equal(response.status, 402);
+  const error = (await response.json()).error;
+  assert.equal(error.code, "monthly_cap_exceeded");
+  assert.doesNotMatch(error.message, /Hermes|Nous|Nora/i);
+  assert.equal(walletStore.calls.settle.length, 0);
+});
+
 test("wallet on: a suspended organization answers 403 and an unreachable wallet answers 503", async (t) => {
   const suspended = await walletCompletion(t, { allowed: false, reason: "org_suspended" }, { walletMode: "on" });
   assert.equal(suspended.response.status, 403);

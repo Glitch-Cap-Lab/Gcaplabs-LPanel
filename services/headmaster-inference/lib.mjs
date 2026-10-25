@@ -686,6 +686,14 @@ export function createInferenceService({
             "This organization is switched off.",
             claims.request_id,
           );
+        if (hold.reason === "monthly_cap_exceeded")
+          return safeError(
+            res,
+            402,
+            "monthly_cap_exceeded",
+            "This member has reached their monthly spending limit.",
+            claims.request_id,
+          );
         return safeError(
           res,
           402,
