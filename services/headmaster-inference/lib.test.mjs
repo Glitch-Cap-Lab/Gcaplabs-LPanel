@@ -1282,3 +1282,119 @@ test("wallet markup: a model that is not a Headmaster tier uses its own markup, 
   // The other-model markup does.
   assert.ok((await at({ walletOtherMarkupBps: 20_000 })) > base);
 });
+
+// BL12: a 2xx stream that never reports usage (ended early or cut off by the client)
+// is charged at least the reserve-time estimate, prompt included.
+const PROMPT_ONLY_PRICES = Object.freeze({ "gpt-5.5": { prompt: 10, completion: 0 } });
+const CONTENT_FRAME = 'data: {"id":"c1","choices":[{"index":0,"delta":{"content":"hel"}}]}\n\n';
+
+function streamResponse(frames, { hang = false, signal } = {}) {
+  const encoder = new TextEncoder();
+  return new Response(
+    new ReadableStream({
+      start(controller) {
+        for (const frame of frames) controller.enqueue(encoder.encode(frame));
+        if (!hang) return controller.close();
+        signal?.addEventListener("abort", () => controller.error(signal.reason), { once: true });
+      },
+    }),
+    { status: 200, headers: { "content-type": "text/event-stream" } },
+  );
+}
+
+async function streamWalletRun(t, fetchImpl, { abortAfterFirstChunk = false, serviceOptions = {} } = {}) {
+  const walletStore = fakeWallet();
+  const f = await startService(t, {
+    walletStore,
+    walletMode: "on",
+    priceTable: PROMPT_ONLY_PRICES,
+    fetchImpl,
+    ...serviceOptions,
+  });
+  const body = Buffer.from(
+    JSON.stringify({ model: "gpt-5.5", stream: true, messages: [{ role: "user", content: "a long prompt ".repeat(50) }] }),
+  );
+  const abort = new AbortController();
+  const response = await postCompletion(
+    f.origin,
+    body,
+    makeToken({ method: "POST", path: "/v1/chat/completions", body }),
+    abort.signal,
+  );
+  if (abortAfterFirstChunk) {
+    const reader = response.body.getReader();
+    await reader.read();
+    abort.abort();
+    await reader.cancel().catch(() => {});
+  } else {
+    await response.text();
+  }
+  const deadline = Date.now() + 2000;
+  // Settlement runs in the relay's finally block, after the client has its bytes.
+  while (serviceOptions.walletMode !== "off" && walletStore.calls.settle.length === 0 && Date.now() < deadline)
+    await new Promise((resolve) => setTimeout(resolve, 10));
+  return { response, walletStore, f };
+}
+
+test("aborted stream is charged at least the prompt estimate", async (t) => {
+  const { walletStore } = await streamWalletRun(
+    t,
+    async (_url, options) => streamResponse([CONTENT_FRAME], { hang: true, signal: options.signal }),
+    { abortAfterFirstChunk: true },
+  );
+  assert.equal(walletStore.calls.settle.length, 1);
+  const held = walletStore.calls.reserve[0].amountMicroUsd;
+  // Output is free in this price table, so the whole charge is the prompt estimate
+  // (it was $0 before BL12).
+  assert.ok(held > 0);
+  assert.equal(walletStore.calls.settle[0].actualMicroUsd, held);
+});
+
+test("a stream that ends without a usage frame is charged at least the prompt estimate", async (t) => {
+  const { response, walletStore } = await streamWalletRun(t, async () =>
+    streamResponse([CONTENT_FRAME, "data: [DONE]\n\n"]),
+  );
+  assert.equal(response.status, 200);
+  assert.equal(walletStore.calls.settle.length, 1);
+  const held = walletStore.calls.reserve[0].amountMicroUsd;
+  assert.ok(held > 0);
+  assert.equal(walletStore.calls.settle[0].actualMicroUsd, held);
+});
+
+test("stream with usage is charged by usage (unchanged)", async (t) => {
+  const { walletStore } = await streamWalletRun(t, async () =>
+    streamResponse([
+      CONTENT_FRAME,
+      'data: {"id":"c1","choices":[],"usage":{"prompt_tokens":3,"completion_tokens":2,"total_tokens":5,"cost":0.000005}}\n\n',
+      "data: [DONE]\n\n",
+    ]),
+  );
+  assert.equal(walletStore.calls.settle.length, 1);
+  assert.equal(walletStore.calls.settle[0].actualMicroUsd, 5);
+  assert.ok(walletStore.calls.reserve[0].amountMicroUsd > 5);
+  assert.equal(walletStore.calls.settle[0].detail.prompt_tokens, 3);
+});
+
+test("provider error is not charged by the estimate", async (t) => {
+  const { response, walletStore } = await streamWalletRun(t, async () =>
+    new Response('{"error":"boom"}', { status: 500, headers: { "content-type": "application/json" } }),
+  );
+  assert.ok(response.status >= 500);
+  assert.equal(walletStore.calls.settle.length, 1);
+  assert.equal(walletStore.calls.settle[0].actualMicroUsd, 0);
+});
+
+test("non-wallet mode unchanged: a usage-less stream settles the output reservation only", async (t) => {
+  const { walletStore, f } = await streamWalletRun(
+    t,
+    async () => streamResponse([CONTENT_FRAME, "data: [DONE]\n\n"]),
+    { serviceOptions: { walletMode: "off" } },
+  );
+  await new Promise((resolve) => setTimeout(resolve, 50));
+  assert.equal(walletStore.calls.reserve.length, 0);
+  assert.equal(walletStore.calls.settle.length, 0);
+  const usage = f.quota.inspect(OWNER_A);
+  assert.equal(usage.active, 0);
+  assert.equal(usage.used, 1024);
+  assert.equal(usage.usage.promptTokens, 0);
+});

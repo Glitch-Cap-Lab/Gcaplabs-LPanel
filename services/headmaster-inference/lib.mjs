@@ -783,7 +783,13 @@ export function createInferenceService({
           }),
         );
       if (walletHeld) {
-        const cost = chargedCost(usage, prepared.body?.model, claims.request_id, estimatedCost);
+        const tableCost = chargedCost(usage, prepared.body?.model, claims.request_id, estimatedCost);
+        // The provider answered 2xx but no usage arrived (a stream that ended without a
+        // usage frame, or a client abort mid-relay): the synthetic usage above prices the
+        // output reservation only, so floor the charge at the reserve-time estimate and
+        // the prompt is not free. A reported usage is charged exactly as reported.
+        const cost =
+          providerSucceeded && !observedUsage ? Math.max(estimatedCost, tableCost) : tableCost;
         await walletStore
           .settle({
             ownerId: claims.sub,
