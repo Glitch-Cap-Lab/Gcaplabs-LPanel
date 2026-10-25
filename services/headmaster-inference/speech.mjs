@@ -10,6 +10,7 @@
 // set, anything else to the speech server above. The voice is then a Munsit voice id.
 
 import { isIP } from "node:net";
+import { needsTranscode, transcodeWav } from "./transcode.mjs";
 
 export const SPEECH_PATH = "/v1/audio/speech";
 export const SPEECH_MAX_INPUT_CHARS = 4096;
@@ -52,7 +53,7 @@ function speechServerFromEnv(env) {
 
 // Munsit (Arabic): shares the dictation key and base URL. x-api-key auth, POST {base}/text-to-speech/{model},
 // JSON { voice_id, text, stability, speed? }, answer a complete WAV file. Voice ids come from its own voice
-// list, so a request that names none gets the operator's default.
+// list (the catalog); a request that names none, or one the catalog does not know, gets the default.
 function munsitFromEnv(env) {
   const apiKey = String(env.HEADMASTER_MUNSIT_API_KEY || "").trim();
   if (!apiKey) return null;
@@ -68,8 +69,9 @@ function munsitFromEnv(env) {
   return {
     baseUrl,
     apiKey,
-    model: String(env.HEADMASTER_MUNSIT_TTS_MODEL || "faseeh-v1-preview").trim(),
-    voice: String(env.HEADMASTER_MUNSIT_TTS_VOICE || "ar-najdi-male-2").trim(),
+    // Unset means the first model and voice of the engine's own catalog (speech-catalog.mjs).
+    model: String(env.HEADMASTER_MUNSIT_TTS_MODEL || "").trim() || null,
+    voice: String(env.HEADMASTER_MUNSIT_TTS_VOICE || "").trim() || null,
     stability: Number.isFinite(stability) && stability >= 0 && stability <= 1 ? stability : 0.5,
     microUsdPerMillionChars: microUsdPerMillion(env.HEADMASTER_MUNSIT_TTS_USD_PER_MILLION_CHARS),
   };
@@ -111,20 +113,24 @@ export function prepareSpeech(buffer, config) {
         ? { kind: "server", ...config.server }
         : null;
   if (!engine) return { error: "bad_request" };
-  const voice = typeof incoming.voice === "string" && VOICE.test(incoming.voice) ? incoming.voice : engine.voice;
+  const voice = typeof incoming.voice === "string" && VOICE.test(incoming.voice) ? incoming.voice : null;
   if (engine.kind === "munsit") {
-    // Munsit answers WAV whatever format was asked for, and takes speed only between 0.7 and 1.2.
+    // The model and voice are filled in from the catalog by the caller. Munsit takes speed only between
+    // 0.7 and 1.2 and answers WAV, which the caller converts to `format`.
     const body = { voice_id: voice, text: input, stability: engine.stability };
     if (speed !== undefined) body.speed = Math.min(1.2, Math.max(0.7, speed));
-    return { engine, body, chars: input.length };
+    return { engine, body, chars: input.length, format };
   }
-  const body = { model: engine.model, input, voice, response_format: format };
+  const body = { model: engine.model, input, voice: voice ?? engine.voice, response_format: format };
   if (speed !== undefined) body.speed = speed;
-  return { engine, body, chars: input.length };
+  return { engine, body, chars: input.length, format };
 }
 
-/** Resolves { audio, contentType } or { error: "bad_request" | "unavailable" | "timeout" }. Never throws. */
-export async function callSpeechServer({ body, config, fetchImpl = fetch, signal }) {
+/**
+ * Resolves { audio, contentType } or { error: "bad_request" | "unavailable" | "timeout" }. Never throws.
+ * An engine that answers WAV only (Munsit) is converted to `format` by `transcode`.
+ */
+export async function callSpeechServer({ body, config, format = "wav", fetchImpl = fetch, signal, transcode = transcodeWav }) {
   const munsit = config.kind === "munsit";
   const url = munsit
     ? `${config.baseUrl}/text-to-speech/${encodeURIComponent(config.model)}`
@@ -144,6 +150,7 @@ export async function callSpeechServer({ body, config, fetchImpl = fetch, signal
     if (declared > SPEECH_MAX_AUDIO_BYTES) return { error: "unavailable" };
     const audio = Buffer.from(await upstream.arrayBuffer());
     if (!audio.length || audio.length > SPEECH_MAX_AUDIO_BYTES) return { error: "unavailable" };
+    if (munsit && needsTranscode(format)) return await transcode(audio, format);
     const type = String(upstream.headers.get("content-type") || "").split(";", 1)[0].trim().toLowerCase();
     return { audio, contentType: /^audio\/[a-z0-9.+-]+$/.test(type) ? type : "application/octet-stream" };
   } catch (error) {
