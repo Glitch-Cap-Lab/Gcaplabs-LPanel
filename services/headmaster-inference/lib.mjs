@@ -87,10 +87,40 @@ function jsonUsage(buffer) {
   }
 }
 
+// UTF-8 bytes of the model-generated text in one choice's delta or message: content,
+// reasoning and tool-call names/arguments. Used to estimate output tokens (bytes / 4)
+// when the provider reports no usage.
+function choiceOutputBytes(part) {
+  if (!part || typeof part !== "object") return 0;
+  let bytes = 0;
+  for (const text of [part.content, part.reasoning_content, part.reasoning])
+    if (typeof text === "string") bytes += Buffer.byteLength(text);
+  if (Array.isArray(part.tool_calls))
+    for (const call of part.tool_calls)
+      for (const text of [call?.function?.name, call?.function?.arguments])
+        if (typeof text === "string") bytes += Buffer.byteLength(text);
+  return bytes;
+}
+
+function outputBytesOf(parsed, key) {
+  if (!Array.isArray(parsed?.choices)) return 0;
+  return parsed.choices.reduce((sum, choice) => sum + choiceOutputBytes(choice?.[key]), 0);
+}
+
+// Generated-text bytes of a non-streamed chat completion body.
+function jsonOutputBytes(buffer) {
+  try {
+    return outputBytesOf(JSON.parse(buffer.toString("utf8")), "message");
+  } catch {
+    return 0;
+  }
+}
+
 function createSseUsageParser() {
   let pending = "";
   let eventData = [];
   let usage = null;
+  let outputBytes = 0;
   const decoder = new TextDecoder();
   const flushEvent = () => {
     if (eventData.length) {
@@ -98,6 +128,7 @@ function createSseUsageParser() {
       if (data !== "[DONE]") {
         try {
           const parsed = JSON.parse(data);
+          outputBytes += outputBytesOf(parsed, "delta");
           if (parsed?.usage && typeof parsed.usage === "object")
             usage = normalizeUsage(parsed.usage);
         } catch {
@@ -127,6 +158,10 @@ function createSseUsageParser() {
     },
     get usage() {
       return usage;
+    },
+    // Generated-text bytes of the complete SSE events relayed so far.
+    get outputBytes() {
+      return outputBytes;
     },
   };
 }
@@ -158,7 +193,15 @@ function waitForDrain(res, signal) {
   });
 }
 
-async function copyStreamingResponse(response, res, signal, requestId, maxResponseBytes) {
+// `parser` is passed in by callers that need its counters after a mid-stream abort.
+async function copyStreamingResponse(
+  response,
+  res,
+  signal,
+  requestId,
+  maxResponseBytes,
+  parser = createSseUsageParser(),
+) {
   const contentType = response.headers.get("content-type") || "text/event-stream; charset=utf-8";
   res.writeHead(200, {
     "content-type": contentType,
@@ -166,7 +209,6 @@ async function copyStreamingResponse(response, res, signal, requestId, maxRespon
     "x-request-id": requestId,
     "x-accel-buffering": "no",
   });
-  const parser = createSseUsageParser();
   let sentBytes = 0;
   if (!response.body) {
     res.end();
@@ -178,8 +220,10 @@ async function copyStreamingResponse(response, res, signal, requestId, maxRespon
       throw Object.assign(new Error("provider_response_too_large"), {
         code: "provider_response_too_large",
       });
+    // Count a chunk only once it has been handed to the client.
+    const drained = res.write(chunk);
     parser.push(chunk);
-    if (!res.write(chunk)) await waitForDrain(res, signal);
+    if (!drained) await waitForDrain(res, signal);
   }
   if (!res.writableEnded) res.end();
   return parser.end();
@@ -286,6 +330,19 @@ export function createInferenceService({
     if (!price) return null;
     const promptTokens = Math.ceil(Buffer.byteLength(JSON.stringify(prepared.body)) / 4);
     return Math.ceil(promptTokens * price.prompt + prepared.reserveOutputTokens * price.completion);
+  }
+  // Cost of a 2xx response that reported no usage (a stream that ended without a usage
+  // frame, or a client abort mid-relay): the prompt estimate (request bytes / 4) plus
+  // the output actually relayed (generated-text bytes / 4), never above the hold.
+  function usagelessCostMicroUsd(prepared, relayedOutputBytes, estimatedCost) {
+    const price = priceTable[prepared.body?.model];
+    if (!price) return estimatedCost;
+    const promptTokens = Math.ceil(Buffer.byteLength(JSON.stringify(prepared.body)) / 4);
+    const outputTokens = Math.ceil(relayedOutputBytes / 4);
+    return Math.min(
+      estimatedCost,
+      Math.ceil(promptTokens * price.prompt + outputTokens * price.completion),
+    );
   }
   if (hasAccountProviderMap && !(accountProviderMap instanceof Map))
     throw new Error("inference_service_dependencies_invalid");
@@ -662,6 +719,8 @@ export function createInferenceService({
 
     let providerSucceeded = false;
     let observedUsage = null;
+    const streamParser = createSseUsageParser();
+    let relayedOutputBytes = 0;
     try {
       const upstream = await fetchImpl(target, {
         method: "POST",
@@ -698,10 +757,12 @@ export function createInferenceService({
           controller.signal,
           claims.request_id,
           maxResponseBytes,
+          streamParser,
         );
       } else {
         const responseBody = await readProviderResponse(upstream, maxResponseBytes);
         observedUsage = jsonUsage(responseBody);
+        if (!observedUsage) relayedOutputBytes = jsonOutputBytes(responseBody);
         res.writeHead(upstream.status, {
           "content-type": upstream.headers.get("content-type") || "application/json; charset=utf-8",
           "cache-control": "no-store",
@@ -766,6 +827,17 @@ export function createInferenceService({
               totalTokens: prepared.reserveOutputTokens,
             }
           : { promptTokens: 0, completionTokens: 0, totalTokens: 0 });
+      // Usage-less 2xx: charge the prompt estimate plus the relayed output, not the
+      // synthetic output reservation above (which only feeds the daily token budget).
+      // Reported usage and provider errors are charged exactly as before.
+      const cost =
+        providerSucceeded && !observedUsage
+          ? usagelessCostMicroUsd(
+              prepared,
+              relayedOutputBytes + streamParser.outputBytes,
+              estimatedCost,
+            )
+          : chargedCost(usage, prepared.body?.model, claims.request_id, estimatedCost);
       await quotaStore
         .finish({
           ownerId: claims.sub,
@@ -774,7 +846,7 @@ export function createInferenceService({
           promptTokens: usage.promptTokens,
           completionTokens: usage.completionTokens,
           totalTokens: usage.totalTokens,
-          costMicroUsd: chargedCost(usage, prepared.body?.model, claims.request_id, estimatedCost),
+          costMicroUsd: cost,
         })
         .catch((error) =>
           logger.error?.("headmaster-inference usage accounting failed", {
@@ -783,13 +855,6 @@ export function createInferenceService({
           }),
         );
       if (walletHeld) {
-        const tableCost = chargedCost(usage, prepared.body?.model, claims.request_id, estimatedCost);
-        // The provider answered 2xx but no usage arrived (a stream that ended without a
-        // usage frame, or a client abort mid-relay): the synthetic usage above prices the
-        // output reservation only, so floor the charge at the reserve-time estimate and
-        // the prompt is not free. A reported usage is charged exactly as reported.
-        const cost =
-          providerSucceeded && !observedUsage ? Math.max(estimatedCost, tableCost) : tableCost;
         await walletStore
           .settle({
             ownerId: claims.sub,

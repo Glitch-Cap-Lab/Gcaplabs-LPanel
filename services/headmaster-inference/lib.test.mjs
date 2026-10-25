@@ -1284,9 +1284,22 @@ test("wallet markup: a model that is not a Headmaster tier uses its own markup, 
 });
 
 // BL12: a 2xx stream that never reports usage (ended early or cut off by the client)
-// is charged at least the reserve-time estimate, prompt included.
-const PROMPT_ONLY_PRICES = Object.freeze({ "gpt-5.5": { prompt: 10, completion: 0 } });
-const CONTENT_FRAME = 'data: {"id":"c1","choices":[{"index":0,"delta":{"content":"hel"}}]}\n\n';
+// is charged the prompt estimate (request bytes / 4) plus the output actually relayed
+// (generated-text bytes / 4), never the whole output reservation and never above the hold.
+// Prices in micro-USD per token: easy arithmetic, and output dearer than the prompt.
+const BL12_PRICES = Object.freeze({ "gpt-5.5": { prompt: 1, completion: 4 } });
+const BL12_BODY = Buffer.from(
+  JSON.stringify({ model: "gpt-5.5", stream: true, messages: [{ role: "user", content: "a long prompt ".repeat(50) }] }),
+);
+// 8 bytes of generated text = 2 output tokens.
+const CONTENT_FRAME = 'data: {"id":"c1","choices":[{"index":0,"delta":{"content":"hello wo"}}]}\n\n';
+
+// The relay forwards the body with max_completion_tokens added; recompute what it prices.
+function bl12Expectations() {
+  const forwarded = { ...JSON.parse(BL12_BODY.toString("utf8")), max_completion_tokens: 1024 };
+  const promptEstimate = Math.ceil(Buffer.byteLength(JSON.stringify(forwarded)) / 4) * 1;
+  return { promptEstimate, hold: promptEstimate + 1024 * 4 };
+}
 
 function streamResponse(frames, { hang = false, signal } = {}) {
   const encoder = new TextEncoder();
@@ -1307,13 +1320,11 @@ async function streamWalletRun(t, fetchImpl, { abortAfterFirstChunk = false, ser
   const f = await startService(t, {
     walletStore,
     walletMode: "on",
-    priceTable: PROMPT_ONLY_PRICES,
+    priceTable: BL12_PRICES,
     fetchImpl,
     ...serviceOptions,
   });
-  const body = Buffer.from(
-    JSON.stringify({ model: "gpt-5.5", stream: true, messages: [{ role: "user", content: "a long prompt ".repeat(50) }] }),
-  );
+  const body = BL12_BODY;
   const abort = new AbortController();
   const response = await postCompletion(
     f.origin,
@@ -1343,11 +1354,15 @@ test("aborted stream is charged at least the prompt estimate", async (t) => {
     { abortAfterFirstChunk: true },
   );
   assert.equal(walletStore.calls.settle.length, 1);
-  const held = walletStore.calls.reserve[0].amountMicroUsd;
-  // Output is free in this price table, so the whole charge is the prompt estimate
-  // (it was $0 before BL12).
-  assert.ok(held > 0);
-  assert.equal(walletStore.calls.settle[0].actualMicroUsd, held);
+  const { promptEstimate, hold } = bl12Expectations();
+  assert.equal(walletStore.calls.reserve[0].amountMicroUsd, hold);
+  const charged = walletStore.calls.settle[0].actualMicroUsd;
+  // The prompt is no longer free...
+  assert.ok(charged >= promptEstimate, `${charged} >= ${promptEstimate}`);
+  // ...but a reply stopped after a few words is not billed the whole output reservation:
+  // prompt estimate + 2 relayed output tokens.
+  assert.equal(charged, promptEstimate + 2 * 4);
+  assert.ok(charged < hold / 2, `${charged} well below the ${hold} hold`);
 });
 
 test("a stream that ends without a usage frame is charged at least the prompt estimate", async (t) => {
@@ -1356,9 +1371,39 @@ test("a stream that ends without a usage frame is charged at least the prompt es
   );
   assert.equal(response.status, 200);
   assert.equal(walletStore.calls.settle.length, 1);
-  const held = walletStore.calls.reserve[0].amountMicroUsd;
-  assert.ok(held > 0);
-  assert.equal(walletStore.calls.settle[0].actualMicroUsd, held);
+  const { promptEstimate } = bl12Expectations();
+  assert.equal(walletStore.calls.settle[0].actualMicroUsd, promptEstimate + 2 * 4);
+});
+
+test("a usage-less stream is never charged more than the hold", async (t) => {
+  // 20 frames x 4000 bytes = 20000 estimated output tokens, far over the 1024-token reservation.
+  const big = `data: ${JSON.stringify({ id: "c1", choices: [{ index: 0, delta: { content: "x".repeat(4000) } }] })}\n\n`;
+  const { walletStore } = await streamWalletRun(t, async () =>
+    streamResponse([...Array(20).fill(big), "data: [DONE]\n\n"]),
+  );
+  assert.equal(walletStore.calls.settle.length, 1);
+  assert.equal(walletStore.calls.settle[0].actualMicroUsd, bl12Expectations().hold);
+});
+
+test("the Redis books get the same usage-less cost as the wallet", async (t) => {
+  const finishes = [];
+  const memory = createMemoryQuotaStore({ now: () => NOW });
+  const quotaStore = {
+    acquire: (args) => memory.acquire(args),
+    finish: (args) => {
+      finishes.push(args);
+      return memory.finish(args);
+    },
+  };
+  const { walletStore } = await streamWalletRun(
+    t,
+    async () => streamResponse([CONTENT_FRAME, "data: [DONE]\n\n"]),
+    { serviceOptions: { quotaStore } },
+  );
+  assert.equal(finishes.length, 1);
+  assert.equal(finishes[0].costMicroUsd, bl12Expectations().promptEstimate + 2 * 4);
+  // Default markup is 10000 bps (at cost), so both books agree to the micro-dollar.
+  assert.equal(walletStore.calls.settle[0].actualMicroUsd, finishes[0].costMicroUsd);
 });
 
 test("stream with usage is charged by usage (unchanged)", async (t) => {
