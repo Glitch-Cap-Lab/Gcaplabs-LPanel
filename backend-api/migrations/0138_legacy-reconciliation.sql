@@ -1,0 +1,1 @@
+DO $$ BEGIN ALTER TABLE agent_hub_listings ADD COLUMN local_visibility TEXT DEFAULT 'internal'; EXCEPTION WHEN duplicate_column THEN NULL; END $$

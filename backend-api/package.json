@@ -7,6 +7,7 @@
   "scripts": {
     "start": "tsx server.ts",
     "typecheck": "tsc --noEmit",
+    "migrations:lock": "tsx scripts/update-migration-lock.ts",
     "test": "jest --forceExit --detectOpenHandles"
   },
   "dependencies": {

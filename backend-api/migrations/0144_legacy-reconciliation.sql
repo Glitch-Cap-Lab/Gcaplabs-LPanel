@@ -1,0 +1,1 @@
+DO $$ BEGIN ALTER TABLE agent_hub_listings ADD COLUMN current_version INTEGER DEFAULT 1; EXCEPTION WHEN duplicate_column THEN NULL; END $$

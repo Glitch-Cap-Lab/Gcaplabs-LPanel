@@ -119,6 +119,10 @@ const {
 } = require("../agentProvisionLock");
 
 const router = express.Router();
+const { createProtectedReleaseStatusHandler } = require("../protectedReleaseStatusRoute");
+const { createProtectedReleaseOperationHandler } = require("../protectedReleaseOperationRoute");
+const { createProtectedReleaseTargetHandler } = require("../protectedReleaseTargetRoute");
+const { createProtectedReleaseProgressHandler } = require("../protectedReleaseProgressRoute");
 router.use(createMutationFailureAuditMiddleware("agent"));
 const coreAgentScope = scopeByMethod("agents:read", "agents:write");
 const ROUTE_SPECIFIC_SCOPE_SEGMENTS = new Set([
@@ -151,6 +155,22 @@ router.use((req, res, next) => {
   return coreAgentScope(req, res, next);
 });
 router.param("id", requireApiKeyAgentScope("id"));
+router.get("/:id/protected-runtime-releases/:releaseId", requireSession, createProtectedReleaseStatusHandler({
+  db, getJob: id => require("../redisQueue").deployQueue.getJob(id),
+  acquireLock: acquireAgentProvisionLock, loadBackend: row => containerManager.backendFor(row),
+}));
+router.get("/:id/protected-runtime-target", requireSession, createProtectedReleaseTargetHandler({
+  db, loadBackend: row => containerManager.backendFor(row),
+}));
+router.get("/:id/protected-runtime-releases/:releaseId/progress", requireSession, createProtectedReleaseProgressHandler({
+  db, getJob: id => require("../redisQueue").deployQueue.getJob(id),
+}));
+router.post("/:id/protected-runtime-releases/:releaseId/operations", requireSession, createProtectedReleaseOperationHandler({
+  db, acquireLock: acquireAgentProvisionLock, loadBackend: row => containerManager.backendFor(row),
+  buildReplacementDeploymentJob: require("../agentProvisionLock").buildReplacementDeploymentJob,
+  enqueue: require("../agentProvisionLock").enqueueReplacementDeployment,
+  createQueueSession: signal => require("../redisQueue").createProtectedQueueSession(signal),
+}));
 
 const DEMO_ACTIVATION_MARKER = "local-docker-demo-v1";
 
@@ -1032,6 +1052,24 @@ function extractHermesApiError(payload, fallbackMessage) {
   return fallbackMessage;
 }
 
+function chatAuthorityError(response) {
+  const code = response.data?.error?.code;
+  const messages = {
+    admission_conflict: "This conversation changed. Refresh it before sending again.",
+    unknown_execution:
+      "The previous message may still be running. Check the conversation before sending it again.",
+    admission_queued:
+      "Your message was accepted and is waiting for the bot to restart. Do not send it again.",
+    runtime_draining:
+      "The bot is restarting. Your message is saved in the input; try again after it reconnects.",
+    storage_unavailable:
+      "The bot is temporarily unavailable. Your message is saved in the input; try again shortly.",
+    session_busy: "This conversation is still working. Wait for it to finish before trying again.",
+  };
+  if (!Object.hasOwn(messages, code) || ![409, 503].includes(response.status)) return null;
+  return { code, message: messages[code], status: response.status };
+}
+
 function createStatusCodeError(message, statusCode) {
   const error = new Error(message);
   error.statusCode = statusCode;
@@ -1660,6 +1698,20 @@ router.post(
     }
 
     if (!chatResponse.ok) {
+      const authorityError = chatAuthorityError(chatResponse);
+      if (authorityError) {
+        // Preserve accepted/uncertain outcomes without automatically resending.
+        if (chatResponse.headers.get("x-should-retry") === "false") {
+          res.setHeader("x-should-retry", "false");
+        } else if (authorityError.status === 503) {
+          const retryAfter = chatResponse.headers.get("retry-after");
+          if (/^\d+$/.test(retryAfter || "")) res.setHeader("Retry-After", retryAfter);
+        }
+        return res.status(authorityError.status).json({
+          error: authorityError.message,
+          code: authorityError.code,
+        });
+      }
       const upstreamStatus = chatResponse.status >= 500 ? 502 : chatResponse.status;
       return res.status(upstreamStatus).json({
         error: extractHermesApiError(
@@ -2251,6 +2303,13 @@ router.post("/deploy", async (req, res) => {
         return res.json({ ...serializeAgent(current), reused: true, identity_proof: "immutable_owner_workspace" });
       }
     }
+    // A seat runtime of a team organization names the organization so its shared folder is mounted
+    // (WS13). Managed deployments only (admin session, checked above), and only a UUID.
+    const headmasterOrgId = requestBody.headmaster_org_id ?? null;
+    if (headmasterOrgId !== null && (!headmaster || typeof headmasterOrgId !== "string" ||
+        !/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/.test(headmasterOrgId))) {
+      return res.status(400).json({ error: "headmaster_org_id must be an organization UUID on a managed deployment" });
+    }
     const limits = await billing.enforceLimits(req.user.id);
     if (!limits.allowed)
       return res.status(402).json({ error: limits.error, subscription: limits.subscription });
@@ -2330,8 +2389,8 @@ router.post("/deploy", async (req, res) => {
          deploy_target, execution_target_id, sandbox_profile,
          external_namespace, external_id, external_owner_uuid,
          headmaster_owner_id, headmaster_workspace_id, headmaster_memory_bank_id, headmaster_memory_gateway_url,
-         headmaster_integration_desired_revision, headmaster_integration_deployment_status
-       ) VALUES($1, $2, 'queued', $3, $4, $5, $6, $7, $8, $9, $10, $11, $12::jsonb, $13::jsonb, $14, $15, $16, $17, $18, $19, $20, $21, $22, $23, $24, $25, $26) RETURNING *`,
+         headmaster_integration_desired_revision, headmaster_integration_deployment_status, headmaster_org_id
+       ) VALUES($1, $2, 'queued', $3, $4, $5, $6, $7, $8, $9, $10, $11, $12::jsonb, $13::jsonb, $14, $15, $16, $17, $18, $19, $20, $21, $22, $23, $24, $25, $26, $27) RETURNING *`,
       [
         req.user.id,
         name,
@@ -2356,6 +2415,7 @@ router.post("/deploy", async (req, res) => {
         ...(headmaster || [null, null, null, null]),
         headmaster ? 1 : 0,
         headmaster ? "pending" : "unconfigured",
+        headmasterOrgId,
       ],
     );
     const agent = result.rows[0];
@@ -2909,6 +2969,9 @@ router.post("/:id/start", async (req, res, next) => {
   }
 });
 
+// Reasons a caller may record with a stop (see below).
+const STOP_REASONS = new Set(["wallet_empty"]);
+
 router.post("/:id/stop", async (req, res, next) => {
   try {
     const result = await withAccessibleAgentLifecycleLock(
@@ -2933,9 +2996,15 @@ router.post("/:id/stop", async (req, res, next) => {
           }
         }
 
+        // A stop may say why: the Headmaster provisioner switches an organization's seats off for an empty wallet this
+        // way. The reason is kept (never over an existing one, such as a budget pause) so the
+        // runtime reads as switched off on purpose and not as down; the next start clears it.
+        const stopReason = STOP_REASONS.has(req.body?.reason) ? req.body.reason : null;
         const updated = await db.query(
-          "UPDATE agents SET status = 'stopped' WHERE id = $1 RETURNING *",
-          [agent.id],
+          stopReason
+            ? "UPDATE agents SET status = 'stopped', paused_reason = COALESCE(paused_reason, $2) WHERE id = $1 RETURNING *"
+            : "UPDATE agents SET status = 'stopped' WHERE id = $1 RETURNING *",
+          stopReason ? [agent.id, stopReason] : [agent.id],
         );
         await monitoring.logEvent(
           "agent_stopped",

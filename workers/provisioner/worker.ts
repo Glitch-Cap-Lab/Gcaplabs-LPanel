@@ -109,6 +109,7 @@ const {
 } = require("../../agent-runtime/lib/hermesRuntimeBootstrap");
 const { waitForAgentReadiness } = require("./healthChecks");
 const { runDemoActivationCanary } = require("./demoActivationCanary");
+const { runProtectedReleaseJob } = require("./protectedReleaseJob");
 const {
   acquireDedicatedSessionLock,
   finalizeProvisionedDeployment,
@@ -246,12 +247,13 @@ async function acquireAgentProvisionLock(agentId) {
   });
 }
 
-async function withProviderMutationLock(userId, operation) {
+async function withProviderMutationLock(userId, operation, { signal = null } = {}) {
   if (!userId || typeof operation !== "function") {
     throw new Error("userId and operation are required for the provider mutation lock");
   }
   const lockKey = providerMutationLockKey(userId);
   const lock = await acquireDedicatedSessionLock({
+    signal,
     createClient: () => createProvisionerLockClient("provider-mutation-lock"),
     acquire: async (client) => {
       try {
@@ -278,7 +280,7 @@ async function withProviderMutationLock(userId, operation) {
       ),
   });
   try {
-    return await operation();
+    return await operation(lock);
   } finally {
     await lock.release();
   }
@@ -4426,7 +4428,7 @@ const worker = new Worker(
         `SELECT image, template_payload, sandbox_type, backend_type, runtime_family,
             deploy_target, execution_target_id, sandbox_profile, gateway_token, mcp_servers, status,
             container_id, container_name, host, runtime_host, runtime_port, gateway_host,
-            gateway_port, gateway_host_port, dashboard_port, user_id,
+            gateway_port, gateway_host_port, dashboard_port, user_id, headmaster_org_id,
             ${require("../../backend-api/headmasterConfig").HEADMASTER_AGENT_COLUMNS.join(", ")}
        FROM agents
       WHERE id = $1`,
@@ -4461,6 +4463,17 @@ const worker = new Worker(
       // safety barrier after owner validation. Refuse the job before parsing
       // a possibly stale desired target so malformed selection metadata cannot
       // mask the live/orphaned runtime that an operator must reconcile first.
+      // Explicit operator-produced protected jobs own their retained-container lifecycle.
+      // Branch before generic replacement destroys the old runtime. Existing jobs stay unchanged.
+      if (job.data.protected_release) {
+        try {
+          return await runProtectedReleaseJob(job, { db, agentRow, loadBackend, withProviderMutationLock, provisionLock });
+        } catch (error) {
+          // Code only: protected release errors never carry runtime values in their code.
+          console.error(`[provisioner] Protected runtime release for agent ${id} failed: ${error?.code || error?.name || "UNKNOWN"}`);
+          throw new UnrecoverableError("Protected runtime release requires receipt review or explicit recovery");
+        }
+      }
       if (agentRow.container_id && job.data.replace_existing_runtime !== true) {
         console.error(
           `[provisioner] Refusing to create a replacement runtime for agent ${id}; unresolved runtime ${agentRow.container_id} is still persisted`,
@@ -4805,6 +4818,7 @@ const worker = new Worker(
             gatewayToken: agentRow.gateway_token || undefined,
             templatePayload,
             credentialManagedEnvNames,
+            orgFilesOrgId: agentRow.headmaster_org_id || null,
             runtimeFamily: resolvedRuntimeFields.runtime_family,
             deployTarget: resolvedRuntimeFields.deploy_target,
             executionTargetId: resolvedRuntimeFields.execution_target_id,
@@ -5399,6 +5413,17 @@ const worker = new Worker(
 );
 
 worker.on("failed", async (job, err) => {
+  if (job?.data?.protected_release) {
+    // This event runs after the agent lock is released. Never mutate another queued runtime.
+    const deploymentId = job.data.protected_release.deployment_id;
+    if (/^[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}$/.test(deploymentId || "")) {
+      try {
+        await db.query("UPDATE deployments SET status = 'failed' WHERE agent_id = $1 AND id = $2 AND status IN ('queued', 'deploying')", [job.data.id, deploymentId]);
+      } catch { console.error("Protected runtime release terminal receipt requires review"); }
+    }
+    console.error("Protected runtime release failed; use its retained receipt for explicit recovery");
+    return;
+  }
   const attempts = job?.attemptsMade || 0;
   const maxAttempts = job?.opts?.attempts || 1;
   const unrecoverable = isUnrecoverableDeploymentError(err);
@@ -5732,6 +5757,9 @@ const healthServer = http.createServer((req, res) => {
 healthServer.listen(HEALTH_PORT, () => {
   console.log(`Worker health check listening on port ${HEALTH_PORT}`);
 });
+
+// New Hermes bots start on the newest finalized runtime release; env is the fallback.
+require("../../agent-runtime/lib/currentRuntimeImage").startCurrentRuntimeImagePoll();
 
 // Per-agent networks (NORA_AGENT_NETWORK_ISOLATION): a recreated control-plane
 // container loses its attachments, so re-attach the configured peers on start.

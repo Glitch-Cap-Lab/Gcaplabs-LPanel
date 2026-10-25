@@ -2,13 +2,12 @@ name: Admin dashboard
 
 # Helper tests and typecheck for admin-dashboard. Linux only, pull requests only,
 # about 30 seconds, one job (billed as 1 minute). Skipped for draft PRs.
+# Every ready PR emits this check. Complete Git diff selection inside the job
+# skips only unrelated helper/typecheck work and fails closed on missing data.
 
 on:
   pull_request:
     types: [opened, synchronize, reopened, ready_for_review]
-    paths:
-      - 'admin-dashboard/**'
-      - '.github/workflows/admin-dashboard.yml'
   workflow_dispatch:
 
 permissions:
@@ -24,18 +23,27 @@ jobs:
     if: github.event_name != 'pull_request' || github.event.pull_request.draft == false
     runs-on: ubuntu-latest
     timeout-minutes: 8
-    defaults:
-      run:
-        working-directory: admin-dashboard
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
           persist-credentials: false
-      - uses: actions/setup-node@v4
+          fetch-depth: 0
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
         with:
           node-version-file: .nvmrc
           cache: npm
           cache-dependency-path: admin-dashboard/package-lock.json
+      - name: Test CI path selection
+        run: node --test scripts/ci-paths.test.mjs
+      - name: Select component checks from complete PR diff
+        id: changes
+        run: node scripts/ci-paths.mjs admin
       - run: npm ci --ignore-scripts --no-audit --no-fund
+        if: steps.changes.outputs.affected == 'true'
+        working-directory: admin-dashboard
       - run: npm run test:helpers
+        if: steps.changes.outputs.affected == 'true'
+        working-directory: admin-dashboard
       - run: npm run typecheck
+        if: steps.changes.outputs.affected == 'true'
+        working-directory: admin-dashboard

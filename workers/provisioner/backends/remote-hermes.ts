@@ -62,6 +62,12 @@ class RemoteHermesBackend extends HermesBackend {
     return null;
   }
 
+  // Remote hosts do not share the control plane's Docker networks.
+  _assertNetworkIsolation() {}
+
+  // The budget describes the control-plane host's RAM, not a remote host's.
+  async _assertHostMemoryBudget() {}
+
   // Publish the Hermes RUNTIME port (readiness/API) and DASHBOARD port (embed UI)
   // on their worker-allocated host ports so both are reachable across the network
   // ({runtime_host}:{runtime_port}/health for readiness; the dashboard via its own
@@ -84,7 +90,8 @@ class RemoteHermesBackend extends HermesBackend {
   }
 
   async create(config = {}) {
-    const result = await super.create(config);
+    // The shared organization folder lives on this control plane host, not on a remote one.
+    const result = await super.create({ ...config, orgFilesOrgId: null });
     // Advertise the remote machine's address + the published runtime and dashboard
     // ports so the control plane targets the remote host instead of the container's
     // internal (unreachable) compose IP, readiness probes the right address, and the

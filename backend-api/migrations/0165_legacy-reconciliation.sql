@@ -1,0 +1,1 @@
+CREATE INDEX IF NOT EXISTS idx_agent_hub_api_keys_user ON agent_hub_api_keys(user_id, created_at DESC)

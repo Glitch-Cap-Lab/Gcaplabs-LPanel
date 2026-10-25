@@ -1076,6 +1076,63 @@ test("Lite and Pro map to their OpenRouter models from config, with env override
   });
 });
 
+function fakeWallet({ allowed = true, reason = null, fail = false } = {}) {
+  const calls = { reserve: [], settle: [] };
+  return {
+    calls,
+    configured: true,
+    async reserve(args) {
+      calls.reserve.push(args);
+      if (fail) throw Object.assign(new Error("wallet_unavailable"), { code: "wallet_unavailable" });
+      return { allowed, reason, balanceMicroUsd: 0, freeMicroUsd: 0 };
+    },
+    async settle(args) {
+      calls.settle.push(args);
+    },
+  };
+}
+
+async function walletCompletion(t, walletOptions, serviceOptions = {}) {
+  const walletStore = fakeWallet(walletOptions);
+  const f = await startService(t, { walletStore, ...serviceOptions });
+  const body = Buffer.from(
+    JSON.stringify({ model: "gpt-5.5", messages: [{ role: "user", content: "hi" }] }),
+  );
+  const response = await postCompletion(
+    f.origin,
+    body,
+    makeToken({ method: "POST", path: "/v1/chat/completions", body }),
+  );
+  return { response, walletStore, f };
+}
+
+test("wallet on: an empty wallet answers 402 insufficient_credit and releases the Redis hold", async (t) => {
+  const { response, walletStore } = await walletCompletion(
+    t,
+    { allowed: false, reason: "insufficient_credit" },
+    { walletMode: "on" },
+  );
+  assert.equal(response.status, 402);
+  const error = (await response.json()).error;
+  assert.equal(error.code, "insufficient_credit");
+  assert.doesNotMatch(error.message, /Hermes|Nous|Nora/i);
+  assert.equal(walletStore.calls.settle.length, 0);
+});
+
+test("wallet on: a suspended organization answers 403 and an unreachable wallet answers 503", async (t) => {
+  const suspended = await walletCompletion(t, { allowed: false, reason: "org_suspended" }, { walletMode: "on" });
+  assert.equal(suspended.response.status, 403);
+  assert.equal((await suspended.response.json()).error.code, "organization_suspended");
+  const down = await walletCompletion(t, { fail: true }, { walletMode: "on" });
+  assert.equal(down.response.status, 503);
+  assert.equal((await down.response.json()).error.code, "quota_unavailable");
+});
+
+test("wallet off: the wallet is never called", async (t) => {
+  const { walletStore } = await walletCompletion(t, {}, { walletMode: "off" });
+  assert.equal(walletStore.calls.reserve.length, 0);
+});
+
 test("the monthly spend cap answers 429 monthly_budget_exceeded in plain Headmaster wording", async (t) => {
   const quota = createMemoryQuotaStore({ maxMicroUsdPerMonth: 0, now: () => NOW });
   const f = await startService(t, { quotaStore: quota });
@@ -1213,4 +1270,176 @@ test("a model with no known price is refused, not charged $0", async (t) => {
   assert.doesNotMatch(error.message, /Hermes|Nous|Nora/i);
   assert.equal(called, false);
   assert.equal(f.quota.inspect(OWNER_A).active, 0);
+});
+
+test("wallet markup: a model that is not a Headmaster tier uses its own markup, default at cost", async (t) => {
+  const at = async (options) =>
+    (await walletCompletion(t, {}, { walletMode: "on", ...options })).walletStore.calls.reserve[0].amountMicroUsd;
+  const base = await at({});
+  assert.ok(base > 0);
+  // The tier markup does not touch a public-priced model.
+  assert.equal(await at({ walletMarkupBps: 12_500 }), base);
+  // The other-model markup does.
+  assert.ok((await at({ walletOtherMarkupBps: 20_000 })) > base);
+});
+
+// BL12: a 2xx stream that never reports usage (ended early or cut off by the client)
+// is charged the prompt estimate (request bytes / 4) plus the output actually relayed
+// (generated-text bytes / 4), never the whole output reservation and never above the hold.
+// Prices in micro-USD per token: easy arithmetic, and output dearer than the prompt.
+const BL12_PRICES = Object.freeze({ "gpt-5.5": { prompt: 1, completion: 4 } });
+const BL12_BODY = Buffer.from(
+  JSON.stringify({ model: "gpt-5.5", stream: true, messages: [{ role: "user", content: "a long prompt ".repeat(50) }] }),
+);
+// 8 bytes of generated text = 2 output tokens.
+const CONTENT_FRAME = 'data: {"id":"c1","choices":[{"index":0,"delta":{"content":"hello wo"}}]}\n\n';
+
+// The relay forwards the body with max_completion_tokens added; recompute what it prices.
+function bl12Expectations() {
+  const forwarded = { ...JSON.parse(BL12_BODY.toString("utf8")), max_completion_tokens: 1024 };
+  const promptEstimate = Math.ceil(Buffer.byteLength(JSON.stringify(forwarded)) / 4) * 1;
+  return { promptEstimate, hold: promptEstimate + 1024 * 4 };
+}
+
+function streamResponse(frames, { hang = false, signal } = {}) {
+  const encoder = new TextEncoder();
+  return new Response(
+    new ReadableStream({
+      start(controller) {
+        for (const frame of frames) controller.enqueue(encoder.encode(frame));
+        if (!hang) return controller.close();
+        signal?.addEventListener("abort", () => controller.error(signal.reason), { once: true });
+      },
+    }),
+    { status: 200, headers: { "content-type": "text/event-stream" } },
+  );
+}
+
+async function streamWalletRun(t, fetchImpl, { abortAfterFirstChunk = false, serviceOptions = {} } = {}) {
+  const walletStore = fakeWallet();
+  const f = await startService(t, {
+    walletStore,
+    walletMode: "on",
+    priceTable: BL12_PRICES,
+    fetchImpl,
+    ...serviceOptions,
+  });
+  const body = BL12_BODY;
+  const abort = new AbortController();
+  const response = await postCompletion(
+    f.origin,
+    body,
+    makeToken({ method: "POST", path: "/v1/chat/completions", body }),
+    abort.signal,
+  );
+  if (abortAfterFirstChunk) {
+    const reader = response.body.getReader();
+    await reader.read();
+    abort.abort();
+    await reader.cancel().catch(() => {});
+  } else {
+    await response.text();
+  }
+  const deadline = Date.now() + 2000;
+  // Settlement runs in the relay's finally block, after the client has its bytes.
+  while (serviceOptions.walletMode !== "off" && walletStore.calls.settle.length === 0 && Date.now() < deadline)
+    await new Promise((resolve) => setTimeout(resolve, 10));
+  return { response, walletStore, f };
+}
+
+test("aborted stream is charged at least the prompt estimate", async (t) => {
+  const { walletStore } = await streamWalletRun(
+    t,
+    async (_url, options) => streamResponse([CONTENT_FRAME], { hang: true, signal: options.signal }),
+    { abortAfterFirstChunk: true },
+  );
+  assert.equal(walletStore.calls.settle.length, 1);
+  const { promptEstimate, hold } = bl12Expectations();
+  assert.equal(walletStore.calls.reserve[0].amountMicroUsd, hold);
+  const charged = walletStore.calls.settle[0].actualMicroUsd;
+  // The prompt is no longer free...
+  assert.ok(charged >= promptEstimate, `${charged} >= ${promptEstimate}`);
+  // ...but a reply stopped after a few words is not billed the whole output reservation:
+  // prompt estimate + 2 relayed output tokens.
+  assert.equal(charged, promptEstimate + 2 * 4);
+  assert.ok(charged < hold / 2, `${charged} well below the ${hold} hold`);
+});
+
+test("a stream that ends without a usage frame is charged at least the prompt estimate", async (t) => {
+  const { response, walletStore } = await streamWalletRun(t, async () =>
+    streamResponse([CONTENT_FRAME, "data: [DONE]\n\n"]),
+  );
+  assert.equal(response.status, 200);
+  assert.equal(walletStore.calls.settle.length, 1);
+  const { promptEstimate } = bl12Expectations();
+  assert.equal(walletStore.calls.settle[0].actualMicroUsd, promptEstimate + 2 * 4);
+});
+
+test("a usage-less stream is never charged more than the hold", async (t) => {
+  // 20 frames x 4000 bytes = 20000 estimated output tokens, far over the 1024-token reservation.
+  const big = `data: ${JSON.stringify({ id: "c1", choices: [{ index: 0, delta: { content: "x".repeat(4000) } }] })}\n\n`;
+  const { walletStore } = await streamWalletRun(t, async () =>
+    streamResponse([...Array(20).fill(big), "data: [DONE]\n\n"]),
+  );
+  assert.equal(walletStore.calls.settle.length, 1);
+  assert.equal(walletStore.calls.settle[0].actualMicroUsd, bl12Expectations().hold);
+});
+
+test("the Redis books get the same usage-less cost as the wallet", async (t) => {
+  const finishes = [];
+  const memory = createMemoryQuotaStore({ now: () => NOW });
+  const quotaStore = {
+    acquire: (args) => memory.acquire(args),
+    finish: (args) => {
+      finishes.push(args);
+      return memory.finish(args);
+    },
+  };
+  const { walletStore } = await streamWalletRun(
+    t,
+    async () => streamResponse([CONTENT_FRAME, "data: [DONE]\n\n"]),
+    { serviceOptions: { quotaStore } },
+  );
+  assert.equal(finishes.length, 1);
+  assert.equal(finishes[0].costMicroUsd, bl12Expectations().promptEstimate + 2 * 4);
+  // Default markup is 10000 bps (at cost), so both books agree to the micro-dollar.
+  assert.equal(walletStore.calls.settle[0].actualMicroUsd, finishes[0].costMicroUsd);
+});
+
+test("stream with usage is charged by usage (unchanged)", async (t) => {
+  const { walletStore } = await streamWalletRun(t, async () =>
+    streamResponse([
+      CONTENT_FRAME,
+      'data: {"id":"c1","choices":[],"usage":{"prompt_tokens":3,"completion_tokens":2,"total_tokens":5,"cost":0.000005}}\n\n',
+      "data: [DONE]\n\n",
+    ]),
+  );
+  assert.equal(walletStore.calls.settle.length, 1);
+  assert.equal(walletStore.calls.settle[0].actualMicroUsd, 5);
+  assert.ok(walletStore.calls.reserve[0].amountMicroUsd > 5);
+  assert.equal(walletStore.calls.settle[0].detail.prompt_tokens, 3);
+});
+
+test("provider error is not charged by the estimate", async (t) => {
+  const { response, walletStore } = await streamWalletRun(t, async () =>
+    new Response('{"error":"boom"}', { status: 500, headers: { "content-type": "application/json" } }),
+  );
+  assert.ok(response.status >= 500);
+  assert.equal(walletStore.calls.settle.length, 1);
+  assert.equal(walletStore.calls.settle[0].actualMicroUsd, 0);
+});
+
+test("non-wallet mode unchanged: a usage-less stream settles the output reservation only", async (t) => {
+  const { walletStore, f } = await streamWalletRun(
+    t,
+    async () => streamResponse([CONTENT_FRAME, "data: [DONE]\n\n"]),
+    { serviceOptions: { walletMode: "off" } },
+  );
+  await new Promise((resolve) => setTimeout(resolve, 50));
+  assert.equal(walletStore.calls.reserve.length, 0);
+  assert.equal(walletStore.calls.settle.length, 0);
+  const usage = f.quota.inspect(OWNER_A);
+  assert.equal(usage.active, 0);
+  assert.equal(usage.used, 1024);
+  assert.equal(usage.usage.promptTokens, 0);
 });

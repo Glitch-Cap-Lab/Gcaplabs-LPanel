@@ -1,0 +1,1 @@
+DO $$ BEGIN ALTER TABLE agents ADD COLUMN hermes_skills JSONB DEFAULT '[]'; EXCEPTION WHEN duplicate_column THEN NULL; END $$

@@ -1,0 +1,1 @@
+UPDATE agents SET hermes_skills = '[]'::jsonb WHERE hermes_skills IS NULL

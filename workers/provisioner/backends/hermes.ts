@@ -1,6 +1,7 @@
 // @ts-nocheck
 const crypto = require("crypto");
 const DockerBackend = require("./docker");
+const { orgFilesBind } = require("./orgFilesMount");
 const {
   buildDockerTelemetry,
   buildUnavailableTelemetry,
@@ -23,9 +24,11 @@ const {
 const {
   ensureAgentNetwork,
   perRuntimeNetworkEnabled,
+  assertRuntimeIsolation,
   removeAgentNetwork,
   volumeQuotaOptions,
 } = require("./agentIsolation");
+const { assertHostMemoryBudget } = require("./hostMemoryBudget");
 
 const HERMES_RUNTIME_PORT = 8642;
 const HERMES_HOME = "/opt/data";
@@ -199,6 +202,17 @@ class HermesBackend extends DockerBackend {
     return Object.keys(bindings).length ? bindings : undefined;
   }
 
+  // Every local runtime must sit on its own network; a remote Docker host has no
+  // control-plane peers to attach, so RemoteHermesBackend overrides this.
+  _assertNetworkIsolation() {
+    assertRuntimeIsolation();
+  }
+
+  // Refuses a new runtime past the host's memory budget (NORA_HOST_MEMORY_BUDGET_MB).
+  async _assertHostMemoryBudget(agentId, requestedMb) {
+    await assertHostMemoryBudget(this.docker, { agentId, requestedMb });
+  }
+
   async create(config) {
     const {
       id,
@@ -211,6 +225,7 @@ class HermesBackend extends DockerBackend {
       container_name,
       abortSignal,
       credentialManagedEnvNames = [],
+      orgFilesOrgId = null,
     } = config;
     const containerName = container_name || safeContainerName("nora-hermes", name, id);
     const imgName = image || getHermesDockerAgentImage();
@@ -312,6 +327,8 @@ class HermesBackend extends DockerBackend {
 
     // Per-agent mode puts the runtime alone on its own network (plus the
     // configured control-plane peers), so runtimes cannot reach each other.
+    this._assertNetworkIsolation();
+    await this._assertHostMemoryBudget(id, ram_mb || 2048);
     const isolated = perRuntimeNetworkEnabled();
     const composeNetwork = isolated
       ? await ensureAgentNetwork(this.docker, id)
@@ -348,7 +365,8 @@ class HermesBackend extends DockerBackend {
           SecurityOpt: ["no-new-privileges:true"],
           PidsLimit: DEFAULT_AGENT_PIDS_LIMIT,
           Dns: ["8.8.8.8", "8.8.4.4", "1.1.1.1"],
-          Binds: [`${homeVolumeName}:${HERMES_HOME}`],
+          // A team organization's shared folder rides along read-only (WS13).
+          Binds: [`${homeVolumeName}:${HERMES_HOME}`, orgFilesBind(orgFilesOrgId)].filter(Boolean),
           // Local Hermes publishes the runtime + dashboard ports to
           // DOCKER_AGENT_BIND_IP (see _hermesPortBindings above) in addition to
           // being reachable via the container IP on the shared compose network.

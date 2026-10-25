@@ -1,0 +1,1 @@
+CREATE UNIQUE INDEX IF NOT EXISTS idx_agent_hub_listings_slug_unique ON agent_hub_listings(slug) WHERE slug IS NOT NULL

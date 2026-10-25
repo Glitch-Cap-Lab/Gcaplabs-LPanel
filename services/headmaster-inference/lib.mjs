@@ -1,4 +1,5 @@
 import http from "node:http";
+import { withMarkup } from "./wallet.mjs";
 import { createReplayCache, verifyAssertion } from "./assertion.mjs";
 import {
   TESTED_MODELS,
@@ -22,6 +23,18 @@ import {
   mintRealtimeToken,
   prepareRealtimeRequest,
 } from "./realtime.mjs";
+
+import {
+  TRANSCRIPTION_PATH,
+  callVendor,
+  estimatedSeconds,
+  prepareTranscription,
+  transcriptionCostMicroUsd,
+  transcriptionReserveMicroUsd,
+} from "./transcription.mjs";
+import { SPEECH_PATH, callSpeechServer, prepareSpeech, speechCostMicroUsd } from "./speech.mjs";
+import { SPEECH_CATALOG_PATH, createSpeechCatalog } from "./speech-catalog.mjs";
+import { transcodeWav } from "./transcode.mjs";
 
 export const MAX_REQUEST_BYTES = 36 * 1024 * 1024;
 export const MAX_RESPONSE_BYTES = 32 * 1024 * 1024;
@@ -74,10 +87,40 @@ function jsonUsage(buffer) {
   }
 }
 
+// UTF-8 bytes of the model-generated text in one choice's delta or message: content,
+// reasoning and tool-call names/arguments. Used to estimate output tokens (bytes / 4)
+// when the provider reports no usage.
+function choiceOutputBytes(part) {
+  if (!part || typeof part !== "object") return 0;
+  let bytes = 0;
+  for (const text of [part.content, part.reasoning_content, part.reasoning])
+    if (typeof text === "string") bytes += Buffer.byteLength(text);
+  if (Array.isArray(part.tool_calls))
+    for (const call of part.tool_calls)
+      for (const text of [call?.function?.name, call?.function?.arguments])
+        if (typeof text === "string") bytes += Buffer.byteLength(text);
+  return bytes;
+}
+
+function outputBytesOf(parsed, key) {
+  if (!Array.isArray(parsed?.choices)) return 0;
+  return parsed.choices.reduce((sum, choice) => sum + choiceOutputBytes(choice?.[key]), 0);
+}
+
+// Generated-text bytes of a non-streamed chat completion body.
+function jsonOutputBytes(buffer) {
+  try {
+    return outputBytesOf(JSON.parse(buffer.toString("utf8")), "message");
+  } catch {
+    return 0;
+  }
+}
+
 function createSseUsageParser() {
   let pending = "";
   let eventData = [];
   let usage = null;
+  let outputBytes = 0;
   const decoder = new TextDecoder();
   const flushEvent = () => {
     if (eventData.length) {
@@ -85,6 +128,7 @@ function createSseUsageParser() {
       if (data !== "[DONE]") {
         try {
           const parsed = JSON.parse(data);
+          outputBytes += outputBytesOf(parsed, "delta");
           if (parsed?.usage && typeof parsed.usage === "object")
             usage = normalizeUsage(parsed.usage);
         } catch {
@@ -114,6 +158,10 @@ function createSseUsageParser() {
     },
     get usage() {
       return usage;
+    },
+    // Generated-text bytes of the complete SSE events relayed so far.
+    get outputBytes() {
+      return outputBytes;
     },
   };
 }
@@ -145,7 +193,15 @@ function waitForDrain(res, signal) {
   });
 }
 
-async function copyStreamingResponse(response, res, signal, requestId, maxResponseBytes) {
+// `parser` is passed in by callers that need its counters after a mid-stream abort.
+async function copyStreamingResponse(
+  response,
+  res,
+  signal,
+  requestId,
+  maxResponseBytes,
+  parser = createSseUsageParser(),
+) {
   const contentType = response.headers.get("content-type") || "text/event-stream; charset=utf-8";
   res.writeHead(200, {
     "content-type": contentType,
@@ -153,7 +209,6 @@ async function copyStreamingResponse(response, res, signal, requestId, maxRespon
     "x-request-id": requestId,
     "x-accel-buffering": "no",
   });
-  const parser = createSseUsageParser();
   let sentBytes = 0;
   if (!response.body) {
     res.end();
@@ -165,8 +220,10 @@ async function copyStreamingResponse(response, res, signal, requestId, maxRespon
       throw Object.assign(new Error("provider_response_too_large"), {
         code: "provider_response_too_large",
       });
+    // Count a chunk only once it has been handed to the client.
+    const drained = res.write(chunk);
     parser.push(chunk);
-    if (!res.write(chunk)) await waitForDrain(res, signal);
+    if (!drained) await waitForDrain(res, signal);
   }
   if (!res.writableEnded) res.end();
   return parser.end();
@@ -226,6 +283,21 @@ export function createInferenceService({
   // own_key_unavailable and the operator path is unaffected.
   resolveOwnKey = null,
   byoQuotaStore = null,
+  // Wallet billing (wallet.mjs). off: not used (tests only; the server always runs
+  // on). on: the wallet replaces the Redis monthly cap and an empty wallet refuses
+  // (402 insufficient_credit).
+  walletStore = null,
+  walletMode = "off",
+  walletMarkupBps = 10_000,
+  // Markup for models that are not a Headmaster tier (public prices: at cost).
+  walletOtherMarkupBps = 10_000,
+  walletMonthlyGrantMicroUsd = 0,
+  // From transcriptionConfigFromEnv, or null: the transcription route is absent (404).
+  transcription = null,
+  // From speechConfigFromEnv, or null: the speech route is absent (404).
+  speech = null,
+  // Converts an engine's WAV to the requested format (ffmpeg); injectable for tests.
+  transcode = transcodeWav,
 } = {}) {
   if (typeof assertionSecret !== "string" || Buffer.byteLength(assertionSecret) < 32)
     throw new Error("assertion_secret_invalid");
@@ -235,6 +307,12 @@ export function createInferenceService({
   const hasResolveAssignment = resolveAssignment !== undefined && resolveAssignment !== null;
   if (hasAccountProviderMap === hasResolveAssignment)
     throw new Error("inference_service_dependencies_invalid");
+  // Headmaster tiers carry the wallet markup; every other model is charged at
+  // its own markup (default at cost) because its price is public.
+  const tierBackends = new Set(Object.values(tierModels));
+  function markupFor(model) {
+    return tierBackends.has(model) ? walletMarkupBps : walletOtherMarkupBps;
+  }
   // Settled cost: the reported or table cost; if neither is known, the reserved
   // estimate (never $0 for a request that produced tokens).
   function chargedCost(usage, model, requestId, fallback = 0) {
@@ -253,6 +331,19 @@ export function createInferenceService({
     const promptTokens = Math.ceil(Buffer.byteLength(JSON.stringify(prepared.body)) / 4);
     return Math.ceil(promptTokens * price.prompt + prepared.reserveOutputTokens * price.completion);
   }
+  // Cost of a 2xx response that reported no usage (a stream that ended without a usage
+  // frame, or a client abort mid-relay): the prompt estimate (request bytes / 4) plus
+  // the output actually relayed (generated-text bytes / 4), never above the hold.
+  function usagelessCostMicroUsd(prepared, relayedOutputBytes, estimatedCost) {
+    const price = priceTable[prepared.body?.model];
+    if (!price) return estimatedCost;
+    const promptTokens = Math.ceil(Buffer.byteLength(JSON.stringify(prepared.body)) / 4);
+    const outputTokens = Math.ceil(relayedOutputBytes / 4);
+    return Math.min(
+      estimatedCost,
+      Math.ceil(promptTokens * price.prompt + outputTokens * price.completion),
+    );
+  }
   if (hasAccountProviderMap && !(accountProviderMap instanceof Map))
     throw new Error("inference_service_dependencies_invalid");
   if (hasResolveAssignment && typeof resolveAssignment !== "function")
@@ -264,6 +355,9 @@ export function createInferenceService({
     ? async (ownerId) => accountProviderMap.get(ownerId) ?? null
     : resolveAssignment;
   const replay = replayStore || createReplayCache({ now });
+  const speechCatalog = speech ? createSpeechCatalog({ config: speech, fetchImpl, now }) : null;
+  // Munsit is billed at the Headmaster markup (dictation and speech alike); every other engine at its own.
+  const speechMarkupBps = (kind) => (kind === "munsit" ? walletMarkupBps : walletOtherMarkupBps);
 
   async function handle(req, res) {
     const url = new URL(req.url || "/", "http://inference.internal");
@@ -275,7 +369,10 @@ export function createInferenceService({
       !(
         (req.method === "GET" && url.pathname === MODEL_PATH) ||
         (req.method === "POST" && url.pathname === COMPLETION_PATH) ||
-        (req.method === "POST" && url.pathname === REALTIME_SESSION_PATH)
+        (req.method === "POST" && url.pathname === REALTIME_SESSION_PATH) ||
+        (req.method === "POST" && url.pathname === TRANSCRIPTION_PATH && transcription) ||
+        (req.method === "POST" && url.pathname === SPEECH_PATH && speech) ||
+        (req.method === "GET" && url.pathname === SPEECH_CATALOG_PATH && speech)
       )
     ) {
       return safeError(res, 404, "not_found", "Route not found.", null);
@@ -337,6 +434,9 @@ export function createInferenceService({
     // A verified byo_provider claim selects the personal-key path. It never
     // reads assignments, operator provider rows, or operator quota counters.
     if (url.pathname === REALTIME_SESSION_PATH) return handleRealtime(res, body, claims);
+    if (url.pathname === TRANSCRIPTION_PATH) return handleTranscription(req, res, body, claims);
+    if (url.pathname === SPEECH_PATH) return handleSpeech(req, res, body, claims);
+    if (url.pathname === SPEECH_CATALOG_PATH) return sendJson(res, 200, { data: await speechCatalog.load() });
     if (claims.byo_provider !== undefined) return handleByo(req, res, body, claims);
     let mapping;
     try {
@@ -552,6 +652,51 @@ export function createInferenceService({
       );
     }
 
+    let walletHeld = false;
+    if (walletStore && walletMode !== "off") {
+      const hold = await walletStore
+        .reserve({
+          ownerId: claims.sub,
+          requestId: claims.request_id,
+          amountMicroUsd: Math.max(1, withMarkup(estimatedCost, markupFor(prepared.body?.model))),
+          monthlyGrantMicroUsd: walletMonthlyGrantMicroUsd,
+        })
+        .catch((error) => {
+          logger.error?.("headmaster-inference wallet reserve failed", {
+            requestId: claims.request_id,
+            code: error?.code || "wallet_unavailable",
+          });
+          return null;
+        });
+      if (!hold || !hold.allowed) {
+        await releaseQuota(claims, reservation);
+        if (!hold)
+          return safeError(
+            res,
+            503,
+            "quota_unavailable",
+            "Managed inference is temporarily unavailable.",
+            claims.request_id,
+          );
+        if (hold.reason === "org_suspended")
+          return safeError(
+            res,
+            403,
+            "organization_suspended",
+            "This organization is switched off.",
+            claims.request_id,
+          );
+        return safeError(
+          res,
+          402,
+          "insufficient_credit",
+          "Your Headmaster wallet is out of credit. Add credit to continue.",
+          claims.request_id,
+        );
+      }
+      walletHeld = Boolean(hold?.allowed);
+    }
+
     const controller = new AbortController();
     const timeout = setTimeout(
       () =>
@@ -574,6 +719,8 @@ export function createInferenceService({
 
     let providerSucceeded = false;
     let observedUsage = null;
+    const streamParser = createSseUsageParser();
+    let relayedOutputBytes = 0;
     try {
       const upstream = await fetchImpl(target, {
         method: "POST",
@@ -610,10 +757,12 @@ export function createInferenceService({
           controller.signal,
           claims.request_id,
           maxResponseBytes,
+          streamParser,
         );
       } else {
         const responseBody = await readProviderResponse(upstream, maxResponseBytes);
         observedUsage = jsonUsage(responseBody);
+        if (!observedUsage) relayedOutputBytes = jsonOutputBytes(responseBody);
         res.writeHead(upstream.status, {
           "content-type": upstream.headers.get("content-type") || "application/json; charset=utf-8",
           "cache-control": "no-store",
@@ -678,6 +827,17 @@ export function createInferenceService({
               totalTokens: prepared.reserveOutputTokens,
             }
           : { promptTokens: 0, completionTokens: 0, totalTokens: 0 });
+      // Usage-less 2xx: charge the prompt estimate plus the relayed output, not the
+      // synthetic output reservation above (which only feeds the daily token budget).
+      // Reported usage and provider errors are charged exactly as before.
+      const cost =
+        providerSucceeded && !observedUsage
+          ? usagelessCostMicroUsd(
+              prepared,
+              relayedOutputBytes + streamParser.outputBytes,
+              estimatedCost,
+            )
+          : chargedCost(usage, prepared.body?.model, claims.request_id, estimatedCost);
       await quotaStore
         .finish({
           ownerId: claims.sub,
@@ -686,7 +846,7 @@ export function createInferenceService({
           promptTokens: usage.promptTokens,
           completionTokens: usage.completionTokens,
           totalTokens: usage.totalTokens,
-          costMicroUsd: chargedCost(usage, prepared.body?.model, claims.request_id, estimatedCost),
+          costMicroUsd: cost,
         })
         .catch((error) =>
           logger.error?.("headmaster-inference usage accounting failed", {
@@ -694,7 +854,46 @@ export function createInferenceService({
             code: error?.code || "quota_store_unavailable",
           }),
         );
+      if (walletHeld) {
+        await walletStore
+          .settle({
+            ownerId: claims.sub,
+            requestId: claims.request_id,
+            actualMicroUsd: withMarkup(cost, markupFor(prepared.body?.model)),
+            detail: {
+              model: prepared.body?.model ?? null,
+              prompt_tokens: usage.promptTokens,
+              completion_tokens: usage.completionTokens,
+            },
+          })
+          .catch((error) =>
+            logger.error?.("headmaster-inference wallet settle failed", {
+              requestId: claims.request_id,
+              code: error?.code || "wallet_unavailable",
+            }),
+          );
+      }
     }
+  }
+
+  // Give back a Redis reservation when the wallet refuses the request.
+  async function releaseQuota(claims, reservation) {
+    await quotaStore
+      .finish({
+        ownerId: claims.sub,
+        requestId: claims.request_id,
+        quotaDay: reservation.day,
+        promptTokens: 0,
+        completionTokens: 0,
+        totalTokens: 0,
+        costMicroUsd: 0,
+      })
+      .catch((error) =>
+        logger.error?.("headmaster-inference quota release failed", {
+          requestId: claims.request_id,
+          code: error?.code || "quota_store_unavailable",
+        }),
+      );
   }
 
   function byoModelList(ids, provider, requestId) {
@@ -745,6 +944,185 @@ export function createInferenceService({
   // Realtime voice session tokens: personal keys only (a v2 assertion naming the
   // provider). Never reads assignments, operator keys, or spending-cap counters;
   // it does take the own-key hourly request budget, like own-key chat.
+  // Managed speech-to-text: wallet hold sized from the upload, vendor call, settle on the measured
+  // duration. A byo claim is refused: personal keys do not go through the platform vendor.
+  async function handleTranscription(req, res, body, claims) {
+    const requestId = claims.request_id;
+    if (claims.byo_provider !== undefined)
+      return safeError(res, 400, "transcription_not_for_own_key", "Transcription uses the Headmaster service.", requestId);
+    const contentType = String(req.headers["content-type"] || "");
+    if (!/^multipart\/form-data;\s*boundary=/i.test(contentType))
+      return safeError(res, 415, "content_type_unsupported", "Transcription requests must use multipart/form-data.", requestId);
+    const prepared = await prepareTranscription(body, contentType, transcription);
+    if (prepared.error)
+      return safeError(res, 400, "audio_invalid", "The audio could not be transcribed.", requestId);
+    const ownerId = claims.sub;
+    let walletHeld = false;
+    if (walletStore && walletMode !== "off") {
+      const hold = await walletStore
+        .reserve({
+          ownerId,
+          requestId,
+          amountMicroUsd: Math.max(
+            1,
+            withMarkup(transcriptionReserveMicroUsd(prepared.fileBytes, prepared.vendor), speechMarkupBps(prepared.vendor.kind)),
+          ),
+          monthlyGrantMicroUsd: walletMonthlyGrantMicroUsd,
+        })
+        .catch((error) => {
+          logger.error?.("headmaster-inference wallet reserve failed", {
+            requestId,
+            code: error?.code || "wallet_unavailable",
+          });
+          return null;
+        });
+      if (!hold || !hold.allowed) {
+        if (!hold)
+          return safeError(res, 503, "quota_unavailable", "Managed inference is temporarily unavailable.", requestId);
+        if (hold.reason === "org_suspended")
+          return safeError(res, 403, "organization_suspended", "This organization is switched off.", requestId);
+        return safeError(
+          res,
+          402,
+          "insufficient_credit",
+          "Your Headmaster wallet is out of credit. Add credit to continue.",
+          requestId,
+        );
+      }
+      walletHeld = Boolean(hold?.allowed);
+    }
+    const result = await callVendor({
+      form: prepared.form,
+      config: prepared.vendor,
+      fetchImpl,
+      signal: AbortSignal.timeout(requestTimeoutMs),
+    });
+    if (walletHeld) {
+      // A failed vendor call releases the hold at no charge; a successful one is billed on measured audio.
+      const seconds = result.error ? 0 : Number.isFinite(result.seconds) ? result.seconds : estimatedSeconds(prepared.fileBytes);
+      const charged = result.error
+        ? 0
+        : withMarkup(transcriptionCostMicroUsd(seconds, prepared.vendor), speechMarkupBps(prepared.vendor.kind));
+      await walletStore
+        .settle({
+          ownerId,
+          requestId,
+          actualMicroUsd: charged,
+          detail: { kind: "transcription", model: prepared.vendor.model, audio_seconds: Number.isFinite(seconds) ? seconds : null },
+        })
+        .catch((error) =>
+          logger.error?.("headmaster-inference wallet settle failed", {
+            requestId,
+            code: error?.code || "wallet_unavailable",
+          }),
+        );
+    }
+    if (result.error === "bad_request")
+      return safeError(res, 400, "audio_invalid", "The audio could not be transcribed.", requestId);
+    if (result.error) {
+      logger.warn?.("headmaster-inference transcription unavailable", { requestId, code: result.error });
+      return safeError(
+        res,
+        result.error === "timeout" ? 504 : 503,
+        "transcription_unavailable",
+        "Speech-to-text is temporarily unavailable.",
+        requestId,
+      );
+    }
+    return sendJson(res, 200, { text: result.text }, requestId);
+  }
+
+  // Managed text-to-speech: the cost is known from the text before the call, so the hold is the
+  // charge; a failed call releases it. A free speech server (the default) never touches the wallet.
+  async function handleSpeech(req, res, body, claims) {
+    const requestId = claims.request_id;
+    if (claims.byo_provider !== undefined)
+      return safeError(res, 400, "speech_not_for_own_key", "Text-to-speech uses the Headmaster service.", requestId);
+    if (!/^application\/json(?:\s*;|$)/i.test(String(req.headers["content-type"] || "")))
+      return safeError(res, 415, "content_type_unsupported", "Text-to-speech requests must use application/json.", requestId);
+    const prepared = prepareSpeech(body, speech);
+    if (prepared.error)
+      return safeError(res, 400, "speech_invalid", "The text could not be spoken.", requestId);
+    const ownerId = claims.sub;
+    let { engine, body: speechBody } = prepared;
+    if (engine.kind === "munsit") {
+      const resolved = await speechCatalog.munsitResolve(speechBody.voice_id);
+      if (!resolved.model || !resolved.voice)
+        return safeError(res, 503, "speech_unavailable", "Text-to-speech is temporarily unavailable.", requestId);
+      engine = { ...engine, model: resolved.model };
+      speechBody = { ...speechBody, voice_id: resolved.voice };
+    }
+    const cost = withMarkup(speechCostMicroUsd(prepared.chars, engine), speechMarkupBps(engine.kind));
+    let walletHeld = false;
+    if (cost > 0 && walletStore && walletMode !== "off") {
+      const hold = await walletStore
+        .reserve({ ownerId, requestId, amountMicroUsd: cost, monthlyGrantMicroUsd: walletMonthlyGrantMicroUsd })
+        .catch((error) => {
+          logger.error?.("headmaster-inference wallet reserve failed", {
+            requestId,
+            code: error?.code || "wallet_unavailable",
+          });
+          return null;
+        });
+      if (walletMode === "on" && (!hold || !hold.allowed)) {
+        if (!hold)
+          return safeError(res, 503, "quota_unavailable", "Managed inference is temporarily unavailable.", requestId);
+        if (hold.reason === "org_suspended")
+          return safeError(res, 403, "organization_suspended", "This organization is switched off.", requestId);
+        return safeError(
+          res,
+          402,
+          "insufficient_credit",
+          "Your Headmaster wallet is out of credit. Add credit to continue.",
+          requestId,
+        );
+      }
+      walletHeld = Boolean(hold?.allowed);
+    }
+    const result = await callSpeechServer({
+      body: speechBody,
+      config: engine,
+      format: prepared.format,
+      fetchImpl,
+      signal: AbortSignal.timeout(requestTimeoutMs),
+      transcode,
+    });
+    if (walletHeld) {
+      await walletStore
+        .settle({
+          ownerId,
+          requestId,
+          actualMicroUsd: result.error ? 0 : cost,
+          detail: { kind: "speech", model: engine.model, characters: prepared.chars },
+        })
+        .catch((error) =>
+          logger.error?.("headmaster-inference wallet settle failed", {
+            requestId,
+            code: error?.code || "wallet_unavailable",
+          }),
+        );
+    }
+    if (result.error === "bad_request")
+      return safeError(res, 400, "speech_invalid", "The text could not be spoken.", requestId);
+    if (result.error) {
+      logger.warn?.("headmaster-inference speech unavailable", { requestId, code: result.error });
+      return safeError(
+        res,
+        result.error === "timeout" ? 504 : 503,
+        "speech_unavailable",
+        "Text-to-speech is temporarily unavailable.",
+        requestId,
+      );
+    }
+    res.writeHead(200, {
+      "content-type": result.contentType,
+      "cache-control": "no-store",
+      "content-length": String(result.audio.length),
+      "x-request-id": requestId,
+    });
+    res.end(result.audio);
+  }
+
   async function handleRealtime(res, body, claims) {
     const requestId = claims.request_id;
     const provider = claims.byo_provider;

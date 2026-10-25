@@ -1,0 +1,1 @@
+DO $$ BEGIN ALTER TABLE agent_hub_listings ADD COLUMN owner_user_id UUID REFERENCES users(id) ON DELETE SET NULL; EXCEPTION WHEN duplicate_column THEN NULL; END $$

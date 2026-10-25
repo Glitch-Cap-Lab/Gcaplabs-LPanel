@@ -1,0 +1,1 @@
+CREATE INDEX IF NOT EXISTS idx_agent_hub_listings_snapshot_id ON agent_hub_listings(snapshot_id)

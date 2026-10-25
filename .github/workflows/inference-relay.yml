@@ -1,0 +1,51 @@
+name: Inference relay
+
+# Every ready PR emits this check; complete Git diff selection inside the job
+# runs deterministic tests only for relay changes, and fails closed on missing data.
+# Relay-only changes do not run the backend/provisioner suites.
+# No provider credentials, live services, Docker, E2E, or deploys.
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened, ready_for_review]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: inference-relay-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  relay:
+    name: inference relay node:test
+    if: github.event_name != 'pull_request' || github.event.pull_request.draft == false
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+          fetch-depth: 0
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version-file: .nvmrc
+          cache: npm
+          cache-dependency-path: services/headmaster-inference/package-lock.json
+      - name: Test CI path selection
+        run: node --test scripts/ci-paths.test.mjs
+      - name: Select component checks from complete PR diff
+        id: changes
+        run: node scripts/ci-paths.mjs relay
+      - run: npm ci --ignore-scripts --no-audit --no-fund
+        if: steps.changes.outputs.affected == 'true'
+        working-directory: services/headmaster-inference
+      - run: npm test
+        if: steps.changes.outputs.affected == 'true'
+        working-directory: services/headmaster-inference
+        # Keep the existing live provider/Redis probes opt-in outside this check.
+        env:
+          OPENROUTER_API_KEY: ""
+          HEADMASTER_INFERENCE_LIVE: "0"
+          REDIS_URL: ""

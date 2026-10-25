@@ -1,0 +1,1 @@
+UPDATE agent_hub_listings SET downloads = 0 WHERE downloads IS NULL

@@ -1921,6 +1921,14 @@ describe("provisioning runtime/gateway contracts", () => {
 });
 
 describe("Hermes dashboard provisioning", () => {
+  // These tests exercise container config, not network isolation (agentIsolation.test.ts does).
+  beforeAll(() => {
+    process.env.NORA_ALLOW_SHARED_AGENT_NETWORK = "true";
+  });
+  afterAll(() => {
+    delete process.env.NORA_ALLOW_SHARED_AGENT_NETWORK;
+  });
+
   it("enables the image-supervised Hermes dashboard alongside the gateway", async () => {
     const HermesBackend = require("../../workers/provisioner/backends/hermes");
     const backend = new HermesBackend();
@@ -2058,6 +2066,45 @@ describe("Hermes dashboard provisioning", () => {
         runtimePort: 8642,
       }),
     );
+  });
+
+  it("mounts a team organization's shared folder read-only, and only when the operator enabled it", async () => {
+    const HermesBackend = require("../../workers/provisioner/backends/hermes");
+    const orgId = "0d000000-0000-4000-8000-000000000001";
+    const run = async (orgFilesOrgId: string | null, hostRoot: string | undefined) => {
+      const previous = process.env.HEADMASTER_ORG_FILES_HOST_ROOT;
+      if (hostRoot === undefined) delete process.env.HEADMASTER_ORG_FILES_HOST_ROOT;
+      else process.env.HEADMASTER_ORG_FILES_HOST_ROOT = hostRoot;
+      try {
+        const backend = new HermesBackend();
+        backend.updateEnv = jest.fn().mockResolvedValue(undefined);
+        const createdContainer = {
+          id: "hermes-container-org",
+          start: jest.fn().mockResolvedValue({}),
+          inspect: jest.fn().mockResolvedValue({ NetworkSettings: { IPAddress: "10.0.0.60", Networks: {} } }),
+          remove: jest.fn().mockResolvedValue({}),
+        };
+        backend._findComposeNetwork = jest.fn().mockResolvedValue(null);
+        backend.docker = {
+          getImage: jest.fn().mockReturnValue({ inspect: jest.fn().mockResolvedValue({}) }),
+          getContainer: jest.fn().mockReturnValue({ inspect: jest.fn().mockRejectedValue(new Error("not found")) }),
+          createContainer: jest.fn().mockResolvedValue(createdContainer),
+          createVolume: jest.fn().mockResolvedValue({}),
+          getNetwork: jest.fn().mockReturnValue({ connect: jest.fn().mockResolvedValue({}) }),
+        };
+        await backend.create({ id: "321", name: "Seat", env: {}, orgFilesOrgId });
+        return backend.docker.createContainer.mock.calls[0][0].HostConfig.Binds;
+      } finally {
+        if (previous === undefined) delete process.env.HEADMASTER_ORG_FILES_HOST_ROOT;
+        else process.env.HEADMASTER_ORG_FILES_HOST_ROOT = previous;
+      }
+    };
+    expect(await run(orgId, "/var/lib/gcap/org-files")).toEqual([
+      "nora_hermes_home_321:/opt/data",
+      `/var/lib/gcap/org-files/${orgId}:/opt/data/workspace/Organization files:ro`,
+    ]);
+    expect(await run(orgId, undefined)).toEqual(["nora_hermes_home_321:/opt/data"]);
+    expect(await run(null, "/var/lib/gcap/org-files")).toEqual(["nora_hermes_home_321:/opt/data"]);
   });
 
   it("never leaks the upstream Hermes container name into the hostname when no agent name is given", async () => {

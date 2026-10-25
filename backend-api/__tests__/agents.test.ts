@@ -1961,6 +1961,62 @@ describe("Hermes WebUI routes", () => {
     );
   });
 
+  it.each([
+    [409, "admission_conflict", "Refresh it before sending again.", {}],
+    [409, "unknown_execution", "Check the conversation before sending it again.", {}],
+    [409, "session_busy", "Wait for it to finish before trying again.", {}],
+    [503, "runtime_draining", "try again after it reconnects.", { "retry-after": "1" }],
+    [503, "storage_unavailable", "try again shortly.", { "retry-after": "1" }],
+    [503, "admission_queued", "Do not send it again.", { "x-should-retry": "false" }],
+  ])(
+    "keeps chat authority outcome %s %s without retrying the message",
+    async (status, code, message, headers) => {
+      mockDb.query.mockResolvedValueOnce({
+        rows: [
+          {
+            id: "a-hermes-chat",
+            user_id: "user-1",
+            status: "running",
+            runtime_family: "hermes",
+            backend_type: "docker",
+            container_id: "hermes-container",
+            runtime_host: "10.0.0.41",
+            runtime_port: 8642,
+            gateway_token: "hermes-token",
+          },
+        ],
+      });
+      global.fetch = jest.fn().mockResolvedValueOnce(
+        createMockFetchResponse({
+          ok: false,
+          status,
+          headers,
+          body: { error: { code, message: "Private runtime diagnostic" } },
+        }),
+      );
+
+      const res = await auth(
+        request(app)
+          .post("/agents/a-hermes-chat/hermes-ui/chat")
+          .send({
+            sessionId: "api-opaque-owner-session",
+            messages: [{ role: "user", content: "Inspect the workspace" }],
+          }),
+      );
+
+      expect(res.status).toBe(status);
+      expect(res.body.code).toBe(code);
+      expect(res.body.error).toContain(message);
+      expect(res.body.error).not.toContain("Private runtime diagnostic");
+      expect(global.fetch).toHaveBeenCalledTimes(1);
+      expect(global.fetch.mock.calls[0][1].headers["X-Hermes-Session-Id"]).toBe(
+        "api-opaque-owner-session",
+      );
+      expect(res.headers["retry-after"]).toBe(headers["retry-after"]);
+      expect(res.headers["x-should-retry"]).toBe(headers["x-should-retry"]);
+    },
+  );
+
   it("rejects Hermes cron routes for non-Hermes agents", async () => {
     mockDb.query.mockResolvedValueOnce({
       rows: [
@@ -4243,8 +4299,45 @@ describe("POST /agents/deploy", () => {
       "http://headmaster-memory-gateway:8791",
       1,
       "pending",
+      null,
     ]);
     expect(mockAddDeploymentJob).toHaveBeenCalledWith(expect.objectContaining({ id: "a-managed" }));
+  });
+
+  it("records the organization of a seat runtime, only on a managed deployment and only as a UUID", async () => {
+    process.env.ENABLED_RUNTIME_FAMILIES = "openclaw,hermes";
+    process.env.ENABLED_BACKENDS = "docker";
+    const owner = "11111111-1111-4111-8111-111111111111";
+    const workspace = "22222222-2222-4222-8222-222222222222";
+    const org = "0d000000-0000-4000-8000-000000000001";
+    const bank = "hermes-u-" + owner.replaceAll("-", "_");
+    const managed = {
+      name: "Seat",
+      runtime_family: "hermes",
+      external_identity: { namespace: "headmaster", external_id: workspace, owner_uuid: owner },
+      headmaster_integration_config: {
+        owner_uuid: owner,
+        workspace_uuid: workspace,
+        memory_bank_id: bank,
+        memory_gateway_url: "http://headmaster-memory-gateway:8791",
+      },
+    };
+    mockDb.query
+      .mockResolvedValueOnce({ rows: [] })
+      .mockResolvedValueOnce({ rows: [{ id: "a-seat", name: "Seat", status: "queued", user_id: "user-1" }] })
+      .mockResolvedValueOnce({ rows: [] });
+    const ok = await adminAuth(request(app).post("/agents/deploy").send({ ...managed, headmaster_org_id: org }));
+    expect(ok.status).toBe(200);
+    const insert = mockDb.query.mock.calls.find(([sql]) => sql.includes("INSERT INTO agents"));
+    expect(insert[1].at(-1)).toBe(org);
+
+    mockDb.query.mockResolvedValueOnce({ rows: [] });
+    const notUuid = await adminAuth(request(app).post("/agents/deploy").send({ ...managed, headmaster_org_id: "../etc" }));
+    expect(notUuid.status).toBe(400);
+    const unmanaged = await adminAuth(
+      request(app).post("/agents/deploy").send({ name: "Plain", headmaster_org_id: org }),
+    );
+    expect(unmanaged.status).toBe(400);
   });
 
   it("deploys from a migration draft and attaches the draft to the new agent", async () => {
@@ -7127,6 +7220,32 @@ describe("POST /agents/:id/stop", () => {
     const res = await auth(request(app).post("/agents/a1/stop"));
     expect(res.status).toBe(200);
     expect(res.body).toHaveProperty("status", "stopped");
+  });
+
+  it("records a wallet reason with the stop, and ignores any other reason", async () => {
+    const stopped = { id: "a1", status: "stopped", paused_reason: "wallet_empty" };
+    const row = { id: "a1", status: "running", container_id: null, user_id: "user-1" };
+    mockDb.query
+      .mockResolvedValueOnce({ rows: [row] })
+      .mockResolvedValueOnce({ rows: [row] })
+      .mockResolvedValueOnce({ rows: [stopped] });
+    const res = await auth(request(app).post("/agents/a1/stop").send({ reason: "wallet_empty" }));
+    expect(res.status).toBe(200);
+    expect(res.body).toHaveProperty("paused_reason", "wallet_empty");
+    const [sql, params] = mockDb.query.mock.calls[2];
+    expect(sql).toMatch(/COALESCE\(paused_reason, \$2\)/);
+    expect(params).toEqual(["a1", "wallet_empty"]);
+
+    mockDb.query.mockReset();
+    mockDb.query
+      .mockResolvedValueOnce({ rows: [row] })
+      .mockResolvedValueOnce({ rows: [row] })
+      .mockResolvedValueOnce({ rows: [{ id: "a1", status: "stopped" }] });
+    const other = await auth(request(app).post("/agents/a1/stop").send({ reason: "budget_exceeded" }));
+    expect(other.status).toBe(200);
+    const [otherSql, otherParams] = mockDb.query.mock.calls[2];
+    expect(otherSql).not.toMatch(/paused_reason/);
+    expect(otherParams).toEqual(["a1"]);
   });
 
   it("stops a Kubernetes deployment by container_name when container_id is missing", async () => {

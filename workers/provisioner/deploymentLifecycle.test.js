@@ -13,6 +13,45 @@ const {
   shouldReconcileEffectiveProviderState,
 } = require("./deploymentLifecycle.ts");
 
+test("protected lock loss cancels its active same-session query and prevents later mutation", async () => {
+  const { EventEmitter } = require("node:events"), client = new EventEmitter(); let closed = false, calls = 0;
+  client.connect = async () => {}; client.end = async () => { closed = true; };
+  client.connection = { stream: { destroy() { closed = true; } } };
+  client.query = async () => { calls++; return new Promise(() => {}); };
+  const lock = await acquireDedicatedSessionLock({ createClient: () => client, acquire: async () => true, release: async () => {}, maxHoldMs: 1000 });
+  const pending = lock.query("UPDATE exact_operation"); lock.cancelPending(new Error("operation deadline"));
+  await assert.rejects(pending, /deadline/); assert.equal(closed, true); assert.equal(lock.signal.aborted, true);
+  await assert.rejects(lock.query("UPDATE later")); assert.equal(calls, 1); await lock.release();
+});
+
+test("the lock watchdog publishes loss before releasing the session", async () => {
+  const { EventEmitter } = require("node:events"), client = new EventEmitter(); const events = [];
+  client.connect = async () => {}; client.end = async () => { events.push("end"); };
+  client.connection = { stream: { destroy() { events.push("destroy"); } } };
+  const lock = await acquireDedicatedSessionLock({ createClient: () => client, acquire: async () => true, release: async () => {}, maxHoldMs: 20 });
+  lock.signal.addEventListener("abort", () => events.push("lost"));
+  await new Promise(resolve => setTimeout(resolve, 40));
+  assert.equal(events[0], "lost"); assert.ok(events.includes("destroy")); await lock.release();
+});
+
+test("PostgreSQL cancellation selects the exact owned active query before closing its session", async () => {
+  const { EventEmitter } = require("node:events"), events = [], client = new EventEmitter(), cancel = new EventEmitter(); let active, count = 0;
+  client.connect = async () => {}; client.end = async () => {};
+  client.processID = 123; client.secretKey = 456; // synthetic fixture only
+  client._getActiveQuery = () => active;
+  client.query = query => { if (!active) active = query; };
+  client.connection = { stream: { destroy() { events.push("original-close"); } } };
+  cancel.connection = new EventEmitter(); cancel.connection.stream = { destroy() { events.push("cancel-close"); } };
+  cancel.cancel = (target, query) => { assert.equal(target, client); assert.equal(query, active); assert.equal(query.text, "UPDATE first"); events.push("cancel-request"); setImmediate(() => cancel.connection.emit("end")); };
+  const lock = await acquireDedicatedSessionLock({ createClient: () => ++count === 1 ? client : cancel, acquire: async () => true, release: async () => {} });
+  const first = lock.query("UPDATE first"), queued = lock.query("UPDATE queued");
+  lock.cancelPending(new Error("deadline"));
+  await assert.rejects(first, /deadline/); await assert.rejects(queued, /deadline/);
+  assert.ok(events.indexOf("cancel-request") < events.indexOf("original-close"));
+  await new Promise(resolve => setImmediate(resolve)); assert.ok(events.includes("cancel-close")); await lock.release();
+  assert.equal(count, 2);
+});
+
 test("dedicated session locks leave a one-connection work pool available", async () => {
   const events = [];
   let mainPoolInUse = false;

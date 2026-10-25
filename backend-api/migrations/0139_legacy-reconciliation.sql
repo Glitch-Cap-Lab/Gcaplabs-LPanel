@@ -1,0 +1,1 @@
+DO $$ BEGIN ALTER TABLE agent_hub_listings ADD COLUMN central_share_status TEXT DEFAULT 'not_shared'; EXCEPTION WHEN duplicate_column THEN NULL; END $$

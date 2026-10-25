@@ -431,19 +431,25 @@ describe("platform Remote Host schema", () => {
   });
 
   it("appends the backfill and creator-survival migration at the migration tail", () => {
-    const server = fs.readFileSync(path.join(__dirname, "..", "server.ts"), "utf8");
-    const smtpTail = server.indexOf("ADD COLUMN smtp_from_name");
-    const platformMigration = server.lastIndexOf("Platform-managed Remote Hosts");
+    const { readMigrationFiles } = require("../lib/migrationFiles");
+    const migrations = readMigrationFiles();
+    const smtpTail = migrations.findIndex((m) => m.sql.includes("ADD COLUMN smtp_from_name"));
+    const platformMigration = migrations.findIndex((m) =>
+      m.sql.includes("created_by_user_id UUID REFERENCES users(id) ON DELETE SET NULL"),
+    );
+    expect(smtpTail).toBeGreaterThan(-1);
     expect(platformMigration).toBeGreaterThan(smtpTail);
-    expect(server.slice(platformMigration)).toMatch(
-      /created_by_user_id UUID REFERENCES users\(id\) ON DELETE SET NULL/,
-    );
-    expect(server.slice(platformMigration)).toMatch(
-      /created_by_user_id = COALESCE\(created_by_user_id, owner_user_id\)/,
-    );
+    const tail = migrations
+      .slice(platformMigration)
+      .map((m) => m.sql)
+      .join("\n");
+    expect(tail).toMatch(/created_by_user_id UUID REFERENCES users\(id\) ON DELETE SET NULL/);
+    expect(tail).toMatch(/created_by_user_id = COALESCE\(created_by_user_id, owner_user_id\)/);
     expect(
-      server.match(/CREATE OR REPLACE FUNCTION enforce_remote_host_agent_target\(\)/g) || [],
+      migrations.filter((m) =>
+        m.sql.includes("CREATE OR REPLACE FUNCTION enforce_remote_host_agent_target()"),
+      ),
     ).toHaveLength(1);
-    expect(server.slice(platformMigration)).toMatch(/status IS DISTINCT FROM 'deleted'/);
+    expect(tail).toMatch(/status IS DISTINCT FROM 'deleted'/);
   });
 });

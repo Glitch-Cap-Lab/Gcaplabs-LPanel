@@ -1,6 +1,9 @@
 // @ts-nocheck
 const crypto = require("crypto");
-const { startAdvisoryLockHoldWatchdog } = require("../../backend-api/lib/advisoryLocks.ts");
+// Checkout layout reaches backend-api/lib; the backend-api image ships this file in
+// /app/protected-release beside /app/lib.
+const { startAdvisoryLockHoldWatchdog } = require(require("fs").existsSync(require("path").join(__dirname, "../../backend-api/lib/advisoryLocks.ts"))
+  ? "../../backend-api/lib/advisoryLocks.ts" : "../lib/advisoryLocks.ts");
 
 function normalizeProviderConfig(config) {
   if (typeof config !== "string") return config ?? null;
@@ -91,6 +94,7 @@ async function acquireDedicatedSessionLock({
   // lock, which is the same path a crash takes.
   maxHoldMs,
   onHoldTimeout,
+  signal = null,
 } = {}) {
   if (typeof createClient !== "function") {
     throw new Error("createClient is required");
@@ -107,35 +111,83 @@ async function acquireDedicatedSessionLock({
     throw new Error("createClient must return a connectable PostgreSQL client");
   }
 
+  const lost = new AbortController(), ownedQueries = new Set(); let acquiring = true, queryActive = 0, closingNormally = false, cancelStarted = false;
+  const lose = reason => { if (!lost.signal.aborted) lost.abort(reason instanceof Error ? reason : Object.assign(new Error("Protected provision lock lost"), { code: "PROTECTED_RELEASE_LOCK_LOST" })); };
+  const cancelQuery = () => {
+    const active = client._getActiveQuery?.();
+    const query = acquiring || ownedQueries.has(active) ? active : null;
+    if (cancelStarted || !query || !client.processID || client.secretKey == null) return;
+    cancelStarted = true;
+    // PostgreSQL's existing CancelRequest authenticates the exact session using PID + its secret.
+    // Neither value is logged or persisted. No admin SQL, role grant, or pooled session is used.
+    const cancelClient = createClient();
+    const cleanup = () => { clearTimeout(timer); cancelClient.connection?.stream?.destroy(); };
+    const timer = setTimeout(cleanup, 5000);
+    cancelClient.on?.("error", cleanup); cancelClient.connection?.on?.("error", cleanup);
+    cancelClient.connection?.once?.("end", cleanup);
+    try { cancelClient.cancel(client, query); } catch { cleanup(); }
+  };
+  const close = () => { try { cancelQuery(); } catch { /* refusal still closes this session */ } client.connection?.stream?.destroy(); Promise.resolve(client.end()).catch(() => {}); };
+  const cancelAcquire = () => { lose(signal.reason); if (acquiring || queryActive) close(); };
+  signal?.throwIfAborted(); signal?.addEventListener("abort", cancelAcquire);
+  client.on?.("error", error => { lose(error); if (queryActive) close(); });
+  client.once?.("end", () => { if (!closingNormally) { lose(); if (queryActive) close(); } });
+  const held = async promise => {
+    lost.signal.throwIfAborted();
+    let abort;
+    try { const result = await Promise.race([promise, new Promise((_, reject) => { abort = () => reject(lost.signal.reason); lost.signal.addEventListener("abort", abort, { once: true }); })]); lost.signal.throwIfAborted(); return result; }
+    finally { lost.signal.removeEventListener("abort", abort); }
+  };
   let connected = false;
   try {
-    await client.connect();
+    await held(client.connect());
     connected = true;
-    const result = await acquire(client);
+    const result = await held(acquire(client));
     if (!isAcquired(result)) {
       const error = typeof busyError === "function" ? busyError(result) : busyError;
       throw error instanceof Error ? error : new Error(String(error || "Advisory lock is busy"));
     }
   } catch (error) {
-    if (connected) {
+    signal?.removeEventListener("abort", cancelAcquire);
+    if (lost.signal.aborted) close();
+    if (connected && !lost.signal.aborted) {
       await client.end().catch((closeError) => onCloseError?.(closeError));
     }
     throw error;
   }
+  acquiring = false;
+  const acquiredAt = Date.now();
 
   const cancelHoldWatchdog = startAdvisoryLockHoldWatchdog(client, {
     maxHoldMs,
-    onTimeout: onHoldTimeout,
+    onTimeout: budget => { lose(); close(); onHoldTimeout?.(budget); },
   });
 
   let released = false;
   return {
+    signal: lost.signal,
+    deadlineAt: Number.isFinite(maxHoldMs) && maxHoldMs > 0 ? acquiredAt + maxHoldMs : Infinity,
+    query: async (...args) => {
+      lost.signal.throwIfAborted(); queryActive++; let query;
+      try {
+        const pending = typeof client._getActiveQuery === "function" ? new Promise((resolve, reject) => {
+          query = new (require("pg").Query)(...args); ownedQueries.add(query);
+          query.callback = (error, result) => error ? reject(error) : resolve(result);
+          client.query(query);
+        }) : client.query(...args);
+        return await held(pending);
+      } finally { queryActive--; ownedQueries.delete(query); }
+    },
+    cancelPending: reason => { if (queryActive) { lose(reason); close(); } },
     release: async () => {
       if (released) return;
       released = true;
       cancelHoldWatchdog();
+      signal?.removeEventListener("abort", cancelAcquire);
+      if (lost.signal.aborted) { close(); return; }
+      const releaseTimer = setTimeout(() => { lose(); close(); }, 5000);
       try {
-        await release(client);
+        await held(release(client));
       } catch (error) {
         if (typeof onReleaseError === "function") {
           onReleaseError(error);
@@ -143,7 +195,10 @@ async function acquireDedicatedSessionLock({
           throw error;
         }
       } finally {
-        await client.end().catch((closeError) => onCloseError?.(closeError));
+        closingNormally = true;
+        if (!lost.signal.aborted) await held(client.end()).catch((closeError) => onCloseError?.(closeError));
+        if (lost.signal.aborted) close();
+        clearTimeout(releaseTimer); lose();
       }
     },
   };
@@ -228,7 +283,7 @@ async function persistProvisionedRuntimeMetadata(
 
 async function finalizeProvisionedDeployment(
   queryable,
-  { agentId, containerId, name, backend, host } = {},
+  { agentId, containerId, name, backend, host, deploymentId = null } = {},
 ) {
   const ownsClient = typeof queryable?.connect === "function";
   const client = ownsClient ? await queryable.connect() : queryable;
@@ -258,8 +313,9 @@ async function finalizeProvisionedDeployment(
           SET status = 'completed'
         WHERE agent_id = $1
           AND status = 'deploying'
+          ${deploymentId ? "AND id = $2" : ""}
         RETURNING agent_id`,
-      [agentId],
+      deploymentId ? [agentId, deploymentId] : [agentId],
     );
     if (!deploymentUpdate.rows[0]) {
       throw new Error(`Deployment ${agentId} was not in deploying state during finalization`);

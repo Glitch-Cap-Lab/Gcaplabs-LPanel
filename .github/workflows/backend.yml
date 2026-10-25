@@ -3,18 +3,15 @@ name: Backend
 # Typecheck and unit tests for backend-api, plus typecheck and node:test unit tests
 # for workers/provisioner (including its shared backend adapters).
 # One Linux job, about 1 minute (billed as 1 minute). Skipped for draft PRs; runs
-# when a draft is marked ready. The inference relay and the dashboard/marketing
-# unit tests live in full-ci.yml (label a PR "full-ci" or run it by hand).
+# when a draft is marked ready. Each ready PR emits this check; complete Git
+# diff selection inside the job skips only unrelated component tests.
+# The relay has its own workflow;
+# dashboard/marketing unit tests live in full-ci.yml (label or manual only).
 # No Docker, E2E, or deploys.
 
 on:
   pull_request:
     types: [opened, synchronize, reopened, ready_for_review]
-    paths:
-      - 'backend-api/**'
-      - 'workers/provisioner/**'
-      - 'agent-runtime/**'
-      - '.github/workflows/backend.yml'
   workflow_dispatch:
 
 permissions:
@@ -30,26 +27,80 @@ jobs:
     if: github.event_name != 'pull_request' || github.event.pull_request.draft == false
     runs-on: ubuntu-latest
     timeout-minutes: 10
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: nora_test
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
           persist-credentials: false
-      - uses: actions/setup-node@v4
+          fetch-depth: 0
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
         with:
           node-version-file: .nvmrc
           cache: npm
           cache-dependency-path: |
             backend-api/package-lock.json
             workers/provisioner/package-lock.json
+      - name: Test CI path selection
+        run: node --test scripts/ci-paths.test.mjs
+      - name: Select component checks from complete PR diff
+        id: changes
+        run: node scripts/ci-paths.mjs backend
       - run: npm ci --ignore-scripts --no-audit --no-fund
+        if: steps.changes.outputs.affected == 'true'
         working-directory: workers/provisioner
       - run: npm ci --ignore-scripts --no-audit --no-fund
+        if: steps.changes.outputs.affected == 'true'
         working-directory: backend-api
       - run: npx tsc --noEmit
+        if: steps.changes.outputs.affected == 'true'
         working-directory: backend-api
       - run: npx jest --forceExit
+        if: steps.changes.outputs.affected == 'true'
         working-directory: backend-api
+        env:
+          # Enables __tests__/migrationPostgres.test.ts (skipped when unset; fails if unreachable).
+          TEST_POSTGRES_URL: postgres://postgres:postgres@127.0.0.1:5432/nora_test
       - run: npm run typecheck
+        if: steps.changes.outputs.affected == 'true'
         working-directory: workers/provisioner
       - run: npm test
+        if: steps.changes.outputs.affected == 'true'
         working-directory: workers/provisioner
+      # Real-PostgreSQL cancellation proof. The fixture needs PostgreSQL 16 binaries at
+      # /usr/lib/postgresql/16/bin and creates its own new cluster. The runner image no longer
+      # always ships them, so install them from the PostgreSQL apt repository when missing.
+      - name: PostgreSQL 16 binaries
+        if: steps.changes.outputs.affected == 'true'
+        run: |
+          set -eu
+          if [ ! -x /usr/lib/postgresql/16/bin/initdb ]; then
+            sudo apt-get update -qq
+            sudo apt-get install -y -qq postgresql-common
+            sudo /usr/share/postgresql-common/pgdg/apt.postgresql.org.sh -y
+            sudo apt-get install -y -qq postgresql-16
+          fi
+          test -x /usr/lib/postgresql/16/bin/initdb
+      - name: protected release PostgreSQL fixture
+        if: steps.changes.outputs.affected == 'true'
+        working-directory: workers/provisioner
+        run: |
+          set -eu
+          for mode in transaction autocommit; do
+            port=$([ "$mode" = transaction ] && echo 55946 || echo 55947)
+            node --import ./node_modules/tsx/dist/loader.mjs protectedReleasePostgres.fixture.mjs \
+              --cluster="$RUNNER_TEMP/pg-$mode" --port=$port --mode=$mode \
+              --bin=/usr/lib/postgresql/16/bin
+          done

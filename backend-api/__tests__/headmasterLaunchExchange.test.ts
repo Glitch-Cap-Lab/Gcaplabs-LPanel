@@ -23,6 +23,8 @@ describe("headmaster launch exchange", () => {
   const saved = { ...process.env };
 
   beforeEach(() => {
+    process.env.JWT_SECRET = "j".repeat(64);
+    delete process.env.HEADMASTER_LAUNCH_HMAC_KEY;
     process.env.HEADMASTER_S2S_TOKEN = "s2s-token";
     process.env.HEADMASTER_PARENT_ORIGIN = ORIGIN;
     mockDb.query.mockReset();
@@ -149,5 +151,61 @@ describe("headmaster launch exchange", () => {
         expect(launch.isExactHttpsOrigin(bad)).toBe(false);
       }
     });
+  });
+});
+
+describe("signed launch records", () => {
+  const saved = { ...process.env };
+
+  beforeEach(() => {
+    process.env.JWT_SECRET = "j".repeat(64);
+    delete process.env.HEADMASTER_LAUNCH_HMAC_KEY;
+  });
+
+  afterAll(() => {
+    process.env = saved;
+  });
+
+  test("round-trips a record under the key it was sealed for", () => {
+    const sealed = launch.sealRecord("hm:code:abc", { g: "user-1", u: "nora-1" });
+    expect(launch.openRecord("hm:code:abc", sealed)).toEqual({ g: "user-1", u: "nora-1" });
+  });
+
+  test("refuses a plain JSON record written straight into Redis", () => {
+    const forged = JSON.stringify({ g: "user-1", u: "nora-1", o: ORIGIN });
+    expect(launch.openRecord("hm:code:abc", forged)).toBeNull();
+  });
+
+  test("refuses a sealed record copied to another key", () => {
+    const sealed = launch.sealRecord("hm:code:abc", { g: "user-1" });
+    expect(launch.openRecord("hm:code:def", sealed)).toBeNull();
+  });
+
+  test("refuses a record whose body was edited", () => {
+    const envelope = JSON.parse(launch.sealRecord("hm:sess:j1", { u: "nora-1" }));
+    envelope.b = JSON.stringify({ u: "nora-2" });
+    expect(launch.openRecord("hm:sess:j1", JSON.stringify(envelope))).toBeNull();
+  });
+
+  test("refuses a record sealed with a different signing key", () => {
+    const sealed = launch.sealRecord("hm:sess:j1", { u: "nora-1" });
+    process.env.HEADMASTER_LAUNCH_HMAC_KEY = "k".repeat(40);
+    expect(launch.openRecord("hm:sess:j1", sealed)).toBeNull();
+  });
+
+  test("refuses garbage and empty values", () => {
+    expect(launch.openRecord("hm:sess:j1", "not json")).toBeNull();
+    expect(launch.openRecord("hm:sess:j1", null)).toBeNull();
+    expect(launch.openRecord("hm:sess:j1", "{}")).toBeNull();
+  });
+
+  test("cannot seal when no signing key is configured", () => {
+    delete process.env.JWT_SECRET;
+    expect(() => launch.sealRecord("hm:sess:j1", {})).toThrow(/signing key/i);
+  });
+
+  test("refuses a too-short dedicated key", () => {
+    process.env.HEADMASTER_LAUNCH_HMAC_KEY = "short";
+    expect(() => launch.sealRecord("hm:sess:j1", {})).toThrow(/too short/);
   });
 });

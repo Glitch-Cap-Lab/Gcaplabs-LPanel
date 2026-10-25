@@ -1,0 +1,712 @@
+const test = require("node:test");
+const assert = require("node:assert/strict");
+const fs = require("node:fs/promises");
+const os = require("node:os");
+const path = require("node:path");
+const { PassThrough } = require("node:stream");
+const crypto = require("node:crypto");
+const { readArchive, packArchive } = require("./protectedReleaseArchive");
+const { validateManifest, envFingerprint, digest } = require("./protectedReleaseManifest");
+const { ProtectedReleaseDocker } = require("./protectedReleaseDocker");
+const { runProtectedRuntimeRelease } = require("./protectedRuntimeRelease");
+const { runProtectedReleaseJob } = require("./protectedReleaseJob");
+const { createReceiptJournal } = require("./protectedReleaseJob");
+const { createProtectedReleaseState } = require("./protectedReleaseState");
+const { readProtectedReleaseStatus } = require("./protectedReleaseStatus");
+const { run: command } = require("../../scripts/headmaster/runtime-release");
+const { buildReplacementDeploymentJob } = require("../../backend-api/agentProvisionLock");
+
+const uuid = n => `00000000-0000-0000-0000-${String(n).padStart(12, "0")}`;
+const image = n => `sha256:${String(n).repeat(64)}`;
+const sha = value => crypto.createHash("sha256").update(value).digest("hex");
+const clone = value => JSON.parse(JSON.stringify(value));
+const missing = () => Object.assign(new Error("not found"), { statusCode: 404 });
+const protectedJobData = f => ({ ...buildReplacementDeploymentJob(f.row()), replace_existing_runtime: false,
+  protected_release: { manifest: f.manifest, release_id: digest(f.manifest), action: "apply", deployment_id: uuid(10) } });
+
+async function fixture(t, options = {}) {
+  const root = options.root || await fs.mkdtemp(path.join(os.tmpdir(), "protected-release-"));
+  t.after(() => fs.rm(root, { recursive: true, force: true }));
+  await fs.mkdir(path.join(root, ".worker-tmp"), { recursive: true });
+  if (!options.resume) {
+    await fs.mkdir(path.join(root, "installs/gen/.leases"), { recursive: true });
+    for (const [file, value] of [["installs/gen/facts.json", "good"], ["config.yaml", "old-config"], [".env", "private-config"], ["state.db", "new chat must survive"]]) await fs.writeFile(path.join(root, file), value);
+  }
+  const saved = options.resume ? JSON.parse(await fs.readFile(path.join(root, ".fake-docker.json"), "utf8")) : null;
+  const events = saved?.events || [], containers = new Map(saved?.containers || []), metadata = new Map(saved?.metadata || []);
+  const faults = {};
+  const attachedInputs = new Map(), maintenanceTasks = new Map();
+  let lastReceipt = saved?.lastReceipt || null;
+  const contract = Buffer.from("canonical contract"), lock = Buffer.from("locked dependencies");
+  const runtime = { container_id: "old", container_name: "hm-owned", host: "hm-owned", backend_type: "docker", runtime_family: "hermes", deploy_target: "docker", execution_target_id: "docker", sandbox_profile: "standard" };
+  const env = [`HEADMASTER_OWNER_ID=${uuid(3)}`, `HEADMASTER_WORKSPACE_ID=${uuid(4)}`, "API_SERVER_KEY=synthetic-private-value"];
+  const manifest = { format: "headmaster-protected-runtime-release/v1", sources: { core: "a".repeat(40), webapp: "b".repeat(40), lpanel: "c".repeat(40) },
+    image: { id: image(2), binding: "approved-tag", uid: 10000, gid: 10000, contract_sha256: sha(contract), dependency_sha256: sha(lock) },
+    targets: [{ agent_id: uuid(1), owner_id: uuid(2), account_id: uuid(3), workspace_id: uuid(4), container_id: "old", container_name: "hm-owned", image_id: image(1), image_binding: "old-tag", site_binding:{image_binding:"old-tag",deployment_generation:7,authorization_revision:1,revocation_generation:0}, env_sha256: envFingerprint(env), volume: "owned-volume", runtime, status: "running" }], env_delta: { set: {} } };
+  let row = saved?.row || { id: uuid(1), user_id: uuid(2), external_namespace: "headmaster", external_owner_uuid: uuid(3), external_id: uuid(4), headmaster_owner_id: uuid(3), headmaster_workspace_id: uuid(4), ...runtime, status: "queued", image: "old-tag" };
+  const persist = () => require("node:fs").writeFileSync(path.join(root, ".fake-docker.json"), JSON.stringify({ row, events, lastReceipt, containers: [...containers], metadata: [...metadata] }));
+  const old = { Id: "old", Name: "/hm-owned", Image: image(1), State: { Running: true }, Config: { Env: env, Image: "old-tag", Labels: { "nora.agent.id": uuid(1) } },
+    HostConfig: { PortBindings: { "8642/tcp": [{ HostIp: "127.0.0.1", HostPort: "1234" }] }, RestartPolicy: { Name: "unless-stopped" }, OomKillDisable: null },
+    Mounts: [{ Name: "owned-volume", Destination: "/opt/data", Type: "volume", RW: true }], NetworkSettings: { Networks: { private: { Aliases: ["hm-owned"], IPAMConfig: {} } } } };
+  if (!options.resume) containers.set("old", old);
+  const resolve = name => [...containers.values()].find(c => c.Id === name || c.Name === `/${name}`);
+  const local = raw => { assert.ok(raw.startsWith("/opt/data/")); const p = path.resolve(root, raw.slice(10)); assert.ok(p.startsWith(root + path.sep)); return p; };
+  async function archive(raw) {
+    if (raw.startsWith("/opt/hermes/")) return packArchive([{ name: raw.split("/").at(-1), type: "file", mode: 0o600, content: raw.endsWith("uv.lock") ? lock : contract }]);
+    const start = local(raw); let stat;
+    try { stat = await fs.stat(start); } catch { throw missing(); }
+    const rows = [];
+    async function visit(p, name) {
+      const st = await fs.stat(p), meta = metadata.get(p) || {};
+      rows.push({ name, type: st.isDirectory() ? "directory" : "file", uid: meta.uid ?? 10000, gid: meta.gid ?? 10000, mode: meta.mode ?? (st.isDirectory() ? 0o755 : 0o600), content: st.isDirectory() ? Buffer.alloc(0) : await fs.readFile(p) });
+      if (st.isDirectory()) for (const child of await fs.readdir(p)) await visit(path.join(p, child), `${name}/${child}`);
+    }
+    await visit(start, path.basename(start)); return packArchive(rows, { preserveOwnership: true });
+  }
+  const docker = {
+    modem: { demuxStream(raw, stdout) { raw.on("data", x => stdout.write(x)); }, dial(opts, callback) {
+      if (faults.helperImage) { opts.abortSignal.addEventListener("abort", () => events.push("abort:helper-image")); return; }
+      const reference = decodeURIComponent(opts.path.slice(8, -5)); assert.match(reference, /^[A-Za-z0-9][A-Za-z0-9._\/:@-]{0,255}$/);
+      docker.getImage(reference).inspect().then(value => callback(null, value), callback);
+    } },
+    getImage(id) { return { async inspect() { return { Id: id === manifest.image.binding ? manifest.image.id : id, RepoDigests: [], Config: { Env: ["PYTHONPATH=/opt/data", "LD_PRELOAD=/opt/data/private.so", "LD_AUDIT=/opt/data/audit.so"], Healthcheck: { Test: ["CMD-SHELL", "unsafe-image-default"] }, Labels: { "org.opencontainers.image.revision": manifest.sources.core, "com.gcaplabs.webapp.revision": manifest.sources.webapp } } }; } }; },
+    async listContainers(options = {}) { return [...containers.values()].filter(c => options.all || c.State.Running).filter(c => !options.filters || (c.Config.Labels?.["headmaster.release.id"] === digest(manifest))).map(c => ({ Id: c.Id })); },
+    getContainer(name) {
+      const get = () => { const c = resolve(name); if (!c) throw missing(); return c; };
+      return {
+        async inspect(opts = {}) {
+          if (faults.helperInspect && get().Config.Labels?.["headmaster.release.maintenance"]) { opts.abortSignal.addEventListener("abort", () => events.push("abort:helper-inspect")); return new Promise(() => {}); }
+          return clone(get());
+        },
+        async stop(opts = {}) {
+          if (faults.helperStop && get().Config.Labels?.["headmaster.release.maintenance"]) { opts.abortSignal.addEventListener("abort", () => events.push("abort:cleanup-stop")); return new Promise(() => {}); }
+          events.push(`stop:${get().Id}`); get().State.Running = false; persist(); if (options.killAfterStop && get().Id === "old") process.exit(25);
+        },
+        async start(opts = {}) {
+          if (faults.helperStart && get().Config.Labels?.["headmaster.release.maintenance"]) { opts.abortSignal.addEventListener("abort", () => events.push("abort:helper-start")); return new Promise(() => {}); }
+          const c = get(); events.push(`start:${c.Id}`); c.State.Running = true;
+          if (c.Config.Labels?.["headmaster.release.maintenance"]) {
+            const execute = async () => {
+            const [isolated, noSite, flag, program, source, destination, expectedHash] = c.Config.Cmd;
+            assert.equal(isolated, "-I"); assert.equal(noSite, "-S"); assert.equal(flag, "-c"); assert.match(program, /os\.fsync\(/);
+            assert.deepEqual(c.Config.Entrypoint, ["/opt/hermes/.venv/bin/python"]); assert.equal(c.Image, image(1));
+            assert.deepEqual(Object.fromEntries(c.Config.Env.map(x => x.split("="))), { PYTHONPATH: "", LD_PRELOAD: "", LD_AUDIT: "", LD_LIBRARY_PATH: "", PYTHONHOME: "", HOME: "/", PATH: "/usr/bin:/bin", LANG: "C.UTF-8", PYTHONNOUSERSITE: "1" }); assert.equal(c.Config.WorkingDir, "/");
+            assert.deepEqual(c.Config.Healthcheck, { Test: ["NONE"] });
+            assert.equal(c.HostConfig.NetworkMode, "none"); assert.equal(c.Config.NetworkDisabled, true);
+            assert.deepEqual(c.HostConfig.CapDrop, ["ALL"]); assert.deepEqual(c.HostConfig.CapAdd, ["DAC_OVERRIDE", "FOWNER"]);
+            assert.equal(c.Config.User, "0:0");
+            const receipt = c.Config.Labels["headmaster.release.maintenance.kind"] === "receipt";
+            let from = source, to = destination;
+            if (receipt) {
+              assert.match(program, /os\.replace\(/); assert.match(program, /os\.O_NOFOLLOW/);
+              const input = await attachedInputs.get(c.Id);
+              const [stage, hash, releaseId, createAllowed] = c.Config.Cmd.slice(4);
+              assert.equal(sha(input), hash); assert.equal(JSON.parse(input).release_id, releaseId);
+              let existing = await fs.stat(local(stage)).then(() => true, () => false);
+              if (!existing) { assert.equal(createAllowed, "1"); await fs.mkdir(local(stage), { mode: 0o700 }); metadata.set(local(stage), { uid: 0, gid: 0, mode: 0o700 }); }
+              assert.deepEqual(metadata.get(local(stage)), { uid: 0, gid: 0, mode: 0o700 });
+              from = `${stage}/.receipt-${hash}.json`; to = `${stage}/receipt.json`;
+              if (faults.receiptUpload) { await fs.writeFile(local(from), input.subarray(0, 5)); metadata.set(local(from), { uid: 0, gid: 0, mode: 0o600 }); c.exit = 1; c.State.Running = false; persist(); return; }
+              await fs.writeFile(local(from), input); metadata.set(local(from), { uid: 0, gid: 0, mode: 0o600 });
+              const value = JSON.parse(input);
+              if (options.killBeforePublish && value.phase === "candidate_created") { c.State.Running = false; persist(); process.exit(29); }
+              if (faults.publishBefore) { c.exit = 1; c.State.Running = false; persist(); return; }
+            } else { assert.match(program, /os\.rename\(src,dst\)/); if (faults.restore) { c.exit = 1; c.State.Running = false; persist(); return; } }
+            await fs.rename(local(from), local(to));
+            for (const [p, meta] of [...metadata]) if (p === local(from) || p.startsWith(local(from) + path.sep)) { metadata.delete(p); metadata.set(local(to) + p.slice(local(from).length), meta); }
+            c.exit = 0; c.State.Running = false;
+            persist();
+            if (receipt) {
+              const value = JSON.parse(await fs.readFile(local(to), "utf8"));
+              if (options.killAfterPublish && value.phase === "candidate_created") process.exit(30);
+              if (faults.publishAfter) c.exit = 1;
+              for (const name of await fs.readdir(path.dirname(local(to)))) if (/^\.receipt-[0-9a-f]{64}\.json$/.test(name)) { await fs.unlink(path.join(path.dirname(local(to)), name)); metadata.delete(path.join(path.dirname(local(to)), name)); }
+              persist();
+            }
+            if (options.killAfterRestore && destination === "/opt/data/installs") process.exit(24);
+            };
+            const task = execute();
+            if (c.Config.Labels["headmaster.release.maintenance.kind"] === "receipt") { maintenanceTasks.set(c.Id, task); task.catch(() => {}); return; }
+            await task;
+          } else if (c.Id !== "old") {
+            await fs.writeFile(path.join(root, "installs/gen/facts.json"), "failed-attempt");
+            await fs.writeFile(path.join(root, "config.yaml"), "candidate-config");
+          }
+          persist();
+          if (options.killAfterOldStart && c.Id === "old") process.exit(28);
+        },
+        async attach(opts = {}) {
+          if (faults.helperAttach) { opts.abortSignal.addEventListener("abort", () => events.push("abort:helper-attach")); return new Promise(() => {}); }
+          const c = get(), chunks = []; let complete;
+          attachedInputs.set(c.Id, new Promise(resolve => { complete = resolve; }));
+          return new (require("node:stream").Writable)({ write(chunk, _, callback) { chunks.push(Buffer.from(chunk)); callback(); }, final(callback) { complete(Buffer.concat(chunks)); callback(); } });
+        },
+        async wait(opts = {}) {
+          if (faults.helperWait) { opts.abortSignal.addEventListener("abort", () => events.push("abort:helper-wait")); return new Promise(() => {}); }
+          await maintenanceTasks.get(get().Id); return { StatusCode: get().exit || 0 };
+        },
+        async rename({ name }) { const c = get(); events.push(`rename:${c.Id}`); c.Name = `/${name}`; persist(); if (options.killAfterRestoreName && c.Id === "old" && name === "hm-owned") process.exit(27); },
+        async getArchive({ path: p }) {
+          if (p === "/etc/passwd") return require("node:stream").Readable.from(await packArchive([{ name: "passwd", type: "file", mode: 0o644, content: Buffer.from(`hermes:x:${faults.uid || (faults.candidateUid && get().Id === "candidate") ? 10001 : 10000}:10000::/opt/data:/bin/sh\n`) }]));
+          if (faults.stage && p === "/opt/data/installs") throw new Error("archive failure"); return require("node:stream").Readable.from(await archive(p));
+        },
+        async putArchive(buffer) {
+          const tar = require("tar-stream"), extract = tar.extract();
+          const done = new Promise((resolve, reject) => {
+            extract.on("error", reject); extract.on("finish", resolve);
+            extract.on("entry", (header, stream, next) => {
+              const chunks = []; stream.on("data", x => chunks.push(x)); stream.on("end", async () => {
+                try { const p = local(`/opt/data/${header.name}`); await fs.mkdir(path.dirname(p), { recursive: true });
+                  if (header.type === "directory") await fs.mkdir(p, { recursive: true }); else {
+                    const content = Buffer.concat(chunks);
+                    await fs.writeFile(p, faults.receiptUpload && /^\.receipt-/.test(path.basename(p)) ? content.subarray(0, 5) : content);
+                  }
+                  metadata.set(p, { mode: header.mode, uid: header.uid, gid: header.gid }); next();
+                } catch (e) { reject(e); }
+              });
+            });
+          }); if (buffer.pipe) buffer.pipe(extract); else extract.end(buffer); await done; persist();
+          if (faults.receiptUpload) throw new Error("interrupted metadata upload");
+          if (options.killAfterStage && await fs.stat(path.join(root, `.protected-release-${digest(manifest)}`, "before/installs")).then(() => true, () => false)) process.exit(26);
+        },
+        async exec(options) {
+          events.push(`exec:${options.User}`);
+          return { async start() { const stream = new PassThrough(); setImmediate(() => { stream.end(options.Cmd[0] === "du" ? "1 /opt/data/installs" : "ready"); }); return stream; }, async inspect() { return { ExitCode: 0 }; } };
+        },
+      };
+    },
+    async createContainer(cfg) {
+      if (faults.helperCreate && cfg.Labels?.["headmaster.release.maintenance"]) { cfg.abortSignal.addEventListener("abort", () => events.push("abort:helper-create")); return new Promise(() => {}); }
+      const id = cfg.Labels?.["headmaster.release.maintenance"] ? `helper-${containers.size}` : "candidate";
+      const c = { ...clone(old), Id: id, Name: `/${cfg.name || id}`, Image: cfg.Image, Config: clone(cfg), HostConfig: clone(cfg.HostConfig), State: { Running: false } };
+      // A newer daemon fills unset HostConfig fields with zero values on create.
+      if (id === "candidate" && faults.daemonDefaults) Object.assign(c.HostConfig, { OomKillDisable: false, CpuCount: 0, Devices: [] });
+      if (id === "candidate" && faults.hostDrift) c.HostConfig.PortBindings = { "8642/tcp": [{ HostIp: "0.0.0.0", HostPort: "1234" }] };
+      containers.set(id, c); events.push(`create:${id}`); persist();
+      if (id === "candidate" && options.killAfterCreate) process.exit(23);
+      return docker.getContainer(id);
+    },
+  };
+  const state = { async read() { return clone(row); }, async assertRecoverable() { if (faults.binding) throw new Error("changed"); },
+    async commit(m, id) { events.push("commit"); row.container_id = id; row.image = m.image.binding; row.status = "running"; persist(); if (faults.commit) throw new Error("database outage after CAS"); },
+    async rollback() { events.push("rollback-row"); row = { ...row, ...runtime, image: "old-tag", status: "running" }; persist(); } };
+  const backend = { docker, _containerUserOwnership: async container => ({ uid: faults.uid || (faults.candidateUid && (await container.inspect()).Id === "candidate") ? 10001 : 10000, gid: 10000 }) };
+  const adapter = new ProtectedReleaseDocker(backend, { stagingRoot: path.join(root, ".worker-tmp"), checkReadiness: async () => { if (faults.health) throw new Error("health failed"); return { ok: true }; } });
+  const receipts = [];
+  const run = options => runProtectedRuntimeRelease({ manifest, adapter, state, receipt: saved?.lastReceipt,
+    saveReceipt: async r => { lastReceipt = clone(r); persist(); receipts.push(clone(r)); if (faults.queue && r.phase === "candidate_created") throw new Error("Redis outage"); }, ...options });
+  return { manifest, root, adapter, state, docker, backend, events, faults, run, receipts, row: () => row, setRow: value => { row = value; persist(); } };
+}
+
+// A query adapter exercises the actual maintained SQL/CAS implementation without a live database.
+function database(f, deploymentId = uuid(10)) {
+  const deployments = new Map([[deploymentId, "queued"], [uuid(11), "completed"]]);
+  const queries = []; let snapshot;
+  return { deployments, queries, async query(sql, params = []) {
+    sql = sql.replace(/\s+/g, " ").trim(); queries.push({ sql, params });
+    if (sql === "BEGIN") { snapshot = { row: clone(f.row()), deployments: [...deployments] }; return { rows: [] }; }
+    if (sql === "COMMIT") { snapshot = null; return { rows: [] }; }
+    if (sql === "ROLLBACK") { if (snapshot) { f.setRow(snapshot.row); deployments.clear(); for (const x of snapshot.deployments) deployments.set(...x); snapshot = null; } return { rows: [] }; }
+    if (sql.startsWith("SELECT * FROM agents")) return { rows: [clone(f.row())] };
+    if (sql.startsWith("UPDATE agents SET container_id")) {
+      const [id, container_id, image, status, owner, account, workspace, oldId, oldImage, oldStatus] = params, row = f.row();
+      if (row.id !== id || row.user_id !== owner || row.external_owner_uuid !== account || row.external_id !== workspace || row.container_id !== oldId || row.image !== oldImage || row.status !== oldStatus) return { rows: [] };
+      f.setRow({ ...row, container_id, image, status }); return { rows: [{ id }] };
+    }
+    if (sql.startsWith("UPDATE agents SET status = 'running'")) {
+      if (f.row().status !== "deploying" || f.row().container_id !== params[1]) return { rows: [] };
+      f.setRow({ ...f.row(), status: "running" }); return { rows: [{ id: params[0] }] };
+    }
+    if (sql.startsWith("UPDATE deployments SET status")) {
+      assert.match(sql, /\bid = (?:\$2|ANY\(\$2::uuid\[\]\))/);
+      const status = sql.match(/SET status = '([^']+)'/)[1], ids = Array.isArray(params[1]) ? params[1] : [params[1]];
+      const rows = [];
+      for (const id of ids) if (deployments.has(id)) { deployments.set(id, status); rows.push({ id, agent_id: params[0] }); }
+      return { rows };
+    }
+    if (sql.startsWith("INSERT INTO events")) return { rows: [] };
+    throw new Error(`Unexpected test query: ${sql}`);
+  } };
+}
+
+module.exports = { fixture, database, protectedJobData };
+if (!process.env.PROTECTED_RELEASE_FIXTURE_ONLY) {
+test("receipt journal cancellation closes only the operation-owned transport and never acknowledges a late write", async () => {
+  const { EventEmitter } = require("node:events"), abort = new AbortController(); let cancelled = false, complete, calls = 0;
+  const connection = { disconnect() { cancelled = true; } };
+  const shared = { disconnect() { throw new Error("must not disconnect worker shared transport"); }, duplicate(options) {
+    assert.equal(options.enableOfflineQueue, false); assert.equal(options.maxRetriesPerRequest, 0); return connection;
+  } };
+  class Owned extends EventEmitter { constructor(value) { super(); this.client = Promise.resolve(value); } async close() {} }
+  // BullMQ hands the processor the Worker as job.queue, which has no client; the backend view does.
+  const job = { data: { before: true }, queue: {}, backend: { queue: { client: Promise.resolve(shared) }, async updateData(received, value) {
+    assert.equal(received, job); assert.equal(await this.queue.client, connection); calls++;
+    return new Promise(resolve => { complete = resolve; });
+  } } };
+  const journal = await createReceiptJournal(job, abort.signal, Owned), pending = journal.updateData({ after: true });
+  await new Promise(resolve => setImmediate(resolve)); abort.abort(new Error("operation deadline"));
+  await assert.rejects(pending, /operation deadline/); assert.equal(cancelled, true); assert.deepEqual(job.data, { before: true });
+  complete(); await new Promise(resolve => setImmediate(resolve)); assert.deepEqual(job.data, { before: true });
+  await assert.rejects(journal.updateData({ later: true })); assert.equal(calls, 1); journal.close();
+});
+test("stalled real tar input and upload destroy their streams at the adapter deadline", async t => {
+  const f = await fixture(t), tarBytes = await packArchive([
+    { name: "installs", type: "directory", mode: 0o755, content: Buffer.alloc(0) },
+    { name: "installs/partial", type: "file", mode: 0o600, content: Buffer.alloc(4096) },
+  ]);
+  const input = new PassThrough(); input.write(tarBytes.subarray(0, 1200));
+  const adapter = new ProtectedReleaseDocker(f.backend, { archiveTimeoutMs: 25 });
+  const before = Date.now();
+  await assert.rejects(adapter.read({ getArchive: async () => input }, "/opt/data/installs", "installs"), /DOCKER_TIMEOUT/);
+  assert.equal(input.destroyed, true); assert.ok(Date.now() - before < 1000);
+  let uploaded, cancelled = false;
+  await assert.rejects(adapter.upload({ putArchive: (stream, options) => { uploaded = stream; options.abortSignal.addEventListener("abort", () => { cancelled = true; }); return new Promise(() => {}); } }, [
+    { name: "installs/file", type: "file", mode: 0o600, content: Buffer.alloc(1024 * 1024) },
+  ], {}), /DOCKER_TIMEOUT/);
+  assert.equal(cancelled, true); assert.equal(uploaded.destroyed, true);
+});
+
+test("public Docker RPC and exec phases cancel the actual transport instead of waiting indefinitely", async t => {
+  const f = await fixture(t), adapter = new ProtectedReleaseDocker(f.backend, { probeTimeoutMs: 20 });
+  for (const kind of ["inspect", "list", "exec-create", "exec-start", "exec-stream", "exec-inspect"]) {
+    let aborted = false, raw;
+    const stall = options => new Promise(() => options.abortSignal.addEventListener("abort", () => { aborted = true; }));
+    let operation;
+    if (kind === "inspect") operation = () => adapter.inspect({ inspect: stall });
+    else if (kind === "list") { const original = f.docker.listContainers; f.docker.listContainers = stall; operation = async () => { try { await adapter.list(); } finally { f.docker.listContainers = original; } }; }
+    else operation = () => adapter.exec({ exec: kind === "exec-create" ? stall : async () => ({
+      start: kind === "exec-start" ? stall : async () => { raw = new PassThrough(); if (kind !== "exec-stream") setImmediate(() => raw.end("done")); return raw; },
+      inspect: kind === "exec-inspect" ? stall : async () => ({ ExitCode: 0 }),
+    }) }, ["fixed-probe"]);
+    await assert.rejects(operation(), /DOCKER_TIMEOUT/, kind);
+    assert.ok(kind === "exec-stream" ? raw.destroyed : aborted, kind);
+  }
+});
+
+test("preflight collects unreferenced installs on a large store and re-measures, but leaves a small one alone", async t => {
+  const f = await fixture(t), GB = 1024 ** 3;
+  const adapter = (sizesKb, gcFails = false) => {
+    const calls = []; const a = new ProtectedReleaseDocker({ docker: { getContainer: () => ({}) } });
+    a.exec = async (_c, cmd, _u, timeoutMs) => {
+      calls.push(cmd.join(" "));
+      if (cmd[0] === "du") return `${sizesKb.shift()} /opt/data/installs`;
+      if (gcFails) throw new Error("PROTECTED_RELEASE_PROBE_FAILED");
+      assert.ok(timeoutMs > 60000); return "";
+    };
+    return { a, calls };
+  };
+  const big = adapter([2 * GB / 1024]);
+  assert.equal(await big.a.collectInstalls({ container_id: "c" }, 8 * GB), 2 * GB);
+  assert.deepEqual(big.calls, ["/opt/hermes/.venv/bin/hermes pm gc", "du -sk /opt/data/installs"]);
+  const small = adapter([]);
+  assert.equal(await small.a.collectInstalls({ container_id: "c" }, GB / 2), GB / 2);
+  assert.deepEqual(small.calls, []);
+  const broken = adapter([], true);
+  assert.equal(await broken.a.collectInstalls({ container_id: "c" }, 8 * GB), 8 * GB);
+  assert.equal(f.adapter instanceof ProtectedReleaseDocker, true);
+});
+
+test("a lost candidate-create ACK never starts or creates again until fresh explicit recovery", async t => {
+  const f = await fixture(t), original = f.docker.createContainer.bind(f.docker);
+  // Shorten only the candidate-create call; a global 25 ms budget flakes on a loaded host.
+  const guardedCall = f.adapter.call.bind(f.adapter); f.adapter.call = (run, ms) => guardedCall(run, /\.\.\.cfg/.test(String(run)) ? 25 : ms);
+  let late, aborted = false;
+  f.docker.createContainer = async cfg => {
+    // Observe the abort before the slow fixture create so a loaded host cannot miss it.
+    if (!cfg.Labels?.["headmaster.release.maintenance"]) cfg.abortSignal.addEventListener("abort", () => { aborted = true; });
+    const value = await original(cfg);
+    if (cfg.Labels?.["headmaster.release.maintenance"]) return value;
+    return new Promise(resolve => { late = () => resolve(value); });
+  };
+  await assert.rejects(f.run(), /RECOVERY_REQUIRED/);
+  assert.equal(aborted, true); assert.equal(f.events.filter(x => x === "create:candidate").length, 1);
+  const boundary = f.events.length; late(); await new Promise(resolve => setTimeout(resolve, 30));
+  assert.equal(f.events.length, boundary); assert.ok(!f.events.includes("start:candidate")); assert.ok(!f.events.includes("start:old"));
+  f.docker.createContainer = original; f.adapter.call = guardedCall;
+  assert.equal((await f.run({ action: "recover" })).phase, "rolled_back");
+  assert.equal(f.events.filter(x => x === "create:candidate").length, 1);
+});
+
+test("operation deadline and lost provision lease abort a stalled archive before any later mutation", async t => {
+  for (const mode of ["deadline", "lease"]) {
+    const f = await fixture(t), db = database(f), loss = new AbortController();
+    const original = f.docker.getContainer.bind(f.docker); let stream;
+    f.docker.getContainer = id => { const c = original(id); return { ...c, getArchive: async options => {
+      if (options.path !== "/etc/passwd") return c.getArchive(options);
+      stream = new PassThrough(); stream.write(Buffer.alloc(20)); return stream;
+    } }; };
+    const job = { id: "bounded-job", data: protectedJobData(f) };
+    const lock = { signal: loss.signal, deadlineAt: Date.now() + 180000, query: (...args) => db.query(...args) };
+    const pending = runProtectedReleaseJob(job, { db: { query: () => { throw new Error("pool must not be used"); } }, agentRow: f.row(), provisionLock: lock,
+      operationTimeoutMs: mode === "deadline" ? 50 : 5000, journalAdapter: { updateData: async () => {} },
+      loadBackend: async () => f.backend, withProviderMutationLock: async (_, fn) => fn() });
+    if (mode === "lease") setTimeout(() => loss.abort(new Error("session ended")), 50);
+    await assert.rejects(pending, /DEADLINE|LOCK_LOST/);
+    assert.equal(stream.destroyed, true); assert.ok(!f.events.includes("stop:old"));
+    const count = f.events.length; await new Promise(resolve => setTimeout(resolve, 30)); assert.equal(f.events.length, count);
+  }
+});
+
+test("uncertain queue ACK after create requires explicit recovery without automatic restart", async t => {
+  const f = await fixture(t), db = database(f), job = { id: "uncertain-journal", data: protectedJobData(f) };
+  await assert.rejects(runProtectedReleaseJob(job, { db, agentRow: f.row(), loadBackend: async () => f.backend, stagingRoot: path.join(f.root, ".worker-tmp"),
+    withProviderMutationLock: async (_, fn) => fn(), checkReadiness: async () => ({ ok: true }),
+    journalAdapter: { updateData: async data => { if (data.protected_release.receipt.phase === "candidate_created") throw new Error("Command timed out"); job.data = data; } },
+  }), /RECOVERY_REQUIRED/);
+  assert.equal(f.events.filter(x => x === "create:candidate").length, 1);
+  assert.ok(!f.events.includes("start:old")); assert.ok(!f.events.includes("start:candidate"));
+  assert.equal((await f.run({ action: "recover" })).phase, "rolled_back");
+});
+
+test("a lease without cleanup headroom refuses before opening any mutation transport", async t => {
+  const f = await fixture(t); let loaded = false;
+  await assert.rejects(runProtectedReleaseJob({ data: protectedJobData(f) }, { db: database(f), agentRow: f.row(),
+    provisionLock: { deadlineAt: Date.now() + 60000 }, loadBackend: async () => { loaded = true; },
+  }), /OPERATION_DEADLINE/);
+  assert.equal(loaded, false); assert.equal(f.events.length, 0);
+});
+
+test("maintained dry-run deadline cancels its archive and uses the held database session", async t => {
+  const f = await fixture(t); let stream, released = false;
+  const original = f.docker.getContainer.bind(f.docker);
+  f.docker.getContainer = id => { const c = original(id); return { ...c, getArchive: async options => {
+    if (options.path !== "/etc/passwd") return c.getArchive(options);
+    stream = new PassThrough(); stream.write(Buffer.alloc(20)); return stream;
+  } }; };
+  const deps = { operationTimeoutMs: 50, readFile: async () => JSON.stringify(f.manifest),
+    db: { query: () => { throw new Error("must use held lock session"); } },
+    acquireLock: async (_, { signal }) => ({ query: async () => ({ rows: [{ ...f.row(), status: "running" }] }), release: async () => { assert.equal(signal.aborted, true); released = true; } }),
+    loadBackend: async () => f.backend };
+  await assert.rejects(command(["--manifest", "local.json", "--dry-run"], deps), /OPERATION_DEADLINE/);
+  assert.equal(stream.destroyed, true); assert.equal(released, true); assert.ok(!f.events.includes("stop:old"));
+});
+
+test("readiness cancellation reaches fetch and never schedules another probe", async () => {
+  const { waitForHttpReady } = require("./healthChecks"), controller = new AbortController(); let calls = 0, cancelled = false;
+  const pending = waitForHttpReady("http://synthetic.invalid/health", { signal: controller.signal, attempts: 3,
+    fetchImpl: async (_, { signal }) => { calls++; return new Promise((_, reject) => signal.addEventListener("abort", () => { cancelled = true; reject(signal.reason); }, { once: true })); } });
+  controller.abort(new Error("protected deadline")); await assert.rejects(pending, /protected deadline/);
+  assert.equal(calls, 1); assert.equal(cancelled, true);
+});
+
+test("old-worker refusal remains an exact failed-before-receipt operation and explicit recovery is queued safely", async t => {
+  const f = await fixture(t); f.setRow({ ...f.row(), status: "error" });
+  const job = { id: `protected-release-${digest(f.manifest)}`, data: protectedJobData(f), getState: async () => "failed" };
+  const status = await readProtectedReleaseStatus({ manifest: f.manifest, adapter: f.adapter, state: f.state, job });
+  assert.equal(status.phase, "failed_before_receipt"); assert.equal(status.receipt, null); assert.equal(status.publication_blocked, true);
+  let queued;
+  const deps = { owner: { status: async () => ({ release_id: digest(f.manifest), phase: "prepared", metadata_finalized: false }) }, readFile: async () => JSON.stringify(f.manifest), db: { query: async () => ({ rows: [f.row()] }) }, acquireLock: async () => ({ release: async () => {} }),
+    loadBackend: async () => f.backend, getJob: async () => job, buildReplacementDeploymentJob,
+    enqueue: async (_, data) => { queued = data; return { id: "explicit-recovery" }; } };
+  await command(["--manifest", "local.json", "--recover"], deps);
+  assert.equal(queued.replace_existing_runtime, false); assert.equal(queued.protected_release.receipt.refused_before_receipt, true);
+  f.setRow({ ...f.row(), status: "queued" });
+  assert.equal((await f.run({ action: "recover", receipt: queued.protected_release.receipt })).phase, "rolled_back");
+  assert.equal(f.events.filter(x => x === "create:candidate").length, 0);
+});
+
+test("a release refused before its receipt is queued again only after recovery put the agent back to running", async t => {
+  const f = await fixture(t); f.setRow({ ...f.row(), status: "queued" });
+  let removed = 0, added = 0, queued;
+  const job = { id: `protected-release-${digest(f.manifest)}`, data: protectedJobData(f), getState: async () => "failed", remove: async () => { removed++; } };
+  const deps = { owner: { prepare: async () => ({ release_id: digest(f.manifest), phase: "binding_pending", metadata_finalized: false }), finalize: async () => ({ release_id: digest(f.manifest), phase: "binding_pending", metadata_finalized: false }) },
+    readFile: async () => JSON.stringify(f.manifest), db: { query: async () => ({ rows: [f.row()] }) }, acquireLock: async () => ({ release: async () => {} }),
+    loadBackend: async () => f.backend, getJob: async () => (removed ? null : job), buildReplacementDeploymentJob, cancelJobs: async () => ({ active: 0 }),
+    enqueue: async (_, data, options) => { queued = data; return options.addDeploymentJob(data); }, addJob: async (_, options) => { added++; return { id: options.jobId }; } };
+  // Still queued from the refused attempt: no recovery yet, so nothing is removed or queued.
+  await assert.rejects(command(["--manifest", "local.json", "--enqueue"], deps), /BINDING_CHANGED/);
+  assert.equal(removed, 0); assert.equal(added, 0);
+  f.setRow({ ...f.row(), status: "running" });
+  const result = await command(["--manifest", "local.json", "--enqueue"], deps);
+  assert.equal(result.phase, "queued"); assert.equal(result.job_id, job.id); assert.equal(removed, 1); assert.equal(added, 1);
+  assert.equal(queued.protected_release.action, "apply"); assert.equal(queued.replace_existing_runtime, false);
+});
+
+test("a failed release that saved a receipt is never queued again by enqueue", async t => {
+  const f = await fixture(t); f.setRow({ ...f.row(), status: "running" }); let removed = 0, added = 0;
+  const data = protectedJobData(f); data.protected_release.receipt = { release_id: digest(f.manifest), phase: "validated" };
+  const job = { id: `protected-release-${digest(f.manifest)}`, data, getState: async () => "failed", remove: async () => { removed++; } };
+  const deps = { owner: { prepare: async () => ({ release_id: digest(f.manifest), phase: "binding_pending", metadata_finalized: false }), finalize: async () => ({ release_id: digest(f.manifest), phase: "binding_pending", metadata_finalized: false }) },
+    readFile: async () => JSON.stringify(f.manifest), db: { query: async () => ({ rows: [f.row()] }) }, acquireLock: async () => ({ release: async () => {} }),
+    loadBackend: async () => f.backend, getJob: async () => job, buildReplacementDeploymentJob, enqueue: async () => { added++; } };
+  await command(["--manifest", "local.json", "--enqueue"], deps);
+  assert.equal(removed, 0); assert.equal(added, 0);
+});
+
+test("immutable manifest rejects secret env inputs and unsupported owner/UID/targets", async t => {
+  const f = await fixture(t);
+  for (const mutate of [m => { m.env_delta.set.API_SERVER_KEY = "synthetic-secret"; }, m => { m.image.uid = 0; },
+    m => { m.targets[0].owner_id = "unknown"; }, m => { m.targets.push(clone(m.targets[0])); }, m => { m.targets[0].runtime.backend_type = "remote-docker"; }]) {
+    const input = clone(f.manifest); mutate(input); assert.throws(() => validateManifest(input));
+  }
+  const captured = validateManifest(f.manifest); f.manifest.targets[0].volume = "changed-later";
+  assert.equal(captured.target.volume, "owned-volume");
+});
+
+test("actual worker/controller/state path keeps exact deployment identity and server-owned status", async t => {
+  const f = await fixture(t), db = database(f), deploymentId = uuid(10);
+  const job = { id: `protected-release-${digest(f.manifest)}`, data: protectedJobData(f),
+    async updateData(value) { this.data = value; }, async getState() { return "completed"; } };
+  const result = await runProtectedReleaseJob(job, { db, agentRow: f.row(), loadBackend: async () => f.backend, stagingRoot: path.join(f.root, ".worker-tmp"),
+    journalAdapter: { updateData: value => job.updateData(value) },
+    withProviderMutationLock: async (owner, fn) => { assert.equal(owner, uuid(2)); return fn(); }, checkReadiness: async () => ({ ok: true }) });
+  assert.equal(result.phase, "external_metadata_pending"); assert.equal(result.deployment_id, deploymentId);
+  assert.equal(result.external_binding_unchanged, null); assert.equal(db.deployments.get(deploymentId), "completed");
+  const status = await readProtectedReleaseStatus({ manifest: f.manifest, adapter: f.adapter, state: createProtectedReleaseState(db, uuid(1), deploymentId), job });
+  assert.equal(status.observed.container_id, "candidate"); assert.equal(status.observed.runtime.candidate.image_id, image(2));
+  assert.equal(status.publication_blocked, true); assert.equal(status.external_metadata_confirmed, false);
+  assert.ok(!JSON.stringify(status).includes("synthetic-private-value"));
+  assert.equal(db.deployments.get(uuid(11)), "completed");
+});
+
+test("queue ACK failure after real state commit compensates only this completed deployment", async t => {
+  const f = await fixture(t), db = database(f), deploymentId = uuid(10); let failed = false;
+  await assert.rejects(f.run({ state: createProtectedReleaseState(db, uuid(1), deploymentId), deploymentId,
+    saveReceipt: async receipt => { if (!failed && receipt.phase === "external_metadata_pending") { failed = true; throw new Error("lost queue ACK"); } } }), /PROTECTED_RELEASE_FAILED/);
+  assert.equal(f.row().container_id, "old"); assert.equal(f.row().status, "running");
+  assert.equal(db.deployments.get(deploymentId), "failed"); assert.equal(db.deployments.get(uuid(11)), "completed");
+  const receipt = await f.adapter.readReceipt(f.manifest.targets[0], { old: `hm-owned-release-${digest(f.manifest).slice(0, 16)}`, stage: `.protected-release-${digest(f.manifest)}` });
+  assert.equal(receipt.phase, "rolled_back"); assert.equal(receipt.lp_committed, false);
+});
+
+test("recovery owner mismatch refuses before stopping the current candidate", async t => {
+  const f = await fixture(t); await f.run(); const before = f.events.length; f.faults.binding = true;
+  await assert.rejects(f.run({ action: "recover" }), /changed/);
+  assert.equal(f.events.slice(before).filter(x => x.startsWith("stop:")).length, 0);
+});
+
+test("real worker preflight rejection compensates exact queued state without runtime mutation", async t => {
+  const f = await fixture(t), db = database(f); f.faults.uid = true;
+  const job = { id: "protected-job", data: protectedJobData(f), async updateData() {} };
+  await assert.rejects(runProtectedReleaseJob(job, { db, agentRow: f.row(), loadBackend: async () => f.backend, stagingRoot: path.join(f.root, ".worker-tmp"),
+    journalAdapter: { updateData: value => job.updateData(value) },
+    withProviderMutationLock: async (_, fn) => fn(), checkReadiness: async () => ({ ok: true }) }), /UID_CHANGED/);
+  assert.equal(f.row().status, "running"); assert.equal(db.deployments.get(uuid(10)), "failed");
+  assert.equal(db.deployments.get(uuid(11)), "completed"); assert.ok(!f.events.includes("stop:old"));
+});
+
+test("maintained recovery command rejects wrong external owner before enqueue or DB mutation", async t => {
+  const f = await fixture(t); f.manifest.targets[0].account_id = uuid(9); let enqueued = 0;
+  const db = database(f), deps = { owner:{status:async()=>({release_id:digest(f.manifest),phase:"prepared",metadata_finalized:false})},db, readFile: async () => JSON.stringify(f.manifest), acquireLock: async () => ({ release: async () => {} }),
+    loadBackend: async () => f.backend, enqueue: async () => { enqueued++; }, getJob: async () => null };
+  await assert.rejects(command(["--manifest", "local.json", "--recover"], deps), /OWNER_CHANGED/);
+  assert.equal(enqueued, 0); assert.ok(db.queries.every(x => x.sql.startsWith("SELECT")));
+  assert.equal(f.events.length, 0);
+});
+
+test("real archive validation preserves PM links and rejects traversal, escaping/hard links and symlink parents", async () => {
+  const dir = { name: "installs", type: "directory", mode: 0o755, content: Buffer.alloc(0) };
+  const link = target => ({ name: "installs/python", type: "symlink", linkname: target, mode: 0o777, content: Buffer.alloc(0) });
+  assert.equal((await readArchive(await packArchive([dir, link("/usr/local/bin/python3")]), "installs"))[1].linkname, "/usr/local/bin/python3");
+  // PM venvs link python to the image's pinned interpreter in the tool store.
+  const toolPython = "/opt/hermes/tools/python-3.14.7+20260901-linux-x64/bin/python3";
+  assert.equal((await readArchive(await packArchive([dir, link(toolPython)]), "installs"))[1].linkname, toolPython);
+  for (const rows of [[dir, link("/etc/passwd")], [dir, link("/opt/hermes/tools/../../../etc/bin/sh")], [dir, link("/opt/hermes/tools/python/lib/x")], [dir, link("../../outside")], [dir, { ...dir, name: "../escape" }], [dir, link("/usr/bin/python3"), { ...dir, name: "installs/python/child" }], [dir, { ...link("state.db"), type: "link" }]]) {
+    await assert.rejects(readArchive(await packArchive(rows), "installs"));
+  }
+});
+
+test("repeated dry runs make no write, stop, create or queue mutation", async t => {
+  const f = await fixture(t);
+  assert.equal((await f.run({ dryRun: true })).phase, "dry_run");
+  assert.equal((await f.run({ dryRun: true })).phase, "dry_run");
+  assert.ok(f.events.every(x => x.startsWith("exec:"))); assert.equal(f.receipts.length, 0);
+});
+
+test("atomic receipt keeps canonical old or new JSON across interrupted upload and publish ACK", async t => {
+  const f = await fixture(t), target = f.manifest.targets[0], releaseId = digest(f.manifest);
+  const names = { old: `hm-owned-release-${releaseId.slice(0, 16)}`, stage: `.protected-release-${releaseId}` };
+  const old = { release_id: releaseId, phase: "stopped" }, next = { release_id: releaseId, phase: "staged" };
+  await f.adapter.stop(target.container_id);
+  await f.adapter.writeReceipt(target, names, old);
+  await f.adapter.start(target.container_id);
+  const before = f.events.length;
+  f.faults.receiptUpload = true;
+  await assert.rejects(f.adapter.writeReceipt(target, names, next));
+  assert.deepEqual(await f.adapter.readReceipt(target, names), old);
+  f.faults.receiptUpload = false; f.faults.publishBefore = true;
+  await assert.rejects(f.adapter.writeReceipt(target, names, next));
+  assert.deepEqual(await f.adapter.readReceipt(target, names), old);
+  f.faults.publishBefore = false; f.faults.publishAfter = true;
+  await assert.rejects(f.adapter.writeReceipt(target, names, next));
+  assert.deepEqual(await f.adapter.readReceipt(target, names), next);
+  f.faults.publishAfter = false;
+  await f.adapter.writeReceipt(target, names, next);
+  assert.deepEqual(await f.adapter.readReceipt(target, names), next);
+  assert.ok(!(await fs.readdir(path.join(f.root, names.stage))).some(name => name.startsWith(".receipt-")));
+  assert.ok(!f.events.slice(before).includes("stop:old"), "private metadata publication does not stop a healthy runtime");
+});
+
+test("unresponsive helper wait and cleanup stop settle within the bounded budget and cancel transport", async t => {
+  const f = await fixture(t), releaseId = digest(f.manifest), target = f.manifest.targets[0];
+  await f.adapter.stop(target.container_id);
+  f.adapter.probeTimeoutMs = 50; f.faults.helperWait = true; f.faults.helperStop = true;
+  const start = Date.now();
+  await assert.rejects(f.adapter.writeReceipt(target, { old: `hm-owned-release-${releaseId.slice(0, 16)}`, stage: `.protected-release-${releaseId}` }, { release_id: releaseId, phase: "stopped" }), /DOCKER_TIMEOUT/);
+  assert.ok(Date.now() - start < 1500, "neither ignored transport promise can hold the caller indefinitely");
+  assert.ok(f.events.includes("abort:helper-wait")); assert.ok(f.events.includes("abort:cleanup-stop"));
+});
+
+test("unresponsive private helper image/create/inspect/attach/start calls cancel without starting a writer", async t => {
+  for (const phase of ["Image", "Create", "Inspect", "Attach", "Start"]) {
+    const f = await fixture(t), releaseId = digest(f.manifest), target = f.manifest.targets[0];
+    await f.adapter.stop(target.container_id); f.adapter.probeTimeoutMs = 50; f.faults[`helper${phase}`] = true;
+    const start = Date.now();
+    await assert.rejects(f.adapter.writeReceipt(target, { old: `hm-owned-release-${releaseId.slice(0, 16)}`, stage: `.protected-release-${releaseId}` }, { release_id: releaseId, phase: "stopped" }), /DOCKER_TIMEOUT/);
+    assert.ok(Date.now() - start < 1500); assert.ok(f.events.includes(`abort:helper-${phase.toLowerCase()}`));
+    assert.ok(!f.events.some(x => /^start:helper-/.test(x)));
+  }
+});
+
+test("published status requires the canonical volume receipt instead of blessing a queue copy", async t => {
+  const f = await fixture(t), receipt = await f.run(), releaseId = digest(f.manifest);
+  const job = { id: `protected-release-${releaseId}`, data: { id: uuid(1), protected_release: { manifest: f.manifest, release_id: releaseId, receipt } }, async getState() { return "completed"; } };
+  const stage = path.join(f.root, `.protected-release-${releaseId}`), hidden = stage + ".renamed";
+  await fs.rename(stage, hidden);
+  await assert.rejects(readProtectedReleaseStatus({ manifest: f.manifest, adapter: f.adapter, state: f.state, job }), /CANONICAL_RECEIPT_REQUIRED/);
+  await fs.rename(hidden, stage);
+  assert.equal((await readProtectedReleaseStatus({ manifest: f.manifest, adapter: f.adapter, state: f.state, job })).phase, "external_metadata_pending");
+});
+
+test("large real tar spools to private disk and repacks with bounded streaming memory", async t => {
+  const folder = await fs.mkdtemp(path.join(os.tmpdir(), "protected-release-stream-"));
+  t.after(() => fs.rm(folder, { recursive: true, force: true }));
+  const tar = require("tar-stream"), { once } = require("node:events"), { Writable } = require("node:stream");
+  const { pipeline } = require("node:stream/promises"), { packStream } = require("./protectedReleaseArchive");
+  const input = tar.pack(), bytes = 64 * 1024 * 1024, block = Buffer.alloc(65536, 7);
+  const baseline = process.memoryUsage().arrayBuffers; let peak = baseline;
+  const producer = (async () => {
+    await new Promise((resolve, reject) => input.entry({ name: "installs", type: "directory", mode: 0o755 }, e => e ? reject(e) : resolve()));
+    const file = input.entry({ name: "installs/payload", size: bytes, type: "file", mode: 0o644 });
+    for (let written = 0; written < bytes; written += block.length) { if (!file.write(block)) await once(file, "drain"); peak = Math.max(peak, process.memoryUsage().arrayBuffers); }
+    file.end(); input.finalize();
+  })();
+  const rows = await readArchive(input, "installs", { spoolDirectory: folder, maxBytes: bytes + 1024 }); await producer;
+  const file = rows.find(x => x.type === "file");
+  assert.equal(file.bytes, bytes); assert.equal(file.content, undefined); assert.equal((await fs.stat(file.contentPath)).size, bytes);
+  assert.ok(peak - baseline < 32 * 1024 * 1024, `stream buffered ${peak - baseline} bytes`);
+  let consumed = 0;
+  await pipeline(packStream(rows), new Writable({ write(chunk, encoding, done) { consumed += chunk.length; setImmediate(done); } }));
+  assert.ok(consumed >= bytes);
+});
+
+test("another writable runtime blocks staging and leaves the neighbor unchanged", async t => {
+  const f = await fixture(t), neighbor = await f.docker.createContainer({ name: "neighbor", Image: image(1), Labels: { "headmaster.release.maintenance": "synthetic-neighbor" }, HostConfig: {} });
+  // An arbitrary active writer is refused before a stop or snapshot.
+  const original = f.docker.listContainers;
+  f.docker.listContainers = async options => options?.all ? original(options) : [{ Id: "old" }, { Id: "helper-1" }];
+  const get = f.docker.getContainer;
+  f.docker.getContainer = name => name === "helper-1" ? { inspect: async () => ({ Id: name, State: { Running: true }, Mounts: [{ Name: "owned-volume", RW: true }] }) } : get(name);
+  await assert.rejects(f.run(), /ACTIVE_WRITER/); assert.ok(!f.events.includes("stop:old"));
+});
+
+test("real staged archives commit only LP state and retain explicit external metadata pending receipt", async t => {
+  const f = await fixture(t); const result = await f.run();
+  assert.equal(result.phase, "external_metadata_pending"); assert.equal(result.publication_blocked, true);
+  assert.equal(result.lp_committed, true); assert.equal(result.external_metadata_confirmed, false);
+  assert.equal(await fs.readFile(path.join(f.root, "state.db"), "utf8"), "new chat must survive");
+  assert.ok(f.events.indexOf("stop:old") < f.events.indexOf("create:candidate"));
+  await assert.rejects(f.run(), /RECOVERY_REQUIRED/);
+});
+
+for (const fault of ["health", "commit", "queue"]) test(`${fault} failure restores verified installs before old start and retains failed bytes`, async t => {
+  const f = await fixture(t); f.faults[fault] = true; await assert.rejects(f.run(), /PROTECTED_RELEASE_FAILED/);
+  assert.equal(await fs.readFile(path.join(f.root, "installs/gen/facts.json"), "utf8"), "good");
+  assert.equal(await fs.readFile(path.join(f.root, "state.db"), "utf8"), "new chat must survive");
+  const stage = `.protected-release-${digest(f.manifest)}`;
+  assert.equal(await fs.readFile(path.join(f.root, stage, "failed-installs/gen/facts.json"), "utf8"), fault === "queue" ? "good" : "failed-attempt");
+  if (fault === "queue") assert.ok(!f.events.includes("start:candidate"), "queue ACK loss is before candidate start");
+  const restored = f.receipts.findIndex(r => r.phase === "restored"), rolled = f.receipts.findIndex(r => r.phase === "rolled_back");
+  assert.ok(restored >= 0 && rolled > restored); assert.equal(f.events.filter(x => /^start:(old|candidate)$/.test(x)).at(-1), "start:old");
+  assert.equal(f.row().image, "old-tag");
+});
+
+test("extraction failure never renames the old runtime and resumes it without touching chats", async t => {
+  const f = await fixture(t); f.faults.stage = true; await assert.rejects(f.run());
+  assert.ok(f.receipts.at(-1).failure_code === null || /^PROTECTED_RELEASE_[A-Z0-9_]+$/.test(f.receipts.at(-1).failure_code));
+  assert.ok(!f.events.includes("rename:old")); assert.equal(f.events.filter(x => /^start:(old|candidate)$/.test(x)).at(-1), "start:old");
+  assert.deepEqual(await fs.readdir(path.join(f.root, ".worker-tmp")), []);
+});
+
+test("wrong owner, uid, env or binding fails before stop", async t => {
+  for (const change of [f => { f.manifest.targets[0].account_id = uuid(9); }, f => { f.faults.uid = true; }, f => { f.manifest.targets[0].env_sha256 = "f".repeat(64); }, f => { f.manifest.targets[0].image_binding = "drifted"; }]) {
+    const f = await fixture(t); change(f); await assert.rejects(f.run()); assert.ok(!f.events.includes("stop:old"));
+  }
+});
+
+test("a candidate the daemon filled with zero-value defaults is the same runtime; a real HostConfig change is not", async t => {
+  const same = await fixture(t); same.faults.daemonDefaults = true;
+  assert.equal((await same.run()).phase, "external_metadata_pending");
+  // The refused candidate is still this release's own: the automatic rollback sets it aside and restarts the old bot.
+  const drift = await fixture(t); drift.faults.hostDrift = true; await assert.rejects(drift.run(), /PROTECTED_RELEASE_FAILED/);
+  assert.ok(!drift.events.includes("start:candidate")); assert.equal(drift.events.filter(x => /^start:(old|candidate)$/.test(x)).at(-1), "start:old");
+  assert.equal(drift.receipts.at(-1).phase, "rolled_back"); assert.equal(drift.row().image, "old-tag");
+});
+
+test("candidate UID and contract bytes are verified before its first start", async t => {
+  for (const change of [f => { f.faults.candidateUid = true; }, f => { f.manifest.image.contract_sha256 = "0".repeat(64); }]) {
+    const f = await fixture(t); change(f); await assert.rejects(f.run(), /PROTECTED_RELEASE_FAILED/);
+    assert.ok(!f.events.includes("start:candidate")); assert.equal(f.events.filter(x => /^start:(old|candidate)$/.test(x)).at(-1), "start:old");
+  }
+});
+
+test("failed restore leaves the old runtime stopped and a durable recovery-required receipt", async t => {
+  const f = await fixture(t); f.faults.health = true; f.faults.restore = true;
+  await assert.rejects(f.run(), /RECOVERY_REQUIRED/); assert.ok(!f.events.includes("start:old"));
+  assert.equal(f.receipts.at(-1).phase, "recovery_required");
+});
+
+test("explicit recovery restores the old bot even when the candidate is the one the full check refused", async t => {
+  // 21 Oct canary: the candidate failed the pre-start check and the automatic rollback stopped at the same check.
+  const f = await fixture(t); f.faults.hostDrift = true; f.faults.restore = true;
+  await assert.rejects(f.run(), /RECOVERY_REQUIRED/); assert.equal(f.receipts.at(-1).phase, "recovery_required");
+  assert.ok(!f.events.includes("start:candidate"));
+  f.faults.restore = false;
+  assert.equal((await f.run({ action: "recover" })).phase, "rolled_back");
+  assert.equal(f.events.filter(x => /^start:(old|candidate)$/.test(x)).at(-1), "start:old"); assert.equal(f.row().image, "old-tag");
+});
+
+test("maintained command validates dry run and enqueues one explicit protected job through existing producer", async t => {
+  const f = await fixture(t); const row = f.row(); row.status = "running";
+  const { buildReplacementDeploymentJob } = require("../../backend-api/agentProvisionLock");
+  let queued;
+  const deps = { owner:{prepare:async()=>({release_id:digest(f.manifest),phase:"prepared",metadata_finalized:false}),finalize:async()=>({release_id:digest(f.manifest),phase:"binding_pending",metadata_finalized:false})},readFile: async () => JSON.stringify(f.manifest), db: { query: async () => ({ rows: [row] }) }, acquireLock: async () => ({ release: async () => {} }),
+    loadBackend: async () => f.backend, buildReplacementDeploymentJob,
+    enqueue: async (agent, data, options) => { queued = data; return options.addDeploymentJob(data); }, addJob: async () => ({ id: "existing-queue-job" }), cancelJobs: async () => ({ active: 0 }) };
+  assert.equal((await command(["--manifest", "local.json", "--dry-run"], deps)).phase, "dry_run");
+  assert.equal((await command(["--manifest", "local.json", "--enqueue"], deps)).phase, "queued");
+  assert.equal(queued.replace_existing_runtime, false); assert.equal(queued.protected_release.release_id, digest(f.manifest));
+  assert.equal(queued.previous_container_id, "old");
+});
+
+for (const boundary of ["stop", "stage", "create", "restore", "restoreName", "oldStart", "publishBefore", "publishAfter"]) test(`actual worker process death after ${boundary} resumes from durable archives without another runtime`, async t => {
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), "protected-release-death-"));
+  t.after(() => fs.rm(root, { recursive: true, force: true }));
+  const { spawn } = require("node:child_process");
+  const child = spawn(process.execPath, ["--import", require("node:url").pathToFileURL(require.resolve("tsx")).href, path.join(__dirname, "protectedReleaseDeath.fixture.js"), root, boundary], {
+    windowsHide: true, env: { ...process.env, PROTECTED_RELEASE_FIXTURE_ONLY: "1" }, stdio: ["ignore", "pipe", "pipe"],
+  });
+  let output = ""; child.stderr.on("data", x => { output += x; });
+  const code = await new Promise((resolve, reject) => { child.on("error", reject); child.on("exit", resolve); });
+  assert.equal(code, ({ create: 23, restore: 24, stop: 25, stage: 26, restoreName: 27, oldStart: 28, publishBefore: 29, publishAfter: 30 })[boundary], output);
+  const f = await fixture(t, { root, resume: true });
+  if (["publishBefore", "publishAfter"].includes(boundary)) {
+    const releaseId = digest(f.manifest), receipt = await f.adapter.readReceipt(f.manifest.targets[0], { old: `hm-owned-release-${releaseId.slice(0, 16)}`, stage: `.protected-release-${releaseId}` });
+    assert.equal(receipt.phase, boundary === "publishBefore" ? "old_retained" : "candidate_created");
+  }
+  assert.equal((await f.run({ action: "recover" })).phase, "rolled_back");
+  assert.equal(f.events.filter(x => x === "create:candidate").length, ["stop", "stage"].includes(boundary) ? 0 : 1);
+  assert.equal(await fs.readFile(path.join(root, "installs/gen/facts.json"), "utf8"), "good");
+  assert.equal(await fs.readFile(path.join(root, "state.db"), "utf8"), "new chat must survive");
+  assert.equal((await f.run({ action: "recover" })).phase, "rolled_back");
+  assert.deepEqual(await fs.readdir(path.join(root, ".worker-tmp")), []);
+});
+}
+
+test("a failed swap keeps only a fixed refusal code, never free text", () => {
+  const { failureCode } = require("./protectedRuntimeRelease");
+  assert.equal(failureCode(new Error("PROTECTED_RELEASE_ARCHIVE_INVALID")), "PROTECTED_RELEASE_ARCHIVE_INVALID");
+  assert.equal(failureCode(Object.assign(new Error("x"), { code: "PROTECTED_RELEASE_STAGING_CAPACITY" })), "PROTECTED_RELEASE_STAGING_CAPACITY");
+  assert.equal(failureCode(new Error("connect ECONNREFUSED postgres://user:secret@db")), null);
+  assert.equal(failureCode(null), null);
+});

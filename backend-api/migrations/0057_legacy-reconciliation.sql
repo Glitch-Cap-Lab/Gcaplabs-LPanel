@@ -1,0 +1,1 @@
+DO $$ BEGIN ALTER TABLE platform_settings ADD COLUMN system_banner_severity TEXT NOT NULL DEFAULT 'warning'; EXCEPTION WHEN duplicate_column THEN NULL; END $$

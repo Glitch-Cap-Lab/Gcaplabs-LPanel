@@ -1,0 +1,1 @@
+DO $$ BEGIN ALTER TABLE agent_hub_listings ADD COLUMN runtime_family TEXT NOT NULL DEFAULT 'openclaw'; EXCEPTION WHEN duplicate_column THEN NULL; END $$

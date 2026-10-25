@@ -1,0 +1,1 @@
+DO $$ BEGIN ALTER TABLE agents ADD COLUMN external_id TEXT; EXCEPTION WHEN duplicate_column THEN NULL; END $$

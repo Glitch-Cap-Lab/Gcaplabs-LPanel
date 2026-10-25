@@ -1,0 +1,1 @@
+CREATE INDEX IF NOT EXISTS idx_agent_hub_listings_owner ON agent_hub_listings(owner_user_id, created_at DESC)

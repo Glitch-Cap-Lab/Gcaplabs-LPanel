@@ -1,0 +1,1 @@
+DO $$ BEGIN ALTER TABLE users ADD COLUMN backup_storage_mb_override INTEGER; EXCEPTION WHEN duplicate_column THEN NULL; END $$

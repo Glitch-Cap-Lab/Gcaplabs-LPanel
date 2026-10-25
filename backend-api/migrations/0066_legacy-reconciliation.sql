@@ -1,0 +1,1 @@
+DO $$ BEGIN ALTER TABLE platform_settings ADD COLUMN backup_s3_region TEXT NOT NULL DEFAULT 'us-east-1'; EXCEPTION WHEN duplicate_column THEN NULL; END $$

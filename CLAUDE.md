@@ -63,7 +63,7 @@ cd e2e && npm run smoke:runtime-path        # Runtime resolution
 cd e2e && npm run capture:operator-readme   # Regenerate README screenshots
 ```
 
-CI runs on non-draft pull requests (Linux only, one job each, about 1 billed minute; `scripts/infra-security.test.mjs` is not in the default job) from two workflows: `.github/workflows/backend.yml` (typecheck + Jest in `backend-api`, then typecheck + `npm test` (node:test) in `workers/provisioner`) and `.github/workflows/admin-dashboard.yml` (admin helper tests + typecheck). The inference relay's node:test suite in `services/headmaster-inference` and the `frontend-dashboard` / `frontend-marketing` unit tests run in `.github/workflows/full-ci.yml`, started by the `full-ci` label on a PR or by Run workflow.
+Scoped Linux PR checks use `.github/workflows/backend.yml` (backend-api and provisioner typechecks/tests), `.github/workflows/admin-dashboard.yml` (admin helper tests + typecheck), and `.github/workflows/inference-relay.yml` (the relay's deterministic node:test suite). These run for relevant ready PR changes, including each new head. Dashboard/marketing unit tests remain label/manual-only in `.github/workflows/full-ci.yml`. `scripts/infra-security.test.mjs` is not in the default jobs.
 
 Remote Hosts page copy is defined in `admin-dashboard/lib/remoteHostTranslations.ts`. Keep visible JSX text and user-facing attributes behind `useI18n().t()`; `remoteHostsI18n.test.ts` checks this boundary and requires every used key in all supported non-English locales.
 
@@ -117,6 +117,10 @@ Two consequences that routinely confuse agents:
 - **`containerManager.resolveBackendPath` loads adapters from `/app/backends` first.** That directory holds the worker's real adapters in every layout (backend-api prod `COPY`, worker-provisioner prod image, and the dev bind mount), so lifecycle/destroy calls resolve correctly even in the worker-provisioner prod image, where `containerManager` runs from `/backend-api` and the shims' `../../workers/...` path is dead (there is no `/workers` dir). Don't reintroduce reliance on the shim path for prod resolution.
 
 Treat `workers/provisioner/backends/` and `agent-runtime/` as **shared-blast-radius zones**: an edit there changes both backend-api and the worker, so verify both consumers.
+
+### Database migrations
+
+Versioned schema migrations are numbered files in `backend-api/migrations/NNNN_name.sql`, pinned by `migrations.lock.json`. The runner records version = position, so never insert, rename, reorder or edit a locked file (a mid-list insert crashed backend-api on 23 Oct). To add one: create the next-numbered file, run `npm run migrations:lock` in `backend-api`, commit both. `__tests__/migrationFiles.test.ts` fails CI on any divergence from the lock.
 
 ### Key backend modules
 

@@ -1,0 +1,1 @@
+DO $$ BEGIN ALTER TABLE platform_settings ADD COLUMN backup_s3_secret_access_key_encrypted TEXT; EXCEPTION WHEN duplicate_column THEN NULL; END $$

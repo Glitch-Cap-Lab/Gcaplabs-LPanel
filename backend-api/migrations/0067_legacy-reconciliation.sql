@@ -1,0 +1,1 @@
+DO $$ BEGIN ALTER TABLE platform_settings ADD COLUMN backup_s3_endpoint TEXT NOT NULL DEFAULT ''; EXCEPTION WHEN duplicate_column THEN NULL; END $$

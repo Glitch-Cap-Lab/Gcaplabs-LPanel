@@ -1,0 +1,1 @@
+ALTER TABLE platform_settings ALTER COLUMN agent_hub_url SET DEFAULT 'https://norafleet.ai'

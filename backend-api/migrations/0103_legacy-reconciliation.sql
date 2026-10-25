@@ -1,0 +1,1 @@
+DO $$ BEGIN ALTER TABLE backups ADD COLUMN storage_config JSONB DEFAULT '{}'; EXCEPTION WHEN duplicate_column THEN NULL; END $$

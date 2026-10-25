@@ -1,0 +1,1 @@
+CREATE INDEX IF NOT EXISTS idx_agent_hub_reports_listing_status ON agent_hub_reports(listing_id, status, created_at DESC)

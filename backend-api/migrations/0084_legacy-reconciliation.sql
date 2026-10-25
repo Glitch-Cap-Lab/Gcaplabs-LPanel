@@ -1,0 +1,1 @@
+CREATE INDEX IF NOT EXISTS idx_usage_metrics_agent ON usage_metrics(agent_id, recorded_at)

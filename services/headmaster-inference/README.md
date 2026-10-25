@@ -1,8 +1,9 @@
 # Headmaster managed inference relay (S1)
 
 This is a provider relay, not an agent runtime. It accepts only the private
-Headmaster assertion contract and the OpenAI-compatible `GET /v1/models` and
-`POST /v1/chat/completions` operations. It never receives a prompt from Nora's
+Headmaster assertion contract, the OpenAI-compatible `GET /v1/models` and
+`POST /v1/chat/completions` operations, and the own-key realtime voice token
+route `POST /v1/realtime/session` (see "Realtime voice sessions" below). It never receives a prompt from Nora's
 cloud Hermes runtime and never runs tools. The container has no Docker socket,
 Docker CLI, runtime API, or agent execution dependencies. Build it with the Nora
 repository root as context:
@@ -17,6 +18,24 @@ existing `llm_providers` rows/columns required by the resolver and its Redis
 ACL only on the `headmaster-inference:*` key prefix. It requires the existing
 Nora `ENCRYPTION_KEY` to decrypt provider rows; it creates no provider table,
 vault, or credential catalog.
+
+## Tests and CI
+
+Use Node 24 from the repository's `.nvmrc`, then run from this directory:
+
+```sh
+npm ci --ignore-scripts --no-audit --no-fund
+npm test
+```
+
+`.github/workflows/inference-relay.yml` runs this deterministic suite for each
+relevant ready PR head, including pushes after a label was already applied.
+Changes to the relay, its copied backend/shared modules, Node version, or workflow
+start the check. Draft PRs wait until ready; manual dispatch remains available.
+CI leaves provider credentials and Redis unset and disables the live probe flag.
+Real provider and Redis probes remain separately opt-in. This package has no
+standalone typecheck script or TypeScript project; backend/provisioner typechecks
+remain in the Backend workflow.
 
 ## Trusted mapping and secrets
 
@@ -143,7 +162,9 @@ the bearer token and checking current account entitlement.
 ## Personal provider keys (byo)
 
 A user can store their own key for one of the relay's fixed-endpoint providers
-(openai, groq, mistral, deepseek, xai, moonshot, zai, nvidia, openrouter).
+(openai, groq, mistral, deepseek, xai, moonshot, zai, nvidia, openrouter, plus
+anthropic and gemini, which are personal-key only and have no operator
+coverage). The list is `PROVIDER_ENDPOINTS` in `policy.mjs`.
 Admission stores it AES-256-GCM encrypted in
 `public.headmaster_user_provider_keys` and forwards use through this relay with
 the same signed assertion plus an extra claim `byo_provider: <provider>`.
@@ -178,6 +199,24 @@ the same signed assertion plus an extra claim `byo_provider: <provider>`.
   response bodies. Logs carry request id, provider, model id and error codes
   only.
 
+## Realtime voice sessions (own keys)
+
+`POST /v1/realtime/session` (`realtime.mjs`) mints a short-lived voice session
+token from the user's own stored key. The relay does not proxy the realtime
+WebSocket; it returns only the provider's ephemeral token, and the raw key never
+leaves the relay.
+
+- Own keys only: the assertion must carry `byo_provider`. Without it the answer
+  is `400 realtime_requires_own_key`. Supported providers are `openai`, `xai`
+  and `gemini`; any other is `400 realtime_provider_unsupported`.
+- The body may contain only `model` and `ttl_seconds`; any other field is
+  `400 realtime_field_forbidden`. The lifetime is clamped to 10 to 600 seconds
+  (default 600), and the response reports `ttl_seconds` and `ttl_clamped`.
+- Each mint takes one slot of the own-key hourly request budget, like own-key
+  chat. Personal keys do not count against the Headmaster monthly cap.
+- A provider token whose expiry is later than requested is refused
+  (`502 provider_token_ttl_invalid`). Logs carry owner id and provider only.
+
 ## Model names
 
 Clients may name a Headmaster tier (`headmaster-lite`, `headmaster-pro`; Max was
@@ -210,6 +249,88 @@ the reservation and adds the actual cost. Concurrent requests therefore cannot
 together pass the cap. Past it the relay answers 429 `monthly_budget_exceeded`
 ("You have used this month's Headmaster allowance. It resets on the 1st of next
 month (UTC)."). Personal-key traffic is not counted.
+
+## Wallet billing
+
+The wallet is always on: the relay charges every managed request to the paying
+organization's wallet (Headmaster Supabase, site migration
+`20261023090000_headmaster_wallets.sql`). `HEADMASTER_INFERENCE_WALLET`, if set,
+must be `on`; `off` and `shadow` are gone. An empty wallet answers 402
+`insufficient_credit`, a switched-off organization 403 `organization_suspended`,
+an unreachable wallet 503 `quota_unavailable`. A personal wallet is topped up to
+`HEADMASTER_INFERENCE_USD_PER_MONTH` once per UTC month, so the free allowance
+stays $2. Per-account concurrency, hourly request and daily token limits still
+apply from Redis.
+
+When the provider answered 2xx but no usage reached the relay (a stream that ended
+without a usage frame, or a client that disconnected mid-stream), the charge is the
+prompt estimate (request bytes / 4 at the prompt price) plus the output actually
+relayed to the client (generated-text bytes / 4 at the completion price), capped at
+the hold. So the prompt is never free, and a reply stopped early is not billed the
+whole output reservation. The wallet and the Redis monthly counter record the same
+cost. A response that reports usage is charged exactly by that usage; a provider
+error is not charged the estimate.
+
+Both markups are required and the relay refuses to start without them (no at-cost
+default; values below `10000` or above `100000` are refused too):
+
+- `HEADMASTER_INFERENCE_WALLET_MARKUP_BPS=12500` multiplies the provider cost of
+  the Headmaster tiers (Lite and Pro) before it is held and charged: cost plus 25%.
+- `HEADMASTER_INFERENCE_WALLET_OTHER_MARKUP_BPS=11000` does the same for every other
+  model and the speech-to-text route: cost plus 10%.
+
+The wallet uses the same `HEADMASTER_INFERENCE_SUPABASE_URL` and service-role key
+as the assignments; startup fails without them. Personal-key traffic is never
+charged.
+
+## Speech (managed STT and TTS)
+
+Cloud runtimes use their stock `stt.openai` and `tts.openai` providers pointed at the account
+inference host. Admission forwards `POST /v1/audio/transcriptions` and `POST /v1/audio/speech` here
+under the same signed assertion as chat; personal-key (byo) assertions are refused on both. Admission
+also forwards `GET /v1/audio/voices` (the speech catalog below).
+
+- Transcription (`transcription.mjs`): `HEADMASTER_STT_API_KEY` turns it on; `HEADMASTER_STT_BASE_URL`
+  (default Groq), `HEADMASTER_STT_MODEL`, `HEADMASTER_STT_USD_PER_HOUR`. Held from the upload size,
+  settled on the measured audio seconds.
+  Munsit: with `HEADMASTER_MUNSIT_API_KEY` set, a request whose `model` is `munsit` (the runtime's
+  own `stt.openai.model`, so the person picks the engine the upstream way) goes to Munsit
+  (`HEADMASTER_MUNSIT_BASE_URL`, default `https://api.munsit.com/api/v1`, `x-api-key` auth,
+  `HEADMASTER_MUNSIT_MODEL`, `HEADMASTER_MUNSIT_USD_PER_HOUR`, default 0). Any other model goes to
+  the default engine. `HEADMASTER_MUNSIT_LANGUAGES` (comma list, empty by default) can also send
+  chosen languages there; a language never limits the engine a person picks.
+- Speech (`speech.mjs`): `HEADMASTER_TTS_BASE_URL` turns it on, for example the private Kokoro
+  container at `http://headmaster-kokoro:8880/v1`. Plain http is accepted only for a compose service
+  name or a private address. `HEADMASTER_TTS_MODEL` (default `kokoro`), `HEADMASTER_TTS_VOICE`
+  (default `af_heart`, used when the request names no valid voice), `HEADMASTER_TTS_API_KEY` for a
+  hosted server, `HEADMASTER_TTS_USD_PER_MILLION_CHARS` (default 0: no wallet hold). Only the text,
+  voice, format and speed reach the server; the model is always the operator's. Any voice the
+  server knows passes through, so every Kokoro voice (all its languages) is selectable.
+  Munsit (Arabic): with `HEADMASTER_MUNSIT_API_KEY` set (the dictation key; `HEADMASTER_MUNSIT_BASE_URL`
+  is shared too), a request whose `model` is `munsit` (the runtime's own `tts.openai.model`) goes to
+  Munsit's `/text-to-speech/{model}` with the voice as its `voice_id`. No model or voice is built in:
+  `HEADMASTER_MUNSIT_TTS_MODEL` and `HEADMASTER_MUNSIT_TTS_VOICE` are optional, and when unset the request
+  gets the first model and the first Arabic voice of the catalog below. A requested voice the catalog does
+  not know (for example a Kokoro voice left over from another engine) also gets that default.
+  `HEADMASTER_MUNSIT_TTS_STABILITY` (0 to 1, default 0.5) and `HEADMASTER_MUNSIT_TTS_USD_PER_MILLION_CHARS`
+  (default 0: no wallet hold). Munsit answers WAV only, so the relay converts it with ffmpeg
+  (`transcode.mjs`; the image installs it) to the format the runtime asked for: mp3, Ogg Opus (`opus`, for
+  Telegram and WhatsApp voice bubbles), aac, flac or raw pcm; `wav` passes through. Speed is held to
+  Munsit's 0.7 to 1.2 range. The route exists when either engine is configured; without the speech server,
+  any other model is refused.
+- Speech catalog (`speech-catalog.mjs`): `GET /v1/audio/voices`, same signed assertion, no body. Returns
+  `{ data: { engines: [{ id, label, voices, models, default_voice }], default_engine } }`: each engine's
+  voices read from the engine itself (Munsit `GET /voices` and `/models`; a speech server's
+  `GET {base}/audio/voices`), every voice with `id, name, gender, dialects, languages, sample_url`, Arabic
+  first. Cached for ten minutes; a failed refresh serves the last good answer. Clients render their voice
+  and engine pickers from it, so no client lists a voice or an engine. The engine `label` is what people
+  see: `HEADMASTER_MUNSIT_TTS_LABEL` (default `Arabic`, never the vendor's name) and `HEADMASTER_TTS_LABEL`
+  (default: the speech server's model name).
+
+Munsit (dictation and speech) is charged at the Headmaster markup (`walletMarkupBps`, the Lite and Pro
+tier markup), applied once; every other engine at the other-model markup when priced. The owner's rates
+(Munsit Basic plan, $0.00004 a credit): `HEADMASTER_MUNSIT_USD_PER_HOUR=0.24` (100 credits a minute) and
+`HEADMASTER_MUNSIT_TTS_USD_PER_MILLION_CHARS=80` (2 credits a character), raw cost before the markup.
 
 ## Limits and behavior
 
@@ -248,12 +369,18 @@ month (UTC)."). Personal-key traffic is not counted.
 
 Initial protocol coverage is limited to the current Nora OpenAI-compatible
 catalog entries for OpenAI, Groq, Mistral, DeepSeek, xAI, Moonshot, Z.AI, and
-NVIDIA. Anthropic, Gemini, Cohere, custom URLs, Microsoft Foundry, Ollama,
-OAuth-only providers, and the Nora demo stub are intentionally unavailable
-until individually adapted and tested. This does not claim the pinned Hermes
+NVIDIA, later extended with OpenRouter. On the operator-funded path, Anthropic,
+Gemini, Cohere, custom URLs, Microsoft Foundry, Ollama, OAuth-only providers,
+and the Nora demo stub are intentionally unavailable until individually adapted
+and tested. Anthropic and Gemini are available for personal keys only (see
+"Personal provider keys"). This does not claim the pinned Hermes
 0.21.4 desktop client is integrated; that requires the D4 loopback adapter.
 
 ## B2-A integration required before deployment
+
+Status: historical gate. The relay is in production (on 19 October 2026 it
+runs `headmaster-inference:b022f0c`). The checklist below records the
+conditions set before first deployment; it is not a statement of current gaps.
 
 Admission must use Supabase Auth to resolve the bearer token to `auth.users.id`,
 then read `headmaster_account_entitlements(owner_id, entitlement,

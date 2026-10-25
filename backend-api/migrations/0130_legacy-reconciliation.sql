@@ -1,0 +1,1 @@
+DO $$ BEGIN ALTER TABLE snapshots ADD COLUMN built_in BOOLEAN DEFAULT false; EXCEPTION WHEN duplicate_column THEN NULL; END $$

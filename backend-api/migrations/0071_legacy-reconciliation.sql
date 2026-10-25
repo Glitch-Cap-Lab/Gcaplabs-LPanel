@@ -1,0 +1,1 @@
+DO $$ BEGIN ALTER TABLE platform_settings ADD COLUMN backup_ssh_port INTEGER NOT NULL DEFAULT 22; EXCEPTION WHEN duplicate_column THEN NULL; END $$

@@ -1,0 +1,1 @@
+DO $$ BEGIN ALTER TABLE snapshots ADD COLUMN kind TEXT DEFAULT 'snapshot'; EXCEPTION WHEN duplicate_column THEN NULL; END $$

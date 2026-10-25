@@ -359,6 +359,42 @@ const tail = {
   "/agents/{id}/restart": {
     post: summarize("Agents", "Restart a running agent in place", [agentParam], ["agents:write"]),
   },
+  "/agents/{id}/protected-runtime-target": {
+    get: {
+      ...summarize("Agents", "Read this agent's protected runtime release target", [agentParam]),
+      description: "Session JWT only, for the agent's owner. Read-only: returns {target}, the manifest target (without site_binding) read from the agent row and Docker; refusals return 409 with their PROTECTED_RELEASE_* code.",
+    },
+  },
+  "/agents/{id}/protected-runtime-releases/{releaseId}": {
+    get: {
+      ...summarize(
+        "Agents",
+        "Read the status of one protected runtime release for this agent",
+        [agentParam, { name: "releaseId", in: "path", required: true, schema: { type: "string" }, description: "Release operation id." }],
+      ),
+      description: "Session JWT only. Read-only: reports the release operation's recorded state and never changes the runtime.",
+    },
+  },
+  "/agents/{id}/protected-runtime-releases/{releaseId}/progress": {
+    get: {
+      ...summarize(
+        "Agents",
+        "Read the live phase of one protected runtime release while it runs",
+        [agentParam, { name: "releaseId", in: "path", required: true, schema: { type: "string" }, description: "Release operation id." }],
+      ),
+      description: "Session JWT only, for the agent's owner. Lock-free and read-only: returns the phase the release job last journaled and its queue state. Not proof of an outcome; finalize uses the status route.",
+    },
+  },
+  "/agents/{id}/protected-runtime-releases/{releaseId}/operations": {
+    post: {
+      ...summarize(
+        "Agents",
+        "Run one protected runtime release operation (dry run, apply or recover) for this agent",
+        [agentParam, { name: "releaseId", in: "path", required: true, schema: { type: "string" }, description: "Release operation id." }],
+      ),
+      description: "Session JWT only, for the agent's owner. Body is exactly {action, manifest}; the manifest must hash to releaseId and name this agent. Same controller as the operator command; refusals return 409 with their PROTECTED_RELEASE_* code.",
+    },
+  },
   "/agents/{id}/redeploy": {
     post: {
       ...summarize(

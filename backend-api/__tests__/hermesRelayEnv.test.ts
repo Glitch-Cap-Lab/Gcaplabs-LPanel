@@ -14,6 +14,7 @@ test("new Hermes containers use distinct runtime credentials without copying the
       const backend = new HermesBackend();
       backend._ensureImage = jest.fn().mockResolvedValue(undefined);
       backend._findComposeNetwork = jest.fn().mockResolvedValue(null);
+      backend._assertNetworkIsolation = jest.fn();
       backend.updateEnv = jest.fn().mockResolvedValue(undefined);
       backend.docker = {
         getContainer: jest

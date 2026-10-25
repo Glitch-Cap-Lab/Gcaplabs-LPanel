@@ -1,0 +1,1 @@
+CREATE INDEX IF NOT EXISTS idx_snapshots_template_key ON snapshots(template_key)

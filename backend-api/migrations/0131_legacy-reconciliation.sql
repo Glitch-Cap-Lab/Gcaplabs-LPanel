@@ -1,0 +1,1 @@
+DO $$ BEGIN ALTER TABLE agent_hub_listings ADD COLUMN built_in BOOLEAN DEFAULT false; EXCEPTION WHEN duplicate_column THEN NULL; END $$
