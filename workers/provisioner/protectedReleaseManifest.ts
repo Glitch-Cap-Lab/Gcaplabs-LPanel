@@ -53,6 +53,20 @@ function envFingerprint(env) {
   return digest([...env].sort());
 }
 
+// Docker fills every key the create call leaves out from the image's own Config.Env, so a newer image
+// that ships a new default (HERMES_DASHBOARD_FILES_ROOT, 25 Oct) gives the candidate one more key than
+// the bot it replaces. That is the image's declared config, not drift: the image is already pinned by ID.
+// Loader hooks are never accepted from an image default, so such a candidate stays refused.
+const LOADER_ENV = /^(LD_|PYTHON(PATH|HOME|STARTUP)$)/;
+function expectedCandidateEnv(oldEnv, imageEnv, set) {
+  const split = item => { const p = item.indexOf("="); return [item.slice(0, p), item.slice(p + 1)]; };
+  const expected = new Map();
+  for (const item of imageEnv || []) { const [key, value] = split(item); if (!LOADER_ENV.test(key)) expected.set(key, value); }
+  for (const item of oldEnv) { const [key, value] = split(item); expected.set(key, value); }
+  for (const [key, value] of Object.entries(set)) expected.set(key, value);
+  return [...expected].map(([key, value]) => `${key}=${value}`);
+}
+
 function assertAgent(m, row, { candidateId = null, allowQueued = true, allowRefused = false } = {}) {
   const t = m.targets[0];
   if (!row || row.id !== t.agent_id || row.user_id !== t.owner_id
@@ -66,4 +80,4 @@ function assertAgent(m, row, { candidateId = null, allowQueued = true, allowRefu
   }
 }
 
-module.exports = { validateManifest, envFingerprint, assertAgent, digest, refuse };
+module.exports = { validateManifest, envFingerprint, expectedCandidateEnv, assertAgent, digest, refuse };

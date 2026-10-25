@@ -3,7 +3,7 @@ const { readArchive, packStream, inventory, archiveRoot, MAX_BYTES } = require("
 const fs = require("fs/promises");
 const os = require("os");
 const path = require("path");
-const { envFingerprint, digest, refuse } = require("./protectedReleaseManifest");
+const { envFingerprint, expectedCandidateEnv, digest, refuse } = require("./protectedReleaseManifest");
 const { demuxDockerExecStream } = require("./backends/dockerExecStream");
 const { createHash } = require("crypto");
 const ROOT = "/opt/data";
@@ -141,12 +141,12 @@ class ProtectedReleaseDocker {
     await this.verifyImageBinding(m);
     const t = m.targets[0];
     const old = await this.inspect(t.container_id);
-    const expected = new Map(old.Config.Env.map(item => { const p = item.indexOf("="); return [item.slice(0, p), item.slice(p + 1)]; }));
-    for (const [key, value] of Object.entries(m.env_delta.set)) expected.set(key, value);
+    const image = await this.inspectImage(m.image.id);
+    const expected = expectedCandidateEnv(old.Config.Env, image.Config.Env, m.env_delta.set);
     if (c.Image !== m.image.id || c.Config.Labels?.["headmaster.release.id"] !== id
         || c.Config.Labels?.["nora.agent.id"] !== t.agent_id || c.Config.Labels?.["headmaster.release.owner"] !== t.owner_id
         || !c.Mounts.some(x => x.Name === t.volume && x.Destination === ROOT && x.RW)
-        || envFingerprint(c.Config.Env) !== envFingerprint([...expected].map(([key, value]) => `${key}=${value}`))
+        || envFingerprint(c.Config.Env) !== envFingerprint(expected)
         || digest(hostIdentity(c.HostConfig)) !== digest(hostIdentity(old.HostConfig))
         || digest(c.Mounts) !== digest(old.Mounts)
         || digest(networkIdentity(c)) !== digest(networkIdentity(old))
