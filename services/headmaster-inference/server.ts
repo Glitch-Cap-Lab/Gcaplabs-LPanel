@@ -19,7 +19,7 @@ const { createRedisReplayStore } = require("./assertion.mjs");
 const { createRedisQuotaStore, createRedisByoQuotaStore } = require("./quota.mjs");
 const { createProviderKeyResolver } = require("./byo.mjs");
 const { createInferenceService } = require("./lib.mjs");
-const { createWalletStore, walletConfigFromEnv } = require("./wallet.mjs");
+const { createWalletStore, createRedisSettleQueue, walletConfigFromEnv } = require("./wallet.mjs");
 const { transcriptionConfigFromEnv } = require("./transcription.mjs");
 const { speechConfigFromEnv } = require("./speech.mjs");
 const { tierModelsFromEnv, priceTableFromEnv } = require("./policy.mjs");
@@ -90,9 +90,21 @@ async function main() {
   const walletStore = createWalletStore({
     supabaseUrl: process.env.HEADMASTER_INFERENCE_SUPABASE_URL,
     serviceRoleKey: process.env.HEADMASTER_INFERENCE_SUPABASE_SERVICE_ROLE_KEY,
+    retryQueue: createRedisSettleQueue(redis),
   });
   if (!walletStore.configured)
     throw new Error("wallet_not_configured");
+  // BL13: a settle that failed (wallet briefly unreachable) is retried every minute.
+  const settleRetryTimer = setInterval(() => {
+    walletStore
+      .retryFailedSettles()
+      .then((out: { retried: number; failed: number }) => {
+        if (out.retried || out.failed)
+          console.warn("headmaster-inference wallet settle retry", out);
+      })
+      .catch(() => undefined);
+  }, 60_000);
+  settleRetryTimer.unref();
   const quotaStore = createRedisQuotaStore(redis, {
     maxConcurrentPerAccount: positiveInt(process.env.HEADMASTER_INFERENCE_MAX_CONCURRENT, 3, 100),
     maxRequestsPerHour: positiveInt(

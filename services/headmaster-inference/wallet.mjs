@@ -3,7 +3,7 @@
 // 20261023090000_headmaster_wallets.sql); the relay reserves an estimate before
 // the provider call and settles the real cost after it, over PostgREST with the
 // same server-only credential the assignments use. A failed call is never
-// retried or cached: reserve failures deny, settle failures are logged.
+// cached: reserve failures deny; a settle failure is logged and, with a retry queue, retried.
 import { validateSupabaseOrigin } from "./assignments.mjs";
 
 export const WALLET_TIMEOUT_MS = 8_000;
@@ -19,6 +19,7 @@ export function createWalletStore({
   serviceRoleKey,
   fetchImpl = fetch,
   timeoutMs = WALLET_TIMEOUT_MS,
+  retryQueue = null, // { push(string), pop() } -> string | null; see createRedisSettleQueue
 } = {}) {
   let base = null;
   try {
@@ -60,6 +61,23 @@ export function createWalletStore({
     }
   }
 
+  async function settleOnce({ ownerId, requestId, actualMicroUsd, detail = {} }) {
+    await call("headmaster_wallet_settle_owner", {
+      p_owner_id: ownerId,
+      p_request_id: requestId,
+      p_actual_micro_usd: actualMicroUsd,
+      p_detail: detail,
+    });
+  }
+
+  async function enqueueSettle(args) {
+    try {
+      await retryQueue?.push(JSON.stringify(args));
+    } catch {
+      // The caller's log line is the record when the queue is unreachable too.
+    }
+  }
+
   return {
     configured,
     // -> { allowed, reason, balanceMicroUsd, freeMicroUsd }
@@ -78,14 +96,62 @@ export function createWalletStore({
       };
     },
     // Releases the hold and charges actualMicroUsd (0 releases only).
-    async settle({ ownerId, requestId, actualMicroUsd, detail = {} }) {
-      await call("headmaster_wallet_settle_owner", {
-        p_owner_id: ownerId,
-        p_request_id: requestId,
-        p_actual_micro_usd: actualMicroUsd,
-        p_detail: detail,
-      });
+    // A failed settle is queued for a later retry (when a retry queue is wired) and still
+    // throws, so the caller logs it as before. Settling a request twice charges once.
+    async settle(args) {
+      try {
+        await settleOnce(args);
+      } catch (error) {
+        await enqueueSettle(args);
+        throw error;
+      }
     },
+    // Retries up to `limit` queued settles; one that fails again goes back on the queue.
+    // -> { retried, failed }
+    async retryFailedSettles(limit = 50) {
+      let retried = 0;
+      let failed = 0;
+      for (let i = 0; i < limit; i += 1) {
+        let raw;
+        try {
+          raw = await retryQueue?.pop();
+        } catch {
+          break;
+        }
+        if (!raw) break;
+        let args;
+        try {
+          args = JSON.parse(raw);
+        } catch {
+          continue;
+        }
+        try {
+          await settleOnce(args);
+          retried += 1;
+        } catch {
+          failed += 1;
+          await enqueueSettle(args);
+          // Wallet unreachable: stop here rather than cycle the whole queue.
+          break;
+        }
+      }
+      return { retried, failed };
+    },
+  };
+}
+
+// Failed settles wait in a Redis list (bounded) until retryFailedSettles runs.
+const SETTLE_RETRY_KEY = "headmaster-inference:wallet:settle-retry";
+const SETTLE_RETRY_MAX = 5_000;
+
+export function createRedisSettleQueue(redis, { key = SETTLE_RETRY_KEY, max = SETTLE_RETRY_MAX } = {}) {
+  if (!redis || typeof redis.lpush !== "function") throw new Error("settle_queue_invalid");
+  return {
+    async push(value) {
+      await redis.lpush(key, value);
+      await redis.ltrim(key, 0, max - 1);
+    },
+    pop: () => redis.rpop(key),
   };
 }
 
