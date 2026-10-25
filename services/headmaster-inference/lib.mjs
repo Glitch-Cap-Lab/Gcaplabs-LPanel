@@ -964,7 +964,7 @@ export function createInferenceService({
     if (prepared.error)
       return safeError(res, 400, "speech_invalid", "The text could not be spoken.", requestId);
     const ownerId = claims.sub;
-    const cost = withMarkup(speechCostMicroUsd(prepared.chars, speech), walletOtherMarkupBps);
+    const cost = withMarkup(speechCostMicroUsd(prepared.chars, prepared.engine), walletOtherMarkupBps);
     let walletHeld = false;
     if (cost > 0 && walletStore && walletMode !== "off") {
       const hold = await walletStore
@@ -993,7 +993,7 @@ export function createInferenceService({
     }
     const result = await callSpeechServer({
       body: prepared.body,
-      config: speech,
+      config: prepared.engine,
       fetchImpl,
       signal: AbortSignal.timeout(requestTimeoutMs),
     });
@@ -1003,7 +1003,7 @@ export function createInferenceService({
           ownerId,
           requestId,
           actualMicroUsd: result.error ? 0 : cost,
-          detail: { kind: "speech", model: speech.model, characters: prepared.chars },
+          detail: { kind: "speech", model: prepared.engine.model, characters: prepared.chars },
         })
         .catch((error) =>
           logger.error?.("headmaster-inference wallet settle failed", {
