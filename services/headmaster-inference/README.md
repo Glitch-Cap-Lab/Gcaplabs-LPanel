@@ -296,6 +296,14 @@ under the same signed assertion as chat; personal-key (byo) assertions are refus
   hosted server, `HEADMASTER_TTS_USD_PER_MILLION_CHARS` (default 0: no wallet hold). Only the text,
   voice, format and speed reach the server; the model is always the operator's. Any voice the
   server knows passes through, so every Kokoro voice (all its languages) is selectable.
+  Munsit (Arabic): with `HEADMASTER_MUNSIT_API_KEY` set (the dictation key; `HEADMASTER_MUNSIT_BASE_URL`
+  is shared too), a request whose `model` is `munsit` (the runtime's own `tts.openai.model`) goes to
+  Munsit's `/text-to-speech/{model}` with the voice as its `voice_id`. Settings: `HEADMASTER_MUNSIT_TTS_MODEL`
+  (default `faseeh-v1-preview`), `HEADMASTER_MUNSIT_TTS_VOICE` (default `ar-najdi-male-2`, used when the
+  request names no valid voice), `HEADMASTER_MUNSIT_TTS_STABILITY` (0 to 1, default 0.5) and
+  `HEADMASTER_MUNSIT_TTS_USD_PER_MILLION_CHARS` (default 0: no wallet hold). Munsit answers WAV whatever
+  format the runtime asked for, and speed is held to its 0.7 to 1.2 range. The route exists when either engine is
+  configured; without the speech server, any other model is refused.
 
 Both are charged at the other-model markup when priced.
 
