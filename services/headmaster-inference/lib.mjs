@@ -23,6 +23,7 @@ import {
   mintRealtimeToken,
   prepareRealtimeRequest,
 } from "./realtime.mjs";
+import { LIVE_PROVIDER, LIVE_SESSION_PATH, createLiveSession, prepareLiveSessionRequest } from "./live.mjs";
 
 import {
   TRANSCRIPTION_PATH,
@@ -370,6 +371,7 @@ export function createInferenceService({
         (req.method === "GET" && url.pathname === MODEL_PATH) ||
         (req.method === "POST" && url.pathname === COMPLETION_PATH) ||
         (req.method === "POST" && url.pathname === REALTIME_SESSION_PATH) ||
+        (req.method === "POST" && url.pathname === LIVE_SESSION_PATH) ||
         (req.method === "POST" && url.pathname === TRANSCRIPTION_PATH && transcription) ||
         (req.method === "POST" && url.pathname === SPEECH_PATH && speech) ||
         (req.method === "GET" && url.pathname === SPEECH_CATALOG_PATH && speech)
@@ -434,6 +436,7 @@ export function createInferenceService({
     // A verified byo_provider claim selects the personal-key path. It never
     // reads assignments, operator provider rows, or operator quota counters.
     if (url.pathname === REALTIME_SESSION_PATH) return handleRealtime(res, body, claims);
+    if (url.pathname === LIVE_SESSION_PATH) return handleLive(res, body, claims);
     if (url.pathname === TRANSCRIPTION_PATH) return handleTranscription(req, res, body, claims);
     if (url.pathname === SPEECH_PATH) return handleSpeech(req, res, body, claims);
     if (url.pathname === SPEECH_CATALOG_PATH) return sendJson(res, 200, { data: await speechCatalog.load() });
@@ -1131,6 +1134,69 @@ export function createInferenceService({
     res.end(result.audio);
   }
 
+  // The own key and an own-key hourly request slot for one session request (realtime token or
+  // live session). Sends the refusal itself and returns null when either is unavailable.
+  async function ownKeySlot(res, claims, provider) {
+    const requestId = claims.request_id;
+    const refuse = (status, code, message) => {
+      safeError(res, status, code, message, requestId);
+      return null;
+    };
+    if (typeof resolveOwnKey !== "function")
+      return refuse(503, "own_key_unavailable", "Your API key is temporarily unavailable.");
+    const ownerId = claims.sub.toLowerCase();
+    let apiKey;
+    try {
+      apiKey = await resolveOwnKey(ownerId, provider);
+    } catch (error) {
+      logger.warn?.("headmaster-inference own key unavailable", {
+        requestId,
+        provider,
+        code: error?.code || "own_key_unavailable",
+      });
+      return refuse(503, "own_key_unavailable", "Your API key is temporarily unavailable.");
+    }
+    if (typeof apiKey !== "string" || !apiKey)
+      return refuse(404, "provider_key_missing", "No API key is stored for this provider.");
+    if (!byoQuotaStore)
+      return refuse(503, "quota_unavailable", "Managed inference is temporarily unavailable.");
+    // Same own-key hourly request budget as own-key chat (a request limit, not the spending cap).
+    const reservation = await byoQuotaStore
+      .acquire({ ownerId: claims.sub, requestId, reserveOutputTokens: 0 })
+      .catch((error) => {
+        logger.error?.("headmaster-inference own key quota lookup failed", {
+          requestId,
+          code: error?.code || "quota_store_unavailable",
+        });
+        return null;
+      });
+    if (!reservation)
+      return refuse(503, "quota_unavailable", "Managed inference is temporarily unavailable.");
+    if (!reservation.allowed)
+      return refuse(
+        429,
+        reservation.reason === "concurrency" ? "too_many_concurrent_requests" : "request_budget_exceeded",
+        "This account has reached its request limit.",
+      );
+    const release = () =>
+      byoQuotaStore
+        .finish({
+          ownerId: claims.sub,
+          requestId,
+          quotaDay: reservation.day,
+          promptTokens: 0,
+          completionTokens: 0,
+          totalTokens: 0,
+        })
+        .catch((error) =>
+          logger.error?.("headmaster-inference own key accounting failed", {
+            requestId,
+            code: error?.code || "quota_store_unavailable",
+          }),
+        );
+    return { apiKey, ownerId, release };
+  }
+
   async function handleRealtime(res, body, claims) {
     const requestId = claims.request_id;
     const provider = claims.byo_provider;
@@ -1153,44 +1219,9 @@ export function createInferenceService({
     const request = prepareRealtimeRequest(body);
     if (request.error)
       return safeError(res, 400, request.error, "The realtime session request is invalid.", requestId);
-    if (typeof resolveOwnKey !== "function")
-      return safeError(res, 503, "own_key_unavailable", "Your API key is temporarily unavailable.", requestId);
-    const ownerId = claims.sub.toLowerCase();
-    let apiKey;
-    try {
-      apiKey = await resolveOwnKey(ownerId, provider);
-    } catch (error) {
-      logger.warn?.("headmaster-inference own key unavailable", {
-        requestId,
-        provider,
-        code: error?.code || "own_key_unavailable",
-      });
-      return safeError(res, 503, "own_key_unavailable", "Your API key is temporarily unavailable.", requestId);
-    }
-    if (typeof apiKey !== "string" || !apiKey)
-      return safeError(res, 404, "provider_key_missing", "No API key is stored for this provider.", requestId);
-    if (!byoQuotaStore)
-      return safeError(res, 503, "quota_unavailable", "Managed inference is temporarily unavailable.", requestId);
-    // Same own-key hourly request budget as own-key chat (a request limit, not the spending cap).
-    const reservation = await byoQuotaStore
-      .acquire({ ownerId: claims.sub, requestId, reserveOutputTokens: 0 })
-      .catch((error) => {
-        logger.error?.("headmaster-inference own key quota lookup failed", {
-          requestId,
-          code: error?.code || "quota_store_unavailable",
-        });
-        return null;
-      });
-    if (!reservation)
-      return safeError(res, 503, "quota_unavailable", "Managed inference is temporarily unavailable.", requestId);
-    if (!reservation.allowed)
-      return safeError(
-        res,
-        429,
-        reservation.reason === "concurrency" ? "too_many_concurrent_requests" : "request_budget_exceeded",
-        "This account has reached its request limit.",
-        requestId,
-      );
+    const slot = await ownKeySlot(res, claims, provider);
+    if (!slot) return;
+    const { apiKey, ownerId } = slot;
     let session;
     try {
       session = await mintRealtimeToken({
@@ -1215,21 +1246,7 @@ export function createInferenceService({
         requestId,
       );
     } finally {
-      await byoQuotaStore
-        .finish({
-          ownerId: claims.sub,
-          requestId,
-          quotaDay: reservation.day,
-          promptTokens: 0,
-          completionTokens: 0,
-          totalTokens: 0,
-        })
-        .catch((error) =>
-          logger.error?.("headmaster-inference own key accounting failed", {
-            requestId,
-            code: error?.code || "quota_store_unavailable",
-          }),
-        );
+      await slot.release();
     }
     logger.info?.("headmaster-inference realtime session minted", { ownerId, provider });
     return sendJson(
@@ -1239,6 +1256,47 @@ export function createInferenceService({
       requestId,
     );
   }
+
+  // GPT-Live (upstream's live voice mode): exchange the app's SDP offer for the vendor's answer
+  // with the user's own OpenAI key. Only the session id and the answer go back.
+  async function handleLive(res, body, claims) {
+    const requestId = claims.request_id;
+    if (claims.byo_provider !== LIVE_PROVIDER)
+      return safeError(
+        res,
+        400,
+        claims.byo_provider === undefined ? "live_requires_own_key" : "live_provider_unsupported",
+        "Live voice needs your own OpenAI key.",
+        requestId,
+      );
+    const request = prepareLiveSessionRequest(body);
+    if (request.error)
+      return safeError(res, 400, request.error, "The live voice session request is invalid.", requestId);
+    const slot = await ownKeySlot(res, claims, LIVE_PROVIDER);
+    if (!slot) return;
+    let session;
+    try {
+      session = await createLiveSession({ apiKey: slot.apiKey, payload: request.payload, fetchImpl });
+    } catch (error) {
+      logger.warn?.("headmaster-inference live session failed", {
+        requestId,
+        provider: LIVE_PROVIDER,
+        code: error?.code || "provider_error",
+      });
+      return safeError(
+        res,
+        error?.status === 429 ? 429 : error?.status === 400 ? 400 : 502,
+        error?.code || "provider_error",
+        "The provider could not start a live voice session.",
+        requestId,
+      );
+    } finally {
+      await slot.release();
+    }
+    logger.info?.("headmaster-inference live session created", { ownerId: slot.ownerId, provider: LIVE_PROVIDER });
+    return sendJson(res, 200, { ...session, request_id: requestId }, requestId);
+  }
+
 
   async function handleByo(req, res, body, claims) {
     const requestId = claims.request_id;

@@ -3,7 +3,8 @@
 This is a provider relay, not an agent runtime. It accepts only the private
 Headmaster assertion contract, the OpenAI-compatible `GET /v1/models` and
 `POST /v1/chat/completions` operations, and the own-key realtime voice token
-route `POST /v1/realtime/session` (see "Realtime voice sessions" below). It never receives a prompt from Nora's
+route `POST /v1/realtime/session` and the own-key live voice route `POST /v1/live/sessions`
+(see "Realtime voice sessions" below). It never receives a prompt from Nora's
 cloud Hermes runtime and never runs tools. The container has no Docker socket,
 Docker CLI, runtime API, or agent execution dependencies. Build it with the Nora
 repository root as context:
@@ -216,6 +217,25 @@ leaves the relay.
   chat. Personal keys do not count against the Headmaster monthly cap.
 - A provider token whose expiry is later than requested is refused
   (`502 provider_token_ttl_invalid`). Logs carry owner id and provider only.
+
+`POST /v1/live/sessions` (`live.mjs`) serves upstream's live voice mode
+(GPT-Live, Core `tools/voice_live.py`). In Cloud the runtime's
+`voice.gpt_live.base_url` is the account host's own-key OpenAI route, so the
+runtime's SDP offer arrives here; the relay makes the one
+`https://api.openai.com/v1/live/sessions` call with the user's own OpenAI key
+and returns only `session.id` and the SDP answer. The audio then flows between
+the app and OpenAI directly.
+
+- Own OpenAI key only: no `byo_provider` is `400 live_requires_own_key`, another
+  provider is `400 live_provider_unsupported`, no stored key is
+  `404 provider_key_missing`.
+- The body must be exactly upstream's shape: `session` with `model`,
+  `instructions`, `audio.output.voice`, `delegation: {type: "client"}` and an
+  optional `input` history (at most 64 items), and `transport` with
+  `type: "webrtc"` and the `sdp` offer (at most 64 KiB). Anything else, such as
+  tools or another delegation type, is a 400 and reaches no provider.
+- Each session takes one slot of the own-key hourly request budget. Personal
+  keys do not count against the Headmaster monthly cap.
 
 ## Model names
 
