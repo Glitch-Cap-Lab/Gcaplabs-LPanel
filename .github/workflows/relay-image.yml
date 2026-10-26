@@ -1,0 +1,85 @@
+name: Relay image
+
+# Builds the inference relay image (services/headmaster-inference) for the Headmaster admin self-update
+# (plan row AR3.10), so the relay is swapped from the admin Health page instead of a hand build on the
+# server. Pushed to GHCR as headmaster-inference:cp-relay-<commit12> with the two labels the release
+# controller checks (com.gcaplabs.control-plane.service=relay, org.opencontainers.image.revision). The
+# controller lists the repository every five minutes and publishes each image by digest. Nothing here
+# deploys or restarts anything. The bridge and admission images come from the webapp repo's
+# control-plane-image.yml.
+#
+# By hand only (Run workflow). With "push" off it builds and checks the image and stops. Only main may
+# push: the controller offers every cp- tag it finds, so a push from another branch is refused.
+
+on:
+  workflow_dispatch:
+    inputs:
+      push:
+        description: Push the image to GHCR (off builds and checks only)
+        type: boolean
+        default: true
+
+permissions:
+  contents: read
+  packages: write
+
+concurrency:
+  group: relay-image
+  cancel-in-progress: false
+
+jobs:
+  build:
+    name: build the relay image
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    env:
+      IMAGE: ghcr.io/glitch-cap-lab/headmaster-inference
+    steps:
+      - name: Refuse a push from a branch other than main
+        if: ${{ inputs.push && github.ref != 'refs/heads/main' }}
+        run: |
+          echo "::error::Push is only allowed from main (this run is on $GITHUB_REF). Run it from main, or turn push off."
+          exit 1
+
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+
+      - name: Name the build
+        run: |
+          sha="$(git rev-parse HEAD)"
+          echo "SHA=$sha" >> "$GITHUB_ENV"
+          echo "TAG=cp-relay-${sha:0:12}" >> "$GITHUB_ENV"
+
+      - name: Build
+        run: >
+          docker build -f services/headmaster-inference/Dockerfile
+          --label com.gcaplabs.control-plane.service=relay --label "org.opencontainers.image.revision=$SHA"
+          -t "$IMAGE:$TAG" .
+
+      # The labels the controller checks, and the import check the server recipe ran (build_images.sh relay).
+      - name: Check the image
+        run: |
+          test "$(docker image inspect --format '{{index .Config.Labels "com.gcaplabs.control-plane.service"}}' "$IMAGE:$TAG")" = relay
+          test "$(docker image inspect --format '{{index .Config.Labels "org.opencontainers.image.revision"}}' "$IMAGE:$TAG")" = "$SHA"
+          docker run --rm -e ENCRYPTION_KEY="$(head -c 32 /dev/urandom | od -An -tx1 | tr -d ' \n')" --entrypoint sh "$IMAGE:$TAG" -c \
+            'cd /app/services/headmaster-inference && for f in *.mjs; do case "$f" in *.test.mjs) ;; *) node --check "$f";; esac; done && echo relay-image-ok'
+
+      - name: Log in to GHCR
+        if: ${{ inputs.push && github.ref == 'refs/heads/main' }}
+        env:
+          GHCR_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GHCR_USER: ${{ github.actor }}
+        run: printf '%s' "$GHCR_TOKEN" | docker login ghcr.io -u "$GHCR_USER" --password-stdin
+
+      - name: Push and print the digest
+        if: ${{ inputs.push && github.ref == 'refs/heads/main' }}
+        run: |
+          docker push "$IMAGE:$TAG"
+          {
+            echo "### Relay image pushed"
+            echo
+            echo "Tag: \`$TAG\`, digest \`$(docker image inspect --format '{{index .RepoDigests 0}}' "$IMAGE:$TAG")\`"
+            echo
+            echo "The release controller lists it within five minutes; the admin Health page then offers it."
+          } >> "$GITHUB_STEP_SUMMARY"
