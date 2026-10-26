@@ -8,10 +8,14 @@
 //     value below the host's RAM that leaves room for the control plane, chat,
 //     relay and page cache; measuring it is a server step.
 //
+// Only containers that can hold memory count (running, starting, paused). A stopped or exited
+// container, such as the previous container a release keeps for rollback, reserves nothing.
+//
 // A recreate of an existing runtime (same agent id) replaces its own reservation
 // instead of adding to it, so image updates are never blocked by their own old container.
 
 const AGENT_LABEL = "nora.agent.id";
+const HOLDS_MEMORY = new Set(["running", "restarting", "created", "paused"]);
 
 function hostMemoryBudgetMb(env = process.env) {
   const value = Number(String(env.NORA_HOST_MEMORY_BUDGET_MB || "").trim());
@@ -27,6 +31,7 @@ async function reservedRuntimeMemoryMb(docker, agentId) {
   let reservedBytes = 0;
   for (const summary of containers) {
     if (String(summary.Labels?.[AGENT_LABEL]) === String(agentId)) continue;
+    if (!HOLDS_MEMORY.has(summary.State)) continue;
     const info = await docker.getContainer(summary.Id).inspect();
     reservedBytes += Number(info?.HostConfig?.Memory) || 0;
   }
