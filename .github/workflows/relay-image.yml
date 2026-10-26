@@ -8,7 +8,8 @@ name: Relay image
 # deploys or restarts anything. The bridge and admission images come from the webapp repo's
 # control-plane-image.yml.
 #
-# By hand only (Run workflow). With "push" off it builds and checks the image and stops.
+# By hand only (Run workflow). With "push" off it builds and checks the image and stops. Only main may
+# push: the controller offers every cp- tag it finds, so a push from another branch is refused.
 
 on:
   workflow_dispatch:
@@ -34,6 +35,12 @@ jobs:
     env:
       IMAGE: ghcr.io/glitch-cap-lab/headmaster-inference
     steps:
+      - name: Refuse a push from a branch other than main
+        if: ${{ inputs.push && github.ref != 'refs/heads/main' }}
+        run: |
+          echo "::error::Push is only allowed from main (this run is on $GITHUB_REF). Run it from main, or turn push off."
+          exit 1
+
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
           persist-credentials: false
@@ -59,14 +66,14 @@ jobs:
             'cd /app/services/headmaster-inference && for f in *.mjs; do case "$f" in *.test.mjs) ;; *) node --check "$f";; esac; done && echo relay-image-ok'
 
       - name: Log in to GHCR
-        if: ${{ inputs.push }}
+        if: ${{ inputs.push && github.ref == 'refs/heads/main' }}
         env:
           GHCR_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           GHCR_USER: ${{ github.actor }}
         run: printf '%s' "$GHCR_TOKEN" | docker login ghcr.io -u "$GHCR_USER" --password-stdin
 
       - name: Push and print the digest
-        if: ${{ inputs.push }}
+        if: ${{ inputs.push && github.ref == 'refs/heads/main' }}
         run: |
           docker push "$IMAGE:$TAG"
           {
