@@ -398,24 +398,29 @@ async function buildOpenClawManagedEnvForAgent(
 }
 
 /**
- * Managed-env entry that carries a Headmaster-managed runtime's relay key, so a
+ * Managed-env entries that carry a Headmaster-managed runtime's relay address and key, so a
  * container created before the key existed (or recreated with an older env)
- * still authenticates. Derived from the stored gateway key; never persisted.
+ * still authenticates. The key is derived from the stored gateway key; never persisted.
  *
  * @param {Object} row - Agent row with an encrypted `gateway_token`.
- * @returns {Object} `HEADMASTER_INFERENCE_KEY` entry, or empty when no gateway key is stored.
+ * @returns {Object} `HEADMASTER_INFERENCE_BASE_URL`, plus `HEADMASTER_INFERENCE_KEY` when a gateway key is stored.
  */
 function headmasterInferenceEnvFor(row = {}) {
-  if (!row?.gateway_token) return {};
-  const { decrypt } = require("./crypto");
   const {
     HEADMASTER_INFERENCE_KEY_ENV,
     deriveHeadmasterInferenceKey,
+    headmasterInferenceBaseUrl,
   } = require("../agent-runtime/lib/headmasterInference");
+  // The managed config pins `${HEADMASTER_INFERENCE_BASE_URL}`. A runtime that serves routed
+  // profiles resolves that ref against the profile's .env only (agent/secret_scope.py), so the
+  // container env alone leaves it as literal text and every model call fails.
+  const baseUrl = { HEADMASTER_INFERENCE_BASE_URL: headmasterInferenceBaseUrl() };
+  if (!row?.gateway_token) return baseUrl;
+  const { decrypt } = require("./crypto");
   const gatewayKey = decrypt(row.gateway_token);
   return gatewayKey
-    ? { [HEADMASTER_INFERENCE_KEY_ENV]: deriveHeadmasterInferenceKey(gatewayKey) }
-    : {};
+    ? { ...baseUrl, [HEADMASTER_INFERENCE_KEY_ENV]: deriveHeadmasterInferenceKey(gatewayKey) }
+    : baseUrl;
 }
 
 /**
