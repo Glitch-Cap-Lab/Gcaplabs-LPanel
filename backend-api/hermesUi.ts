@@ -662,6 +662,16 @@ async function runHermesPythonJson(agent, script, { timeout = 30000 } = {}) {
   try {
     return JSON.parse(raw);
   } catch (error) {
+    // The container output merges stderr into stdout, so Hermes notices
+    // (e.g. "managed settings were not saved") can precede the helper's JSON.
+    const jsonLine = raw.split("\n").reverse().find((line) => line.trimStart().startsWith("{"));
+    if (jsonLine) {
+      try {
+        return JSON.parse(jsonLine);
+      } catch {
+        // fall through to the error below
+      }
+    }
     const nextError = new Error(
       `Unexpected Hermes helper output: ${raw.slice(0, 400) || error.message}`,
     );

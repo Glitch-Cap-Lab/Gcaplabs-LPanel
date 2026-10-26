@@ -226,6 +226,21 @@ describe("Hermes helper execution", () => {
     expect(script).toContain("save_config(repaired)");
   });
 
+  it("reads the helper JSON when Hermes prints a notice on stderr first", async () => {
+    mockRunContainerCommand.mockResolvedValueOnce({
+      output:
+        "Note: 14 managed setting(s) were not saved (managed by your administrator).\n" +
+        JSON.stringify({ ok: true, mutated: false, configPath: "/opt/hermes/config.json" }),
+    });
+
+    const result = await repairHermesAgentConfig({
+      id: "agent-hermes-1",
+      container_id: "hermes-container-1",
+    });
+
+    expect(result).toEqual({ ok: true, mutated: false, configPath: "/opt/hermes/config.json" });
+  });
+
   it("persists model config through Hermes save_config and repairs surrogate pairs", async () => {
     mockRunContainerCommand.mockResolvedValueOnce({
       output: JSON.stringify({ ok: true }),
