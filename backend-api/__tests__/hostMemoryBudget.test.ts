@@ -6,7 +6,7 @@ const MB = 1024 ** 2;
 function dockerWith(runtimes) {
   return {
     listContainers: jest.fn().mockResolvedValue(
-      runtimes.map((r) => ({ Id: `c${r.agent}`, Labels: { "nora.agent.id": r.agent } })),
+      runtimes.map((r) => ({ Id: `c${r.agent}`, Labels: { "nora.agent.id": r.agent }, State: r.state || "running" })),
     ),
     getContainer: jest.fn((id) => ({
       inspect: jest.fn().mockResolvedValue({
@@ -39,6 +39,13 @@ describe("host memory budget", () => {
     process.env.NORA_HOST_MEMORY_BUDGET_MB = "4096";
     const docker = dockerWith([{ agent: "1", mb: 3072 }]);
     await expect(budget.assertHostMemoryBudget(docker, { agentId: "1", requestedMb: 4096 })).resolves.toBeUndefined();
+  });
+
+  it("stopped containers, like a release's kept previous container, reserve nothing", async () => {
+    process.env.NORA_HOST_MEMORY_BUDGET_MB = "4096";
+    const docker = dockerWith([{ agent: "1", mb: 3072, state: "exited" }, { agent: "2", mb: 3072, state: "exited" }, { agent: "3", mb: 3072 }]);
+    await expect(budget.assertHostMemoryBudget(docker, { agentId: "4", requestedMb: 1024 })).resolves.toBeUndefined();
+    await expect(budget.assertHostMemoryBudget(docker, { agentId: "4", requestedMb: 1025 })).rejects.toMatchObject({ details: { reservedMb: 3072 } });
   });
 
   it("create() stops before building anything when over budget", async () => {
