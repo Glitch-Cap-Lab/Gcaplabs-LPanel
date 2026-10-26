@@ -2,9 +2,10 @@
 // The Hermes runtime image new bots start on follows the newest finalized runtime release in
 // the account database (headmaster_current_runtime_image), so a fleet release does not leave
 // HERMES_DOCKER_IMAGE pointing at the old version. The env value stays the fallback when no
-// release is finalized or the account database cannot be reached. The provisioning bridge reads
-// the same RPC with the same cache time.
-const REFRESH_MS = 30_000;
+// release is finalized or the account database cannot be reached. The image changes only when a
+// release is finalized, and every poll counts against the account service's egress and log
+// quota (two services poll here), so it is refreshed every five minutes.
+const REFRESH_MS = 5 * 60_000;
 let current = null;
 let timer = null;
 
@@ -34,7 +35,7 @@ async function refreshCurrentRuntimeImage({ env = process.env, fetchImpl = globa
   return current;
 }
 
-/** Refresh once now and then every 30 seconds. Safe to call more than once. */
+/** Refresh once now and then every five minutes. Safe to call more than once. */
 function startCurrentRuntimeImagePoll(options) {
   if (timer || !config(options?.env)) return;
   void refreshCurrentRuntimeImage(options);
