@@ -35,6 +35,7 @@ const mockHermesProvisioner = {
 const mockContainerManager = {
   canDestroy: jest.fn(),
   destroy: jest.fn(),
+  isNameOnlyRuntimeAbsent: jest.fn(),
 };
 const mockWorkerOn = jest.fn();
 const mockRunProtectedReleaseJob = jest.fn();
@@ -194,6 +195,7 @@ beforeEach(() => {
     .mockReset()
     .mockImplementation((agent) => Boolean(agent?.container_id || agent?.container_name));
   mockContainerManager.destroy.mockReset().mockResolvedValue(undefined);
+  mockContainerManager.isNameOnlyRuntimeAbsent.mockReset().mockResolvedValue(false);
   delete process.env.KEY_STORAGE;
 });
 
@@ -974,6 +976,63 @@ describe("provisioner deployment lifecycle", () => {
 
     expect(mockContainerManager.destroy).not.toHaveBeenCalled();
     expect(queryable.query).not.toHaveBeenCalled();
+  });
+
+  it("continues a redeploy when a name-only Docker row has no container behind it", async () => {
+    mockContainerManager.canDestroy.mockReturnValueOnce(false);
+    mockContainerManager.isNameOnlyRuntimeAbsent.mockResolvedValueOnce(true);
+    const agentRow = {
+      id: "agent-refused-create",
+      name: "Greenwood",
+      user_id: "owner-1",
+      status: "deploying",
+      container_id: null,
+      container_name: "nora-hermes-greenwood",
+      host: null,
+      backend_type: "docker",
+      deploy_target: "docker",
+      execution_target_id: "docker",
+      runtime_family: "hermes",
+      sandbox_profile: "standard",
+    };
+    const queryable = {
+      query: jest.fn().mockResolvedValue({ rows: [{ ...agentRow }] }),
+    };
+
+    await expect(
+      prepareReplacementRuntime({
+        queryable,
+        agentId: agentRow.id,
+        agentRow,
+        name: agentRow.name,
+        jobData: {
+          replace_existing_runtime: true,
+          previous_container_id: null,
+          previous_container_name: "nora-hermes-greenwood",
+          previous_host: null,
+          previous_backend: "docker",
+          previous_runtime_family: "hermes",
+          previous_deploy_target: "docker",
+          previous_execution_target_id: "docker",
+          previous_sandbox_profile: "standard",
+        },
+        resolvedRuntimeFields: {
+          runtime_family: "hermes",
+          backend_type: "docker",
+          deploy_target: "docker",
+          execution_target_id: "docker",
+          sandbox_profile: "standard",
+        },
+        resolvedImage: "nora-hermes-agent:local",
+      }),
+    ).resolves.toEqual(expect.objectContaining({ replacement: true }));
+
+    expect(mockContainerManager.isNameOnlyRuntimeAbsent).toHaveBeenCalledWith(
+      expect.objectContaining({ container_id: null, container_name: "nora-hermes-greenwood" }),
+    );
+    expect(mockContainerManager.destroy).not.toHaveBeenCalled();
+    const [sql] = queryable.query.mock.calls[0];
+    expect(String(sql)).not.toMatch(/headmaster_memory_bank_id|external_id/);
   });
 
   it("destroys a Kubernetes runtime by deterministic name fallback when persisted ids are empty", async () => {

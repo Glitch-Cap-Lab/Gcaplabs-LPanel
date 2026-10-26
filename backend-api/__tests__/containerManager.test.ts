@@ -17,6 +17,7 @@ const mockHermesStatus = jest.fn();
 const mockHermesStats = jest.fn();
 const mockHermesLogs = jest.fn();
 const mockHermesExec = jest.fn();
+const mockHermesContainerExists = jest.fn();
 const mockK8sStart = jest.fn();
 const mockK8sStop = jest.fn();
 const mockK8sRestart = jest.fn();
@@ -57,6 +58,7 @@ jest.mock("../backends/hermes", () => {
     stats: mockHermesStats,
     logs: mockHermesLogs,
     exec: mockHermesExec,
+    containerExists: mockHermesContainerExists,
   }));
 });
 
@@ -678,6 +680,59 @@ describe("containerManager NemoClaw routing", () => {
         runtimeFamily: "openclaw",
       }),
     );
+  });
+
+  describe("isNameOnlyRuntimeAbsent", () => {
+    const nameOnly = {
+      id: "agent-refused-create",
+      runtime_family: "hermes",
+      backend_type: "docker",
+      deploy_target: "docker",
+      execution_target_id: "docker",
+      sandbox_profile: "standard",
+      container_id: null,
+      container_name: "nora-hermes-greenwood",
+    };
+
+    beforeEach(() => mockHermesContainerExists.mockReset());
+
+    it("is true when Docker has no container by that name", async () => {
+      mockHermesContainerExists.mockResolvedValue(false);
+      const containerManager = require("../containerManager");
+
+      await expect(containerManager.isNameOnlyRuntimeAbsent(nameOnly)).resolves.toBe(true);
+      expect(mockHermesContainerExists).toHaveBeenCalledWith("nora-hermes-greenwood");
+    });
+
+    it("is false when the named container still exists", async () => {
+      mockHermesContainerExists.mockResolvedValue(true);
+      const containerManager = require("../containerManager");
+
+      await expect(containerManager.isNameOnlyRuntimeAbsent(nameOnly)).resolves.toBe(false);
+    });
+
+    it("is false when Docker cannot be asked", async () => {
+      mockHermesContainerExists.mockRejectedValue(new Error("connect ECONNREFUSED"));
+      const containerManager = require("../containerManager");
+
+      await expect(containerManager.isNameOnlyRuntimeAbsent(nameOnly)).resolves.toBe(false);
+    });
+
+    it("is false when a container_id is set or the target is not local Docker", async () => {
+      const containerManager = require("../containerManager");
+
+      await expect(
+        containerManager.isNameOnlyRuntimeAbsent({ ...nameOnly, container_id: "abc123" }),
+      ).resolves.toBe(false);
+      await expect(
+        containerManager.isNameOnlyRuntimeAbsent({
+          ...nameOnly,
+          backend_type: "k8s",
+          deploy_target: "k8s",
+        }),
+      ).resolves.toBe(false);
+      expect(mockHermesContainerExists).not.toHaveBeenCalled();
+    });
   });
 
   it("uses container_name as a Kubernetes stop fallback when container_id was cleared", async () => {

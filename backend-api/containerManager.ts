@@ -559,6 +559,30 @@ module.exports = {
   },
 
   /**
+   * True only when Docker confirms that a name-only Docker row (container_name set,
+   * container_id empty) has no container behind it, e.g. the first create was refused
+   * before any container existed. Any other case, including a Docker error, is false,
+   * so a redeploy still fails closed when the answer is uncertain.
+   *
+   * @param {Object} agent - Agent row with a container_name and no container_id.
+   * @returns {Promise<boolean>} Whether the named container is confirmed absent.
+   */
+  async isNameOnlyRuntimeAbsent(agent) {
+    if (hasText(agent?.container_id) || !hasText(agent?.container_name)) return false;
+    if (resolveAgentBackendType(agent) !== "docker") return false;
+    try {
+      const backend = await backendForCleanup(agent);
+      if (typeof backend.containerExists !== "function") return false;
+      return !(await backend.containerExists(String(agent.container_name).trim()));
+    } catch (error) {
+      console.warn(
+        `[container-manager] Could not confirm ${agent.container_name} is absent: ${error.message}`,
+      );
+      return false;
+    }
+  },
+
+  /**
    * Return a stable not-running shape when an agent has no runtime identifier;
    * otherwise delegate to the selected backend and propagate its failures.
    *

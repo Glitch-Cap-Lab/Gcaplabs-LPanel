@@ -1165,6 +1165,23 @@ class DockerBackend extends ProvisionerBackend {
   }
 
   /**
+   * Report whether Docker knows a container by this name or id. Only a 404 counts as
+   * absent; any other Docker error is thrown so callers never mistake an unreachable
+   * daemon for a missing container.
+   * @param {string} nameOrId - Container name or id.
+   * @returns {Promise<boolean>} True when the container exists.
+   */
+  async containerExists(nameOrId) {
+    try {
+      await this.docker.getContainer(nameOrId).inspect();
+      return true;
+    } catch (error) {
+      if (isDockerNotFound(error)) return false;
+      throw error;
+    }
+  }
+
+  /**
    * Remove an agent's container and, unless the caller is replacing the runtime
    * in place, its Nora-managed named volumes.
    *
