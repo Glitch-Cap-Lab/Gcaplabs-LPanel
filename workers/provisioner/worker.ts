@@ -3277,7 +3277,19 @@ async function prepareReplacementRuntime({
   let previousRuntimeDestroyed = false;
   const hasPreviousRuntimeIdentity = Boolean(previousContainerId || previousContainerName);
   const canDestroyPreviousRuntime = containerManager.canDestroy(previousAgent);
-  if (hasPreviousRuntimeIdentity && !canDestroyPreviousRuntime) {
+  // A name with no id is what a create leaves behind when it failed before any container
+  // existed (memory budget refusal). With Docker confirming nothing is there, there is
+  // nothing to destroy and the redeploy continues.
+  const previousRuntimeAbsent =
+    hasPreviousRuntimeIdentity &&
+    !canDestroyPreviousRuntime &&
+    (await containerManager.isNameOnlyRuntimeAbsent(previousAgent));
+  if (previousRuntimeAbsent) {
+    console.log(
+      `[provisioner] Previous runtime ${previousContainerName} for agent ${agentId} does not exist in Docker; nothing to destroy`,
+    );
+  }
+  if (hasPreviousRuntimeIdentity && !canDestroyPreviousRuntime && !previousRuntimeAbsent) {
     throw replacementRuntimeError(
       `Previous runtime for agent ${agentId} has persisted identity but cannot be destroyed safely`,
       "REPLACEMENT_RUNTIME_DESTROY_UNAVAILABLE",
