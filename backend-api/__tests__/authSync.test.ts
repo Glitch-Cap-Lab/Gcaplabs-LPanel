@@ -230,6 +230,8 @@ describe("auth sync", () => {
       HEADMASTER_MEMORY_BANK_ID: "bank",
       HEADMASTER_MEMORY_GATEWAY_URL: "http://memory:8888",
       HEADMASTER_INFERENCE_KEY: deriveHeadmasterInferenceKey(gatewayKey),
+      // In the .env block too: a routed-profile gateway never reads the container env for this ref.
+      HEADMASTER_INFERENCE_BASE_URL: "https://inference.gcaplabs.com/v1",
       GITHUB_TOKEN: "fixture",
     };
     const first = await buildHermesManagedEnvForAgent("user", "agent");
