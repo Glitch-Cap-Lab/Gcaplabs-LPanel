@@ -118,6 +118,8 @@ async function runProtectedRuntimeRelease({ manifest: input, action = "apply", a
     await state.commit(manifest, candidate.Id);
     // Account binding metadata is a separate owner; this slice cannot claim fleet/publication success.
     await record("external_metadata_pending", { lp_committed: true, lp_routing_tuple_preserved: true, external_binding_unchanged: null });
+    // The release is done; old snapshots going or staying is not its outcome, so a failure here is not one.
+    await adapter.pruneStages(target, names).catch(() => {});
     return r;
   } catch (error) {
     if (adapter.signal?.aborted || ["PROTECTED_RELEASE_DOCKER_TIMEOUT", "PROTECTED_RELEASE_JOURNAL_UNCERTAIN", "ABORT_ERR", "ECONNRESET", "EPIPE", "ETIMEDOUT"].includes(error?.code)) {

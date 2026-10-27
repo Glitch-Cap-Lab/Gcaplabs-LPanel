@@ -6,12 +6,16 @@ const path = require("path");
 const { envFingerprint, expectedCandidateEnv, digest, refuse } = require("./protectedReleaseManifest");
 const { demuxDockerExecStream } = require("./backends/dockerExecStream");
 const { createHash } = require("crypto");
+const { readFileSync } = require("fs");
 const ROOT = "/opt/data";
 const CONFIG_BYTES = 16 * 1024 * 1024;
 const INSTALLS_GC_THRESHOLD_BYTES = 1024 ** 3;
 const INSTALLS_GC_TIMEOUT_MS = 10 * 60_000;
 // Existing retained-image Python, not a worker dependency. No shell or caller-supplied program text.
 const MOVE_AND_SYNC = "import os,sys\nsrc,dst=sys.argv[1:]\nos.rename(src,dst)\nfor parent in sorted({os.path.dirname(src),os.path.dirname(dst)}):\n fd=os.open(parent,os.O_RDONLY|os.O_DIRECTORY)\n try: os.fsync(fd)\n finally: os.close(fd)";
+// Retention of earlier releases' stage folders. A file of its own so the one-time clean-up on the
+// server runs the very same program (server lines pipe it into python).
+const PRUNE_STAGES = readFileSync(path.join(__dirname, "protectedReleasePrune.py"), "utf8");
 const PUBLISH_RECEIPT = [
   "import hashlib,json,os,re,signal,stat,sys",
   "signal.alarm(60)",
@@ -339,7 +343,7 @@ class ProtectedReleaseDocker {
     }
   }
   async maintenance(t, n, kind, args, input = null) {
-    if (!["move", "receipt"].includes(kind)) throw refuse("PROTECTED_RELEASE_MAINTENANCE_INVALID");
+    if (!["move", "receipt", "prune"].includes(kind)) throw refuse("PROTECTED_RELEASE_MAINTENANCE_INVALID");
     await this.assertNoMaintenance(n);
     // dockerode 5 Image.inspect omits abortSignal; use its same modem/endpoint with cancellation.
     const image = await this.inspectImage(t.image_id);
@@ -354,7 +358,7 @@ class ProtectedReleaseDocker {
     for (const key of ["LD_PRELOAD", "LD_LIBRARY_PATH", "PYTHONPATH", "PYTHONHOME"]) environment.set(key, "");
     for (const [key, value] of Object.entries({ HOME: "/", PATH: "/usr/bin:/bin", LANG: "C.UTF-8", PYTHONNOUSERSITE: "1" })) environment.set(key, value);
     const env = [...environment].map(([key, value]) => `${key}=${value}`);
-    const argv = ["-I", "-S", "-c", kind === "move" ? MOVE_AND_SYNC : PUBLISH_RECEIPT, ...args];
+    const argv = ["-I", "-S", "-c", { move: MOVE_AND_SYNC, receipt: PUBLISH_RECEIPT, prune: PRUNE_STAGES }[kind], ...args];
     // A stopped container cannot exec. Image/bot startup hooks and writable Python search paths are ignored.
     const helper = await this.call(signal => this.docker.createContainer({ abortSignal: signal, Image: t.image_id, User: "0:0", Entrypoint: ["/opt/hermes/.venv/bin/python"],
       Cmd: argv, Env: env, WorkingDir: "/", Healthcheck: { Test: ["NONE"] }, Tty: false,
@@ -374,13 +378,15 @@ class ProtectedReleaseDocker {
     try {
       await this.call(signal => helper.start({ abortSignal: signal }));
       if (attached) attached.end(input);
-      result = await this.call(signal => helper.wait({ abortSignal: signal }));
+      result = await this.call(signal => helper.wait({ abortSignal: signal }), kind === "prune" ? this.archiveTimeoutMs : this.probeTimeoutMs);
     } catch (error) {
       await boundedDockerCall(signal => helper.stop({ t: 5, abortSignal: signal }), Math.min(5000, this.probeTimeoutMs)).catch(() => {});
       throw error;
     } finally { attached?.destroy(); }
     if (result.StatusCode !== 0) throw refuse("PROTECTED_RELEASE_RESTORE_FAILED");
-    // Retain maintenance containers too; cleanup is an independent owner action.
+    // Retain maintenance containers too; cleanup is an independent owner action. A prune leaves no
+    // evidence worth keeping and runs after every release, so it would pile up one per release.
+    if (kind === "prune") await this.call(signal => helper.remove({ abortSignal: signal })).catch(() => {});
   }
   async restore(t, n, staged) {
     await this.checkStageRoot(t, n);
@@ -405,6 +411,12 @@ class ProtectedReleaseDocker {
     for (const root of staged.roots) restored.push(...await this.read(c, `${ROOT}/${root}`, root, { maxBytes: MAX_BYTES, hashOnly: true }));
     if (digest(inventory(restored)) !== staged.inventory_sha256) throw refuse("PROTECTED_RELEASE_RESTORE_FAILED");
   }
+  /**
+   * After a release committed: drop what earlier releases left in the volume, keeping the newest two
+   * snapshots (this release and the last good one) and clearing failed-install leftovers. Only
+   * .protected-release-* folders are touched, so it is safe beside the running candidate.
+   */
+  async pruneStages(t, n, keep = 2) { await this.maintenance(t, n, "prune", [ROOT, n.stage, String(keep), "0", "1"]); }
   async retainFailed(id, n) { const c = this.docker.getContainer(id); if ((await this.inspect(c)).Name !== `/${n.old}-failed`) await this.call(signal => c.rename({ name: `${n.old}-failed`, abortSignal: signal })); }
   async restoreName(t, n) { const old = await this.optionalInspect(n.old); if (old) await this.call(signal => this.docker.getContainer(n.old).rename({ name: t.container_name, abortSignal: signal })); }
 }

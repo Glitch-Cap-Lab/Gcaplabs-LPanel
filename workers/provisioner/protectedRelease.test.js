@@ -35,7 +35,7 @@ async function fixture(t, options = {}) {
   const saved = options.resume ? JSON.parse(await fs.readFile(path.join(root, ".fake-docker.json"), "utf8")) : null;
   const events = saved?.events || [], containers = new Map(saved?.containers || []), metadata = new Map(saved?.metadata || []);
   const faults = {};
-  const attachedInputs = new Map(), maintenanceTasks = new Map();
+  const attachedInputs = new Map(), maintenanceTasks = new Map(), prunes = [];
   let lastReceipt = saved?.lastReceipt || null;
   const contract = Buffer.from("canonical contract"), lock = Buffer.from("locked dependencies");
   const runtime = { container_id: "old", container_name: "hm-owned", host: "hm-owned", backend_type: "docker", runtime_family: "hermes", deploy_target: "docker", execution_target_id: "docker", sandbox_profile: "standard" };
@@ -87,6 +87,13 @@ async function fixture(t, options = {}) {
           const c = get(); events.push(`start:${c.Id}`); c.State.Running = true;
           if (c.Config.Labels?.["headmaster.release.maintenance"]) {
             const execute = async () => {
+            if (c.Config.Labels["headmaster.release.maintenance.kind"] === "prune") {
+              // The real retention program against the fake volume; ROOT and the owner uid are the only substitutions.
+              const [, , , program, , current, keep, , apply] = c.Config.Cmd;
+              const run = require("node:child_process").spawnSync("python3", ["-I", "-S", "-c", program, root, current, keep, String(process.getuid()), apply], { encoding: "utf8" });
+              events.push("prune"); if (run.status === 0) prunes.push(JSON.parse(run.stdout));
+              c.exit = run.status; c.State.Running = false; persist(); return;
+            }
             const [isolated, noSite, flag, program, source, destination, expectedHash] = c.Config.Cmd;
             assert.equal(isolated, "-I"); assert.equal(noSite, "-S"); assert.equal(flag, "-c"); assert.match(program, /os\.fsync\(/);
             assert.deepEqual(c.Config.Entrypoint, ["/opt/hermes/.venv/bin/python"]); assert.equal(c.Image, image(1));
@@ -145,6 +152,7 @@ async function fixture(t, options = {}) {
           if (faults.helperWait) { opts.abortSignal.addEventListener("abort", () => events.push("abort:helper-wait")); return new Promise(() => {}); }
           await maintenanceTasks.get(get().Id); return { StatusCode: get().exit || 0 };
         },
+        async remove() { const c = get(); events.push(`remove:${c.Id}`); containers.delete(c.Id); persist(); },
         async rename({ name }) { const c = get(); events.push(`rename:${c.Id}`); c.Name = `/${name}`; persist(); if (options.killAfterRestoreName && c.Id === "old" && name === "hm-owned") process.exit(27); },
         async getArchive({ path: p }) {
           if (p === "/etc/passwd") return require("node:stream").Readable.from(await packArchive([{ name: "passwd", type: "file", mode: 0o644, content: Buffer.from(`hermes:x:${faults.uid || (faults.candidateUid && get().Id === "candidate") ? 10001 : 10000}:10000::/opt/data:/bin/sh\n`) }]));
@@ -177,7 +185,8 @@ async function fixture(t, options = {}) {
     },
     async createContainer(cfg) {
       if (faults.helperCreate && cfg.Labels?.["headmaster.release.maintenance"]) { cfg.abortSignal.addEventListener("abort", () => events.push("abort:helper-create")); return new Promise(() => {}); }
-      const id = cfg.Labels?.["headmaster.release.maintenance"] ? `helper-${containers.size}` : "candidate";
+      let helper = containers.size; while (containers.has(`helper-${helper}`)) helper += 1; // a removed prune helper frees a number
+      const id = cfg.Labels?.["headmaster.release.maintenance"] ? `helper-${helper}` : "candidate";
       const c = { ...clone(old), Id: id, Name: `/${cfg.name || id}`, Image: cfg.Image, Config: clone(cfg), HostConfig: clone(cfg.HostConfig), State: { Running: false } };
       // A newer daemon fills unset HostConfig fields with zero values on create.
       if (id === "candidate" && faults.daemonDefaults) Object.assign(c.HostConfig, { OomKillDisable: false, CpuCount: 0, Devices: [] });
@@ -195,7 +204,7 @@ async function fixture(t, options = {}) {
   const receipts = [];
   const run = options => runProtectedRuntimeRelease({ manifest, adapter, state, receipt: saved?.lastReceipt,
     saveReceipt: async r => { lastReceipt = clone(r); persist(); receipts.push(clone(r)); if (faults.queue && r.phase === "candidate_created") throw new Error("Redis outage"); }, ...options });
-  return { manifest, root, adapter, state, docker, backend, events, faults, run, receipts, row: () => row, setRow: value => { row = value; persist(); } };
+  return { manifest, root, adapter, state, docker, backend, events, faults, run, receipts, prunes, row: () => row, setRow: value => { row = value; persist(); } };
 }
 
 // A query adapter exercises the actual maintained SQL/CAS implementation without a live database.
@@ -607,6 +616,55 @@ test("real staged archives commit only LP state and retain explicit external met
   assert.equal(await fs.readFile(path.join(f.root, "state.db"), "utf8"), "new chat must survive");
   assert.ok(f.events.indexOf("stop:old") < f.events.indexOf("create:candidate"));
   await assert.rejects(f.run(), /RECOVERY_REQUIRED/);
+});
+
+// Stage folders of earlier releases, as an older worker left them: oldest first.
+async function earlierReleases(f, phases) {
+  const names = [];
+  for (const [index, [phase, entries]] of phases.entries()) {
+    const name = `.protected-release-${String(index + 1).padStart(64, "0")}`, dir = path.join(f.root, name);
+    await fs.mkdir(dir);
+    for (const entry of entries) { await fs.mkdir(path.join(dir, entry, "installs"), { recursive: true }); await fs.writeFile(path.join(dir, entry, "installs/blob"), "old copy"); }
+    await fs.writeFile(path.join(dir, "receipt.json"), JSON.stringify({ release_id: name.slice(19), phase }));
+    const when = new Date(Date.UTC(2026, 9, index + 1)); await fs.utimes(path.join(dir, "receipt.json"), when, when);
+    names.push(name);
+  }
+  return names;
+}
+const has = (f, name, entry) => fs.stat(path.join(f.root, name, entry)).then(() => true, () => false);
+
+test("a committed release keeps this snapshot and the last good one, and clears older snapshots and failed installs", async t => {
+  const f = await fixture(t);
+  const [oldest, middle, lastGood, failedAttempt, unresolved] = await earlierReleases(f, [
+    ["external_metadata_pending", ["before"]], ["external_metadata_pending", ["before"]], ["external_metadata_pending", ["before", "failed-installs"]],
+    ["rolled_back", ["failed-installs", "failed-config.yaml"]], ["recovery_required", ["before", "failed-installs"]]]);
+  const result = await f.run();
+  assert.equal(result.phase, "external_metadata_pending");
+  const current = `.protected-release-${digest(f.manifest)}`;
+  assert.ok(await has(f, current, "before/installs"), "the release just made keeps its snapshot");
+  assert.ok(await has(f, lastGood, "before/installs"), "the last good snapshot stays");
+  assert.equal(await has(f, lastGood, "failed-installs"), false);
+  for (const name of [oldest, middle]) { assert.equal(await has(f, name, "before"), false); assert.ok(await has(f, name, "receipt.json")); }
+  assert.deepEqual(await fs.readdir(path.join(f.root, failedAttempt)), ["receipt.json"]);
+  assert.ok(await has(f, unresolved, "before/installs") && await has(f, unresolved, "failed-installs"), "a stage that may be recovered is not touched");
+  assert.equal(await fs.readFile(path.join(f.root, "state.db"), "utf8"), "new chat must survive");
+  assert.equal(f.prunes.length, 1); assert.equal(f.prunes[0].current, current); assert.equal(f.prunes[0].keep, 2);
+  assert.ok(f.events.indexOf("prune") > f.events.indexOf("commit"), "retention runs only after the commit");
+  assert.ok(!f.events.includes("remove:old"), "only the prune helper is removed, never the retained runtime");
+});
+
+test("a release that fails prunes nothing", async t => {
+  const f = await fixture(t); f.faults.health = true;
+  const names = await earlierReleases(f, [["external_metadata_pending", ["before"]], ["external_metadata_pending", ["before"]], ["external_metadata_pending", ["before"]]]);
+  await assert.rejects(f.run(), /PROTECTED_RELEASE_FAILED/);
+  assert.equal(f.prunes.length, 0);
+  for (const name of names) assert.ok(await has(f, name, "before/installs"));
+});
+
+test("a retention failure after the commit does not fail the release", async t => {
+  const f = await fixture(t); f.adapter.pruneStages = async () => { throw new Error("docker went away"); };
+  assert.equal((await f.run()).phase, "external_metadata_pending");
+  assert.equal(f.row().status, "running");
 });
 
 for (const fault of ["health", "commit", "queue"]) test(`${fault} failure restores verified installs before old start and retains failed bytes`, async t => {
