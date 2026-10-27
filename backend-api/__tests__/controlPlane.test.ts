@@ -1840,6 +1840,55 @@ describe("Hermes dashboard embed", () => {
     expect(envCall[1].headers).not.toHaveProperty("Authorization");
   });
 
+  it("refuses Hermes embed cookies that do not carry a live login session", async () => {
+    const sign = (claims) =>
+      jwt.sign({ id: "user-1", agentId: "agent-1", scope: "hermes-embed", ...claims }, JWT_SECRET, {
+        expiresIn: "15m",
+        algorithm: "HS256",
+      });
+    const expiredLogin = { id: "user-1", role: "user", exp: Math.floor(Date.now() / 1000) - 1 };
+    for (const cookie of [sign({}), sign({ session: expiredLogin })]) {
+      const res = await request(app)
+        .get("/agents/agent-1/hermes-ui/embed/api/status")
+        .set("Host", "nora.test")
+        .set("Cookie", `__nora_hermes_embed_agent-1=${cookie}`);
+      expect(res.status).toBe(401);
+    }
+    expect(mockDb.query).not.toHaveBeenCalled();
+    expect(global.fetch).not.toHaveBeenCalled();
+  });
+
+  it("binds the minted Hermes embed cookie to the login that opened it", async () => {
+    const agentRow = {
+      effective_role: "owner",
+      host: "10.0.0.40",
+      runtime_host: "10.0.0.40",
+      runtime_port: 8642,
+      runtime_family: "hermes",
+      backend_type: "docker",
+      status: "running",
+    };
+    mockDb.query.mockResolvedValue({ rows: [agentRow] });
+    global.fetch.mockResolvedValueOnce({
+      ok: true,
+      status: 200,
+      headers: new Headers({ "content-type": "text/html; charset=utf-8" }),
+      text: async () => "<html><head></head><body>ok</body></html>",
+    });
+
+    const res = await request(app)
+      .get(`/agents/agent-1/hermes-ui/embed?token=${encodeURIComponent(token)}`)
+      .set("Host", "nora.test")
+      .set("Accept", "text/html");
+
+    expect(res.status).toBe(200);
+    const cookie = res.headers["set-cookie"].find((value) =>
+      value.startsWith("__nora_hermes_embed_agent-1="),
+    );
+    expect(jwt.verify(cookie.split(";")[0].split("=")[1], JWT_SECRET).session)
+      .toMatchObject({ id: "user-1" });
+  });
+
   it("forwards protected dashboard writes through the embed session cookie", async () => {
     const agentClient = request.agent(app);
     mockDb.query

@@ -599,16 +599,16 @@ async function resolveEmbedAccess(
     return null;
   }
 
-  if (scope === "gateway-embed") {
-    const verdict = await checkGatewayEmbedSession({ id: userId, session: loginSession });
-    if (!verdict.ok) {
-      res
-        .status(verdict.status)
-        .send(verdict.status === 503 ? "Session check unavailable" : "Session has been revoked");
-      return null;
-    }
-    loginSession = verdict.actor;
+  // Both embed scopes carry the originating login so logout, password change
+  // and admin sign-out end them before the cookie expires.
+  const verdict = await checkGatewayEmbedSession({ id: userId, session: loginSession });
+  if (!verdict.ok) {
+    res
+      .status(verdict.status)
+      .send(verdict.status === 503 ? "Session check unavailable" : "Session has been revoked");
+    return null;
   }
+  loginSession = verdict.actor;
 
   const agent = await lookupAgent(agentId, userId);
   if (!agent) {
@@ -647,7 +647,7 @@ async function resolveEmbedAccess(
         id: userId,
         agentId,
         scope,
-        ...(scope === "gateway-embed" ? { session: loginSession } : {}),
+        session: loginSession,
       },
       process.env.JWT_SECRET,
       { expiresIn: Math.floor(EMBED_SESSION_TTL_MS / 1000), algorithm: "HS256" },
