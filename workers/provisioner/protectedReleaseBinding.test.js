@@ -89,6 +89,7 @@ test('shipped /app layout loads exact shared source with directly locked product
   const root=await fs.mkdtemp(path.join(os.tmpdir(),'protected-release-packaged-'));t.after(()=>fs.rm(root,{recursive:true,force:true}));
   const app=path.join(root,'app'),shared=path.join(app,'protected-release');await fs.mkdir(path.join(shared,'backends'),{recursive:true});
   for(const name of ['protectedReleaseStatus','protectedReleaseManifest','protectedReleaseArchive','protectedReleaseDocker'])await fs.copyFile(path.join(__dirname,`${name}.ts`),path.join(shared,`${name}.ts`));
+  await fs.copyFile(path.join(__dirname,'protectedReleasePrune.py'),path.join(shared,'protectedReleasePrune.py'));
   await fs.copyFile(path.join(__dirname,'backends/dockerExecStream.ts'),path.join(shared,'backends/dockerExecStream.ts'));
   await fs.copyFile(path.resolve(__dirname,'../../backend-api/protectedReleaseStatusRoute.ts'),path.join(app,'protectedReleaseStatusRoute.ts'));
   const pkg=backendRequire('./package.json'),lock=backendRequire('./package-lock.json');

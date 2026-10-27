@@ -231,6 +231,18 @@ Partial moves, lost create/start acknowledgements and restored-name restarts
 are reconciled from server-owned receipts. An unprovable restore leaves the
 old runtime stopped and requires explicit recovery. Maintenance containers are
 retained; cleanup requires a separate scoped owner action.
+
+Stage folders are not kept forever. Each release leaves `.protected-release-<id>/`
+in the bot's data volume (the `before` copy of the install, 4 to 6 GB, and after a
+restore `failed-installs`). Once a release has committed, one more helper runs
+`protectedReleasePrune.py` (same isolation as the others; its container is removed
+afterwards) and keeps the newest two snapshots, this release and the last good one;
+older committed stages lose their `before`, `failed-*` leftovers go from every
+judged stage, and a rolled-back attempt keeps only its `receipt.json`. A stage whose
+receipt is in any other phase (it may still be recovered), a missing or unreadable
+receipt, and receipts themselves are never touched. A retention failure never fails
+the release. The same file, piped into the bot image's Python, is the one-time clean-up
+of existing volumes (`apply=0` prints the dry-run listing).
 Private helper image/create/inspect/attach/start/wait calls have deadlines and
 transport cancellation; uncertain wait cleanup has a separate maximum five-second
 stop budget. A nonresponsive helper cannot make its cleanup wait hold the caller
